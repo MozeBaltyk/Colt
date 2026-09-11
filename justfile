@@ -34,12 +34,13 @@ _cmd command:
         bash /workspace/scripts/{{ command }}; \
     fi
 
-# ── Development — cmd/simpl-inventory + internal/ ─────────────────
+# ── Development — cmd/colt + internal/ ────────────────────────────
 
-# Build the binary. [This is just an example]
+# Build the binary.
 [group('Development')]
 compile:
-    @CGO_ENABLED=0 go build -buildvcs=false -o bin/example ./cmd/example
+    @mkdir -p bin
+    @CGO_ENABLED=0 go build -buildvcs=false -o bin/colt ./cmd/colt
 
 # Run check the developer/support environment.
 [group('Development')]
@@ -49,7 +50,6 @@ test:
 # Run every active deterministic BDD scenario (local fixtures only).
 [group('Development')]
 test-bdd:
-    
 
 # Verify all CLI tools are present in the EE image. Presence check only: runs
 # the image with a read-only workspace and no Kubernetes credential mount.

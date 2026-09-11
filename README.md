@@ -13,8 +13,23 @@ The first MVP configures and authenticates GitHub.com, GitLab.com, and
 self-hosted GitLab providers, then initializes a blank project:
 
 ```text
+colt auth login <github|gitlab> <alias> \
+  --namespace <namespace> --git-name <name> --git-email <email> \
+  [--host <host>] [--base-url <https-url>] [--visibility <visibility>] \
+  [--token-env <environment-variable>] [--default] [--replace]
+colt auth status
 colt init <project> [--local] [--provider <alias>]
 ```
+
+Configuration uses Go's `os.UserConfigDir()`. On Linux, this is
+`$XDG_CONFIG_HOME/colt/config.yaml` when `XDG_CONFIG_HOME` is set, otherwise
+`~/.config/colt/config.yaml`. `COLT_CONFIG` overrides the complete path. Provider
+tokens remain in the referenced environment variables and are never written
+there.
+
+`--namespace` is the repository owner: a GitHub username or organization (for
+example `octocat` or `acme`) or a GitLab group/subgroup full path (for example
+`platform/tools`).
 
 Colt initializes Git, applies the selected provider's repository-local identity,
 and creates an initial commit. Unless `--local` is used, it creates the remote

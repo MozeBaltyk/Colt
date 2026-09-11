@@ -2,9 +2,9 @@ Feature: Provider configuration and authentication
   Provider credentials are validated without storing or exposing token values.
 
   @CORE-PROVIDER-001 @CORE-PROVIDER-002 @CORE-CREDENTIAL-001
-  Scenario Outline: Configure and authenticate a supported provider
+  Scenario Outline: Log in to a supported provider
     Given the environment variable "<token_env>" contains a valid token
-    When I add a <type> provider named "<alias>" for host "<host>" and namespace "<namespace>" using token_env "<token_env>"
+    When I log in to a <type> provider named "<alias>" for host "<host>" and namespace "<namespace>" using token_env "<token_env>"
     Then Colt authenticates directly with "<host>"
     And the provider "<alias>" is configured with its visibility and Git identity
 
@@ -18,14 +18,14 @@ Feature: Provider configuration and authentication
   Scenario: Authentication failure preserves prior configuration
     Given provider "work" has an existing valid configuration
     And its referenced token is invalid
-    When I try to update and authenticate provider "work"
+    When I run `colt auth login gitlab work --replace` with the new settings
     Then the command fails with an authentication error
     And the prior provider configuration is unchanged
 
   @CORE-PROVIDER-001
   Scenario: Provider aliases are unique
     Given provider "work" is already configured
-    When I try to add another provider named "work"
+    When I try to log in to another provider named "work"
     Then the command fails with a duplicate alias error
     And the existing provider configuration is unchanged
 
@@ -35,6 +35,24 @@ Feature: Provider configuration and authentication
     When Colt authenticates the provider
     Then the request uses the configured self-hosted GitLab base URL
     And no request is sent to GitLab.com
+
+  @CORE-PROVIDER-005 @CORE-CREDENTIAL-002
+  Scenario: Show configured provider status offline in alias order
+    Given providers "work" and "personal" are configured out of alias order
+    And their credential environment variables are unset
+    When I run `colt auth status`
+    Then the command succeeds
+    And status shows providers deterministically in alias order as "personal" then "work"
+    And each provider shows its alias, type, host, namespace, and default status
+    And no credentials are read or displayed
+    And no provider or native Git operation is invoked
+
+  @CORE-PROVIDER-005
+  Scenario: Show status for an empty provider configuration
+    Given no providers are configured
+    When I run `colt auth status`
+    Then the command succeeds with a clear no-providers result
+    And no provider or native Git operation is invoked
 
   @CORE-CREDENTIAL-001 @CORE-CREDENTIAL-002
   Scenario: Resolve a token by environment reference and redact it

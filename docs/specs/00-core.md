@@ -8,7 +8,8 @@ described in RFC 2119 and RFC 8174 when, and only when, capitalized.
 
 - **Provider:** a configured hosting integration, identified by a unique alias.
 - **Account:** the authenticated provider principal.
-- **Namespace:** the provider-independent owner scope containing repositories.
+- **Namespace:** the repository owner: a GitHub username or organization, or a
+  GitLab group or subgroup/full path.
 - **Identity:** repository-local Git `user.name` and `user.email`.
 - **Defaults:** provider- or namespace-associated choices such as visibility.
 - **Project:** a repository being initialized or managed by Colt.
@@ -26,18 +27,23 @@ described in RFC 2119 and RFC 8174 when, and only when, capitalized.
 The active MVP provides provider setup through:
 
 ```text
-colt auth add <github|gitlab> <alias>
+colt auth login <github|gitlab> <alias> [--replace]
+colt auth status
 ```
 
-Storage shape is intentionally unspecified. A single structure may hold these
-logically separate values during the MVP.
+Configuration **MUST** use `os.UserConfigDir()` with `colt/config.yaml` appended;
+on Linux this is `$XDG_CONFIG_HOME/colt/config.yaml` when `XDG_CONFIG_HOME` is
+set, otherwise `~/.config/colt/config.yaml`. `COLT_CONFIG` **MUST** override the
+complete path. Storage shape is intentionally unspecified. A single structure
+may hold these logically separate values during the MVP.
 
 | ID | Requirement | Verification |
 | --- | --- | --- |
 | `CORE-PROVIDER-001` | Colt **MUST** configure GitHub.com, GitLab.com, and self-hosted GitLab. Each provider **MUST** have a unique alias, type, host, namespace, default visibility, identity name, identity email, and environment-based credential source. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
-| `CORE-PROVIDER-002` | `colt auth add` **MUST** validate credentials directly against the configured host before reporting success and **MUST** preserve the prior configuration on failure. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
+| `CORE-PROVIDER-002` | `colt auth login` **MUST** validate credentials directly against the configured host before reporting success. An existing alias **MUST** require explicit `--replace`, and replacement **MUST** preserve the prior configuration on validation or save failure. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
 | `CORE-PROVIDER-003` | Self-hosted GitLab **MUST** use its configured base URL for authentication and later provider operations. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
 | `CORE-PROVIDER-004` | Provider API endpoints **MUST** use HTTPS, and Colt **MUST NOT** forward credentials across a redirect to another host. | Security integration test. |
+| `CORE-PROVIDER-005` | `colt auth status` **MUST** show configured providers deterministically by alias with each provider's alias, type, host, namespace, and default status. An empty configuration **MUST** succeed with a clear no-providers result. Status **MUST** be read-only and offline, **MUST NOT** require or read credentials, and **MUST NOT** invoke provider or native Git operations. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
 
 An illustrative configuration may use `token_env` without prescribing the full
 configuration schema:

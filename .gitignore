@@ -1,3 +1,4 @@
 # Local workflow scratch — never committed.
 .local/**
 .local/WORKFLOW_STATE.md
+bin/
