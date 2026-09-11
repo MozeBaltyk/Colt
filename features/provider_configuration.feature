@@ -40,12 +40,34 @@ Feature: Provider configuration and authentication
   Scenario: Show configured provider status offline in alias order
     Given providers "work" and "personal" are configured out of alias order
     And their credential environment variables are unset
-    When I run `colt auth status`
+    When I run `colt auth status --offline`
     Then the command succeeds
     And status shows providers deterministically in alias order as "personal" then "work"
     And each provider shows its alias, type, host, namespace, and default status
     And no credentials are read or displayed
     And no provider or native Git operation is invoked
+
+  @CORE-PROVIDER-005
+  Scenario: Show provider status with live connection check by default
+    Given provider "work" is configured with a valid token
+    When I run `colt auth status`
+    Then the command succeeds
+    And status shows the authenticated account and connection state
+
+  @CORE-PROVIDER-005 @CORE-CREDENTIAL-003
+  Scenario: Show credentials missing state when token is unset
+    Given provider "work" is configured with token_env set to an unset variable
+    When I run `colt auth status`
+    Then the command succeeds
+    And status shows "credentials missing" for the provider
+
+  @CORE-PROVIDER-004
+  Scenario: Redirect to another host never receives credentials
+    Given a provider is configured with a host that redirects to a different host
+    And a valid token is available
+    When authentication is attempted against the provider
+    Then the redirect target never receives the credentials
+    And the command fails with a redirect refusal error
 
   @CORE-PROVIDER-005
   Scenario: Show status for an empty provider configuration

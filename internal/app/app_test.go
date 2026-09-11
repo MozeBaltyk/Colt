@@ -46,7 +46,7 @@ func TestAuthHelpUsesLoginAndStatus(t *testing.T) {
 	}
 	for _, want := range []string{
 		"login", "status", "Configuration is stored in the OS user configuration directory",
-		"Show configured providers (offline)", "$XDG_CONFIG_HOME/colt/config.yaml",
+		"Show configured providers", "$XDG_CONFIG_HOME/colt/config.yaml",
 		"~/.config/colt/config.yaml", "COLT_CONFIG overrides the complete path",
 	} {
 		if !strings.Contains(authHelp, want) {
@@ -353,20 +353,62 @@ func TestCORE_PROVIDER_005CORE_CREDENTIAL_002ProviderStatusOfflineAndUnchanged(t
 	before, _ := os.ReadFile(path)
 	runner := &fakeGit{}
 	a := &App{ConfigPath: path, Git: runner, NewClient: func(config.Provider, string) (provider.Client, error) {
-		t.Fatal("list called provider client")
+		t.Fatal("provider client called in offline mode")
 		return nil, nil
 	}}
-	output, err := execute(t, a, "auth", "status")
+	output, err := execute(t, a, "auth", "status", "--offline")
 	after, _ := os.ReadFile(path)
-	want := "alias=personal type=github host=github.com namespace=octocat default=true\n" +
-		"alias=work type=gitlab host=gitlab.example namespace=platform/team default=false\n"
+	want := "personal (default)\n  GitHub · github.com\n  Namespace:   octocat\n  Git name:    Private Name\n  Git email:   private@example.com\n  Connection:  not checked\nwork\n  GitLab · gitlab.example\n  Namespace:   platform/team\n  Git name:    Work Secret\n  Git email:   work-secret@example.com\n  Connection:  not checked\n"
 	if err != nil || output != want || len(runner.calls) != 0 || !bytes.Equal(before, after) {
 		t.Fatalf("error=%v output=%q git calls=%v config changed=%t", err, output, runner.calls, !bytes.Equal(before, after))
 	}
-	for _, omitted := range []string{"private-api", "Private Name", "private@example.com", "Work Secret", "work-secret@example.com", "UNSET_PERSONAL_TOKEN", "UNSET_WORK_TOKEN", "public", "internal"} {
+	for _, omitted := range []string{"UNSET_PERSONAL_TOKEN", "UNSET_WORK_TOKEN", "private-api", "public", "internal"} {
 		if strings.Contains(output, omitted) {
 			t.Fatalf("output %q disclosed %q", output, omitted)
 		}
+	}
+}
+
+func TestCORE_PROVIDER_005AuthStatusOnlineShowsAccountAndConnection(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	p := appProvider()
+	p.Default = true
+	if err := config.Save(configPath, config.Config{Providers: map[string]config.Provider{"work": p}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("COLT_TEST_TOKEN", "test-secret-token")
+	a := &App{ConfigPath: configPath, WorkDir: root, Git: &fakeGit{}, NewClient: func(config.Provider, string) (provider.Client, error) {
+		return &fakeClient{account: "alice"}, nil
+	}}
+	output, err := execute(t, a, "auth", "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "work (default)\n  GitLab · gitlab.com\n  Account:     alice\n  Namespace:   team\n  Git name:    Colt Tester\n  Git email:   colt@example.com\n  Connection:  ✓ connected\n"
+	if output != want {
+		t.Fatalf("output = %q, want %q", output, want)
+	}
+}
+
+func TestCORE_PROVIDER_005AuthStatusCredentialsMissing(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	p := appProvider()
+	if err := config.Save(configPath, config.Config{Providers: map[string]config.Provider{"work": p}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("COLT_TEST_TOKEN", "")
+	a := &App{ConfigPath: configPath, WorkDir: root, Git: &fakeGit{}, NewClient: func(config.Provider, string) (provider.Client, error) {
+		return &fakeClient{account: "alice"}, nil
+	}}
+	output, err := execute(t, a, "auth", "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "work\n  GitLab · gitlab.com\n  Connection:  ✗ credentials missing\n"
+	if output != want {
+		t.Fatalf("output = %q, want %q", output, want)
 	}
 }
 

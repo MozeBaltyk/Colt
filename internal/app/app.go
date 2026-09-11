@@ -77,10 +77,11 @@ func (a *App) authCommand() *cobra.Command {
 	}
 	status := &cobra.Command{
 		Use:   "status",
-		Short: "Show configured providers (offline)",
+		Short: "Show configured providers",
 		Args:  cobra.NoArgs,
 		RunE:  a.providerStatus,
 	}
+	status.Flags().Bool("offline", false, "inspect configuration only, do not call provider APIs")
 	f := login.Flags()
 	f.StringVar(&opts.host, "host", "", "provider host (defaults to github.com or gitlab.com)")
 	f.StringVar(&opts.baseURL, "base-url", "", "HTTPS API base URL (defaults from provider host)")
@@ -99,6 +100,7 @@ func (a *App) providerStatus(cmd *cobra.Command, _ []string) error {
 	if a.pathErr != nil {
 		return a.pathErr
 	}
+	offline, _ := cmd.Flags().GetBool("offline")
 	cfg, err := config.Load(a.ConfigPath)
 	if err != nil {
 		return err
@@ -114,9 +116,84 @@ func (a *App) providerStatus(cmd *cobra.Command, _ []string) error {
 	}
 	for _, alias := range aliases {
 		p := cfg.Providers[alias]
-		fmt.Fprintf(cmd.OutOrStdout(), "alias=%s type=%s host=%s namespace=%s default=%t\n", alias, p.Type, p.Host, p.Namespace, p.Default)
+		defaultMarker := ""
+		if p.Default {
+			defaultMarker = " (default)"
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s%s\n", alias, defaultMarker)
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s · %s\n", providerTypeName(p.Type), p.Host)
+		if offline {
+			fmt.Fprintf(cmd.OutOrStdout(), "  Namespace:   %s\n", p.Namespace)
+			if p.GitName == "" || p.GitEmail == "" {
+				fmt.Fprintln(cmd.OutOrStdout(), "  Git identity: not configured")
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "  Git name:    %s\n", p.GitName)
+				fmt.Fprintf(cmd.OutOrStdout(), "  Git email:   %s\n", p.GitEmail)
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "  Connection:  not checked")
+		} else {
+			token, _, tokenErr := config.Token(p)
+			if tokenErr != nil {
+				fmt.Fprintln(cmd.OutOrStdout(), "  Connection:  ✗ credentials missing")
+				continue
+			}
+			client, clientErr := a.NewClient(p, token)
+			if clientErr != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "  Connection:  ✗ unreachable\n    %s\n", safeExplanation(clientErr.Error()))
+				continue
+			}
+			account, authErr := client.Authenticate(cmd.Context())
+			if authErr != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "  Connection:  ✗ %s\n", authState(authErr))
+				if exp := safeExplanation(authErr.Error()); exp != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "    %s\n", exp)
+				}
+				continue
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "  Account:     %s\n", account)
+			fmt.Fprintf(cmd.OutOrStdout(), "  Namespace:   %s\n", p.Namespace)
+			if p.GitName == "" || p.GitEmail == "" {
+				fmt.Fprintln(cmd.OutOrStdout(), "  Git identity: not configured")
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "  Git name:    %s\n", p.GitName)
+				fmt.Fprintf(cmd.OutOrStdout(), "  Git email:   %s\n", p.GitEmail)
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "  Connection:  ✓ connected")
+		}
 	}
 	return nil
+}
+
+func providerTypeName(t string) string {
+	switch t {
+	case "github":
+		return "GitHub"
+	case "gitlab":
+		return "GitLab"
+	default:
+		return t
+	}
+}
+
+func authState(err error) string {
+	msg := err.Error()
+	if strings.Contains(msg, "credential environment variable") || strings.Contains(msg, "missing or empty") {
+		return "credentials missing"
+	}
+	if strings.Contains(msg, "authentication failed") {
+		return "authentication failed"
+	}
+	if strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded") {
+		return "timeout"
+	}
+	return "unreachable"
+}
+
+func safeExplanation(msg string) string {
+	if len(msg) > 200 {
+		msg = msg[:200]
+	}
+	return msg
 }
 
 func (a *App) loginProvider(cmd *cobra.Command, providerType, alias string, opts authOptions) error {
