@@ -1,11 +1,11 @@
 # Colt
 
-> A provider-independent Git project CLI.
+> A provider-independent project manager for Git repositories.
 
 Colt talks directly to GitHub and GitLab HTTP APIs for hosting operations and
 uses the native `git` executable for repository operations. The specifications
-describe planned behavior; a command is available only when code and release
-notes say so.
+distinguish implemented, normative M1 behavior from planned milestones; release
+availability still requires corresponding release notes.
 
 ## First MVP
 
@@ -47,21 +47,24 @@ such as `token_env`. Colt never requires `gh`, `glab`, or `curl`, and never
 changes global Git identity. Provider-independent ownership is called a
 **namespace**.
 
-## Later Milestones
+## Planned Milestones
 
-Templates follow blank initialization. Repository listing, cloning, workspace
-synchronization, and a minimum release flow follow templates. Analyzer work is
-currently limited to future intent around a canonical `inventory.yaml` and
-derived reports.
+Only Milestone 1 is implemented and normative. Planned, not-yet-implemented work
+adds lifecycle list/clone/release primitives (M2), parameterized data-only
+templates (M3), declarative workspace `status`/`sync` (M4), diagnostic project
+health (M5), and a read-only analyzer (M6). Colt is not a wrapper or replacement
+command surface for `gh` or `glab`.
 
 ## Specifications
 
 - [Product definition and specification order](docs/specs/product.md)
 - [Shared active-MVP requirements](docs/specs/00-core.md)
 - [First MVP: blank project initialization](docs/specs/01-project-init.md)
-- [Intermediate: template initialization](docs/specs/02-template-init.md)
-- [Later: project lifecycle](docs/specs/03-project-lifecycle.md)
-- [Future: analyzer](docs/specs/04-analyzer.md)
+- [Planned M2: project lifecycle](docs/specs/02-project-lifecycle.md)
+- [Planned M3: template initialization](docs/specs/03-template-init.md)
+- [Planned M4: workspace reconciliation](docs/specs/04-workspace.md)
+- [Planned M5: project health](docs/specs/05-project-health.md)
+- [Planned M6: analyzer](docs/specs/06-analyzer.md)
 - [Roadmap](docs/specs/90-roadmap.md)
 - [Non-normative design notes](docs/specs/notes.md)
-- [MVP acceptance specifications](features/)
+- [Acceptance specifications](features/)

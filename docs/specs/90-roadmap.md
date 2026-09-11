@@ -1,28 +1,24 @@
 # Roadmap
 
-Specification detail follows implementation priority: the active milestone is
-detailed and normative, the next milestone is design-level, later work states
-capability boundaries, and future ideas remain non-committal. Later milestones
-do not gain production acceptance criteria before implementation planning.
+Milestone 1 is implemented and normative. Milestones 2 through 6 are planned and their `@planned` scenarios do not claim current command or release availability.
 
-1. **Blank cross-provider initialization:** configure and authenticate supported
-   providers, then deliver local and remote `colt init <project>` behavior from
-   [shared core](00-core.md) and [project initialization](01-project-init.md).
-2. **Templates:** add `colt init <project> --template <name>`, initially
-   `general`, as described in [template initialization](02-template-init.md).
-3. **Project lifecycle:** add provider-aware list, clone, sync, and minimum
-   release behavior from [project lifecycle](03-project-lifecycle.md).
-4. **Analyzer:** retain only the boundaries in [analyzer intent](04-analyzer.md)
-   until project-management capabilities are established.
+1.  **M1, authentication and blank initialization:** configure and authenticate supported providers, provide concise provider status/connectivity output, and deliver local and remote `colt init <project>` behavior from [shared core](00-core.md) and [project initialization](01-project-init.md).
+2.  **M2, project lifecycle:** add provider-aware list, clone, and minimum release primitives from [project lifecycle](02-project-lifecycle.md).
+3.  **M3, parameterized templates:** add named, versioned, data-only template initialization from [template initialization](03-template-init.md).
+4.  **M4, declarative workspace:** reconcile provider/namespace repository selections through top-level `colt status` and `colt sync [--dry-run]` as specified in [workspace reconciliation](04-workspace.md).
+5.  **M5, project health:** add deterministic diagnostic policy checks from [project health](05-project-health.md).
+6.  **M6, analyzer:** retain bounded future intent in [analyzer](06-analyzer.md).
 
 ## Deferred And Future
 
-- Custom templates, template variables, and template version pinning.
 - Additional hosting providers and package ecosystems.
 - OS credential-store integration; environment-based credentials cover MVP.
-- JSON output, shell completion, dry-run behavior, and transport preferences.
-- Advanced release generation, changelog integration, and signed tags.
+- General JSON output, shell completion, and transport preferences.
+- Advanced release notes, changelog integration, and signed tags.
+- Destructive workspace pruning and bulk fetch/update.
+- Project-health auto-remediation.
+- Executable template hooks and plugins.
 - Analyzer collection, schema, report formats, and other implementation detail.
-- GUI, plugin marketplace, arbitrary CI/CD generation, and repository hosting.
+- GUI, plugin marketplace, arbitrary CI generation, and repository hosting.
 
 Required provider-specific CLIs and replacement of native Git are out of scope.
