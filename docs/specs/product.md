@@ -2,7 +2,7 @@
 
 Colt is a provider-independent project manager for Git repositories. It talks directly to hosting-provider APIs and uses native Git for repository operations; it is not another `gh` or `glab` command surface.
 
-Provider API authentication and Git transport authentication are distinct concepts. Colt owns provider authentication and provider API integration. Native Git owns repository transport. Provider API credentials and Git transport credentials are related operationally but remain separate concepts.
+Provider API authentication, Git transport authentication, and Git commit identity are three separate concepts. Colt owns provider authentication, credential resolution, credential persistence, and direct provider API integration. Native Git owns repository mechanics and Git transport. Colt persists interactive provider authentication through a credential subsystem separate from normal configuration. Provider configuration references credential sources but does not contain reusable secrets. Environment credentials remain supported for automation. Local logout removes Colt-owned persisted credentials; provider-side revocation is an optional provider-dependent operation.
 
 ``` text
                          Colt CLI

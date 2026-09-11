@@ -24,6 +24,22 @@ The command creates a blank project. Parameterized template selection and materi
 
 On success, output **SHOULD** identify the provider alias, namespace, project, local path, initial commit, and remote URL when present.
 
-Remote repository creation and provider release creation require provider API authentication even when Git push uses SSH.
+Remote repository creation requires provider API authentication regardless of the Git transport later selected for the initial push:
+
+``` text
+colt init project
+        |
+        +-> provider API authentication
+        |       |
+        |       +-> create remote repository
+        |
+        +-> local Git initialization
+        |
+        +-> select authoritative Git transport (SSH or HTTPS)
+        |
+        +-> native git push
+```
+
+SSH Git access does NOT imply permission to create the provider repository. `INIT-007` transport selection MUST still correspond to the selected provider and available authentication without weakening authority/host validation.
 
 The Gherkin files are acceptance specifications. Active M1 behavior is covered by requirement-named Go tests without prescribing a BDD framework.

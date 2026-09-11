@@ -36,6 +36,7 @@ Feature: Blank project initialization
   @INIT-006 @INIT-007
   Scenario Outline: Initialize and push a remote blank project
     Given the selected provider type is <type>
+    And provider API authentication succeeds
     When I run "colt init demo"
     Then Colt creates repository "demo" in the selected namespace through the <type> HTTP API
     And the created repository URL is the only "origin"
@@ -45,6 +46,25 @@ Feature: Blank project initialization
       | type   |
       | GitHub |
       | GitLab |
+
+  @INIT-006
+  Scenario: Remote initialization requires provider API authentication
+    Given provider API authentication fails for the selected provider
+    When I run "colt init demo"
+    Then the command fails before creating a remote repository
+    And SSH Git access alone does not satisfy the requirement
+
+  @INIT-007
+  Scenario Outline: Initial push may use either Git transport
+    Given the remote repository was created through the provider HTTP API
+    And the authoritative <transport> clone URL matches the selected provider, host, namespace, and repository
+    When Colt pushes the initial branch and commit
+    Then native git uses the <transport> target without persisting credentials in the remote URL
+
+    Examples:
+      | transport |
+      | SSH       |
+      | HTTPS     |
 
   @INIT-008 @CORE-CONFLICT-001 @CORE-SAFETY-001
   Scenario: Provider creation reports an authoritative race conflict
