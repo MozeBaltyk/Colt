@@ -2,6 +2,8 @@
 
 Colt is a provider-independent project manager for Git repositories. It talks directly to hosting-provider APIs and uses native Git for repository operations; it is not another `gh` or `glab` command surface.
 
+Provider API authentication and Git transport authentication are distinct concepts. Colt owns provider authentication and provider API integration. Native Git owns repository transport. Provider API credentials and Git transport credentials are related operationally but remain separate concepts.
+
 ``` text
                          Colt CLI
                             |
@@ -31,7 +33,7 @@ Code and released behavior do not become available merely because they are speci
 
 | Order | Capability                                       | Detail                    |
 |:------|:-------------------------------------------------|:--------------------------|
-| M1    | Provider authentication and blank initialization | Implemented and normative |
+| M1    | Provider authentication (interactive + environment) and blank initialization | Implemented and normative |
 | M2    | Project lifecycle                                | Planned                   |
 | M3    | Parameterized template initialization            | Planned                   |
 | M4    | Declarative workspace reconciliation             | Planned                   |

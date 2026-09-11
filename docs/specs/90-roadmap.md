@@ -2,7 +2,7 @@
 
 Milestone 1 is implemented and normative. Milestones 2 through 6 are planned and their `@planned` scenarios do not claim current command or release availability.
 
-1.  **M1, authentication and blank initialization:** configure and authenticate supported providers, provide concise provider status/connectivity output, and deliver local and remote `colt init <project>` behavior from [shared core](00-core.md) and [project initialization](01-project-init.md).
+1.  **M1, authentication and blank initialization:** configure and authenticate supported providers through interactive secure storage or environment credentials, provide concise provider status/connectivity output, and deliver local and remote `colt init <project>` behavior from [shared core](00-core.md) and [project initialization](01-project-init.md).
 2.  **M2, project lifecycle:** add provider-aware list, clone, and minimum release primitives from [project lifecycle](02-project-lifecycle.md).
 3.  **M3, parameterized templates:** add named, versioned, data-only template initialization from [template initialization](03-template-init.md).
 4.  **M4, declarative workspace:** reconcile provider/namespace repository selections through top-level `colt status` and `colt sync [--dry-run]` as specified in [workspace reconciliation](04-workspace.md).
@@ -12,7 +12,6 @@ Milestone 1 is implemented and normative. Milestones 2 through 6 are planned and
 ## Deferred And Future
 
 - Additional hosting providers and package ecosystems.
-- OS credential-store integration; environment-based credentials cover MVP.
 - General JSON output, shell completion, and transport preferences.
 - Advanced release notes, changelog integration, and signed tags.
 - Destructive workspace pruning and bulk fetch/update.
