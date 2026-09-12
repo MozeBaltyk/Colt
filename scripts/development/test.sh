@@ -7,7 +7,7 @@ set -euo pipefail
 #
 # Layers (run in the given order; default: unit bdd):
 #   unit         fast Go tests: parsers, config, command generation, API mapping
-#   integration  real Gitea + Forgejo backends in ephemeral containers
+#   integration  tagged Colt/Gitea vertical flow plus live backend probes
 #                (needs CONTAINER_TOOL, default podman, and registry access)
 #   bdd          deterministic godog scenarios with local fixtures only
 #   blackbox     real colt binary smoke-test in a sandbox (build tag: bdd)
@@ -34,10 +34,10 @@ for layer in "${layers[@]}"; do
             go test -tags integration ./integration/ -count=1 -timeout 15m
             ;;
         bdd)
-            go test ./tests/bdd/ -count=1
+            go test ./tests/bdd/... -count=1
             ;;
         blackbox)
-            go test -tags bdd ./tests/bdd/ -run '^TestBlackbox$' -count=1
+            go test -tags bdd ./tests/bdd/... -run '^TestBlackbox$' -count=1
             ;;
         coverage)
             go test ./tests/bdd/ -run '^TestBDDRequirementIndex$' -count=1 -args -update-bdd-coverage

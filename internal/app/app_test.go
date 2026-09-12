@@ -68,8 +68,8 @@ func TestAuthHelpUsesLoginLogoutAndStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"colt auth login <github|gitlab> <alias>",
-		"repository owner: GitHub username or organization; GitLab group or subgroup/full path",
+		"colt auth login <github|gitlab|gitea|forgejo> <alias>",
+		"repository owner: GitHub/Gitea/Forgejo user or organization; GitLab group or subgroup/full path",
 	} {
 		if !strings.Contains(loginHelp, want) {
 			t.Fatalf("login help missing %q:\n%s", want, loginHelp)
@@ -386,7 +386,7 @@ func TestINIT_001MalformedSelectedProviderFailsBeforePreflightEffects(t *testing
 		name, field, want string
 	}{
 		{"missing identity", "git_name: ''", "git_name is required"},
-		{"invalid provider", "type: gitea", "type must be github or gitlab"},
+		{"invalid provider", "type: bitbucket", "type must be github, gitlab, gitea or forgejo"},
 		{"unsupported transport", "transport: ftp", "transport must be https or ssh"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -396,7 +396,9 @@ func TestINIT_001MalformedSelectedProviderFailsBeforePreflightEffects(t *testing
 			switch tc.field {
 			case "git_name: ''":
 				raw = strings.Replace(raw, "git_name: Test", tc.field, 1)
-			case "type: gitea":
+			case "type: forgejo":
+				raw = strings.Replace(raw, "type: gitlab", tc.field, 1)
+			case "type: bitbucket":
 				raw = strings.Replace(raw, "type: gitlab", tc.field, 1)
 			case "transport: ftp":
 				raw = strings.Replace(raw, "git_email: test@example.com", "git_email: test@example.com\n    "+tc.field, 1)
@@ -538,6 +540,24 @@ func TestINIT_006_007RemoteWorkflow(t *testing.T) {
 	}
 }
 
+func TestGiteaRemoteWorkflowUsesAuthenticatedAccountForGitHTTPS(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	p := config.Provider{Type: "gitea", Host: "code.example", BaseURL: "https://code.example", Namespace: "team", Visibility: "private", GitName: "Test", GitEmail: "test@example.com", Auth: config.Auth{Source: "env", TokenEnv: "GITEA_TEST_TOKEN"}}
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"work": p}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GITEA_TEST_TOKEN", "gitea-test-secret")
+	runner := &fakeGit{}
+	client := &fakeClient{account: "alice", getErr: provider.ErrNotFound, created: &provider.Repository{CloneURL: "https://code.example/team/demo.git"}}
+	if _, err := execute(t, testApp(path, root, runner, client), "init", "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if runner.pushType != "gitea" || runner.pushUsername != "alice" || runner.pushToken != "gitea-test-secret" {
+		t.Fatalf("push type=%q username=%q token selected=%t", runner.pushType, runner.pushUsername, runner.pushToken == "gitea-test-secret")
+	}
+}
+
 func TestCORE_GIT_003RejectsUnexpectedProviderRepository(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.yaml")
@@ -674,6 +694,39 @@ func TestCORE_GIT_005_006_007CredentialHelperProtocol(t *testing.T) {
 	}
 }
 
+func TestGiteaAndForgejoCredentialHelperUsername(t *testing.T) {
+	for _, providerType := range []string{"gitea", "forgejo"} {
+		t.Run(providerType, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			p := config.Provider{Type: providerType, Host: "code.example", BaseURL: "https://code.example", Namespace: "team", Visibility: "private", GitName: "Test", GitEmail: "test@example.com", Auth: config.Auth{Source: "env", TokenEnv: "HELPER_TOKEN"}}
+			if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"work": p}}); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HELPER_TOKEN", "helper-secret")
+			for _, tc := range []struct{ name, username, want string }{
+				{"request username", "alice", "alice"},
+				{"namespace fallback", "", "team"},
+				{"unsafe username", "alice\rinjected", ""},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					cmd := (&App{ConfigPath: path}).Root()
+					var output bytes.Buffer
+					cmd.SetIn(strings.NewReader("protocol=https\nhost=code.example\npath=team/demo.git\nusername=" + tc.username + "\n\n"))
+					cmd.SetOut(&output)
+					cmd.SetArgs([]string{"git-credential", "get"})
+					want := ""
+					if tc.want != "" {
+						want = "username=" + tc.want + "\npassword=helper-secret\n\n"
+					}
+					if err := cmd.ExecuteContext(context.Background()); err != nil || output.String() != want {
+						t.Fatalf("helper error=%v output=%q", err, output.String())
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestINIT_008KnownAndRacingConflictsAreNotAdopted(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -794,6 +847,45 @@ func TestCORE_PROVIDER_001_002AuthLoginNoninteractiveAndNoTokenPersistence(t *te
 	}
 	if _, err := execute(t, a, "auth", "login", "gitlab", "work", "--host", "gitlab.example", "--base-url", "https://gitlab.example", "--namespace", "platform", "--git-name", "Alice", "--git-email", "alice@example.com", "--token-env", "CUSTOM_TOKEN"); err == nil || !strings.Contains(err.Error(), "--replace") {
 		t.Fatalf("duplicate alias error = %v", err)
+	}
+}
+
+func TestGiteaLoginUsesHostDefaultsAndConventionalToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("GITEA_TOKEN", "gitea-login-secret")
+	var gotProvider config.Provider
+	var gotToken string
+	a := &App{ConfigPath: path, NewClient: func(p config.Provider, token string) (provider.Client, error) {
+		gotProvider, gotToken = p, token
+		return &fakeClient{account: "alice"}, nil
+	}}
+	_, err := execute(t, a, "auth", "login", "gitea", "work", "--host", "code.example.com", "--namespace", "team", "--visibility", "public", "--git-name", "Alice", "--git-email", "alice@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotProvider.Type != "gitea" || gotProvider.BaseURL != "https://code.example.com" || gotProvider.Visibility != "public" || gotToken != "gitea-login-secret" {
+		t.Fatalf("provider=%+v token selected=%t", gotProvider, gotToken == "gitea-login-secret")
+	}
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+}
+
+func TestForgejoLoginUsesHostDefaultsAndConventionalToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("FORGEJO_TOKEN", "forgejo-login-secret")
+	var gotProvider config.Provider
+	var gotToken string
+	a := &App{ConfigPath: path, NewClient: func(p config.Provider, token string) (provider.Client, error) {
+		gotProvider, gotToken = p, token
+		return &fakeClient{account: "alice"}, nil
+	}}
+	_, err := execute(t, a, "auth", "login", "forgejo", "work", "--host", "code.example.com", "--namespace", "team", "--visibility", "public", "--git-name", "Alice", "--git-email", "alice@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotProvider.Type != "forgejo" || gotProvider.BaseURL != "https://code.example.com" || gotToken != "forgejo-login-secret" {
+		t.Fatalf("provider=%+v token selected=%t", gotProvider, gotToken == "forgejo-login-secret")
 	}
 }
 
@@ -1013,6 +1105,7 @@ type fakeGit struct {
 	pushErr      error
 	pushType     string
 	pushToken    string
+	pushUsername string
 }
 
 func (g *fakeGit) Available() error                   { g.calls = append(g.calls, "available"); return g.availableErr }
@@ -1029,14 +1122,15 @@ func (g *fakeGit) AddOrigin(_ context.Context, _, url string) error {
 	g.calls = append(g.calls, "origin:"+url)
 	return nil
 }
-func (g *fakeGit) ConfigureCredentialHelper(context.Context, string) error {
+func (g *fakeGit) ConfigureCredentialHelper(context.Context, string, string, string) error {
 	g.calls = append(g.calls, "helper")
 	return nil
 }
-func (g *fakeGit) Push(_ context.Context, _, url, providerType, token string) error {
+func (g *fakeGit) Push(_ context.Context, _, url, providerType, username, token string) error {
 	g.calls = append(g.calls, "push:"+url)
 	g.pushType = providerType
 	g.pushToken = token
+	g.pushUsername = username
 	return g.pushErr
 }
 

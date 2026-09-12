@@ -1,137 +1,82 @@
-# Repo Contract — Simpl-inventory template
+# Colt repository contract
 
-> Contract for LLM/agent contributors. Read this before making any change.
-> It is the normative summary of the project's invariants; the human-facing
-> version lives in `README.md` ("Principles"). When the two disagree, this file
-> and `just test` win.
+> Normative contributor summary. Product behavior is specified in `docs/specs/`
+> and `features/`; this file describes how the repository is worked on.
 
-## 1. What this repo is
+## What this repository is
 
-A reusable project template ("boilerplate"). It delivers, in order of
-importance:
+Colt is a Go CLI for working consistently with repositories across supported Git
+hosting providers. The product lives in `cmd/colt` and `internal`, with behavior
+specified in `docs/specs` and exercised by unit and BDD tests.
 
-1. a `justfile` entrypoint,
-2. grouped `scripts/<group>/` task scripts,
-3. an Execution Environment image (`Containerfile`),
-4. a Helm chart that deploys that environment two ways.
+The root `justfile` is a convenience task index, not a product boundary or the
+only valid entrypoint. Recipes delegate substantial work to `scripts/` so the
+underlying commands remain usable directly and in automation.
 
-Everything else is scaffolding around those four.
+## Required product gate
 
-## 2. Hard invariants (must not regress)
+Run this before merging:
 
-These are verified by `just test` → `scripts/utility/test.sh`. Never merge a
-change that fails them.
-
-1. **`justfile` is the entrypoint.** Every project action is a recipe. No other
-   blessed way to build, run, or deploy. The justfile must parse
-   (`just --list`).
-
-2. **Recipes are grouped and delegate to scripts.** Each recipe belongs to a
-   group and invokes a script under `./scripts/<group_name>/`. One directory per
-   group. No ad-hoc shell logic lives in the justfile body; no scripts live
-   outside `scripts/`.
-
-3. **Execution Environment via `Containerfile`.** The repo-root `Containerfile`
-   defines a reproducible tool image. `build`/`connect`/`deploy` give the same
-   interface on the host (WSL) and inside the container/pod.
-
-4. **Helm chart is the deployment definition.** `./helm` renders the same pod
-   spec in two modes — `Pod` (local `podman play kube`) and `Deployment`
-   (Kubernetes) — switched by `deployAs`. Both must render.
-
-## 3. Directory map
-
-```
-.
-├── justfile              # entrypoint — all recipes defined here
-├── Containerfile         # Execution Environment image
-├── README.md             # human-facing docs + "Principles"
-├── .gitignore            # ignores .local/**
-├── .local/               # workflow scratch — NEVER committed
-├── scripts/
-│   ├── ee/
-│   │   └── manage.sh     # build / push / deploy / destroy / redeploy / connect
-│   └── utility/
-│       ├── check-tools.sh# verifies CLI tools in the EE image
-│       └── test.sh       # verifies this contract's invariants
-├── helm/                 # deployment definition (Chart + values + templates)
-│   ├── Chart.yaml
-│   ├── values.yaml       # deployAs, image, command, workspace
-│   └── templates/
-│       ├── _podspec.tpl  # shared pod spec
-│       ├── pod.yaml      # Pod mode (podman play kube)
-│       └── deployment.yaml # Deployment mode (real k8s)
-├── config/
-│   └── site.yaml         # mounted into the pod at /workspace/config
-└── docs/
-    └── procedures/
-        └── 01-repo-contract.md   # this file
+```sh
+just test
 ```
 
-## 4. The justfile recipes
+It runs the default Colt suite (`unit` and deterministic product BDD tests), then
+the lightweight repository check. The equivalent direct commands are:
 
-| Recipe      | Group                 | Delegates to                         | Runs on |
-|-------------|-----------------------|--------------------------------------|---------|
-| `build`     | Execution Environment | `scripts/ee/manage.sh build`         | host    |
-| `push`      | Execution Environment | `scripts/ee/manage.sh push`          | host    |
-| `deploy`    | Execution Environment | `scripts/ee/manage.sh deploy`        | host    |
-| `destroy`   | Execution Environment | `scripts/ee/manage.sh destroy`       | host    |
-| `redeploy`  | Execution Environment | `scripts/ee/manage.sh redeploy`      | host    |
-| `connect`   | Execution Environment | `scripts/ee/manage.sh connect`       | host    |
-| `check-tools` | Utility             | `scripts/utility/check-tools.sh`     | container (`_cmd`) |
-| `test`      | Utility               | `scripts/utility/test.sh`            | host    |
+```sh
+bash scripts/development/test.sh
+bash scripts/development/test_core_template.sh
+```
 
-Private helpers (not user-facing): `default`, `_kubeconfig`, `_cmd`.
+`go vet ./...` is an additional CI gate. Container-backed integration tests are
+deliberately not part of the default gate.
 
-### The `_cmd` bridge (principle 3 in action)
+## Test lanes
 
-`_cmd <group>/<script>.sh` runs a script identically on host and inside the
-container:
+- **Unit:** colocated Go tests under `internal/`; no network or containers.
+- **BDD:** active scenarios in `features/`, driven by `tests/bdd/...` with local
+  fixtures. This is Colt product behavior.
+- **Blackbox:** builds and invokes the real Colt binary in an isolated local
+  sandbox; no containers.
+- **Integration:** runs the real Colt-to-Gitea and Colt-to-Forgejo initialization/push flows and optional Gitea/Forgejo backend probes in ephemeral containers. CI runs both vertical scenarios; the full lane also runs the characterization probes. Run the full lane explicitly with `just test-integration`.
 
-- **inside the container/pod** (k8s env, service-account token, or no
-  podman/docker on `PATH`) → run `bash /workspace/scripts/<script>` directly;
-- **on the host** → `podman run --rm -v <project>:/workspace …` then run the
-  script inside.
+See `tests/README.md` for commands, tags, and test layout.
 
-The project is always mounted at `/workspace` — locally (via `_cmd`/`connect`)
-and in the pod (via the chart's `workspace` volume).
+## Repository map
 
-## 5. Environment variables
+```text
+cmd/colt/       CLI entrypoint
+internal/       Colt product packages and unit tests
+features/       executable behavior specifications
+tests/bdd/      BDD suite, fixtures, steps, and blackbox test
+integration/    live Gitea and Forgejo vertical tests and optional backend probes
+scripts/        direct development and optional environment tasks
+Containerfile   optional development Execution Environment image
+helm/           optional chart for that environment
+justfile        convenience recipes
+```
 
-Defined in `justfile`; overridable via `.env` (dotenv-load) or environment.
+## Optional Execution Environment and Helm support
 
-| Var              | Default            | Meaning                                |
-|------------------|--------------------|----------------------------------------|
-| `REGISTRY_URL`   | `""`               | Target registry for `push`            |
-| `EE_IMAGE`       | `localhost/toolkit`| Execution Environment image name       |
-| `EE_VERSION`     | `latest`           | Image tag                              |
-| `CONTAINER_TOOL` | `sudo podman`      | Container runtime used by `_cmd`       |
-| `KUBECONFIG`     | `$HOME/.kube/config` | kubeconfig mounted into containers   |
+The `Containerfile`, `scripts/ee/manage.sh`, and `helm/` chart provide an optional
+tooling environment. They are not the Colt application or required to run its Go
+tests. The chart supports `Pod` and `Deployment` rendering through `deployAs`;
+if it is changed, render both modes before merging:
 
-Helm values mirror these (`helm/values.yaml`): `deployAs`, `image.*`,
-`command`, `workspace.*`.
+```sh
+helm template toolkit ./helm
+helm template toolkit ./helm --set deployAs=Deployment
+```
 
-## 6. Naming and style
+Relevant settings remain overridable through `.env` or the environment:
+`REGISTRY_URL`, `EE_IMAGE` (default `localhost/toolkit`), `EE_VERSION` (default
+`latest`), `CONTAINER_TOOL` (default `sudo podman`), and `KUBECONFIG`.
 
-- Unified service identity: **`toolkit`** (image, chart, release, pod name,
-  container name). Do not introduce a second name for the same thing.
-- Shell scripts: `#!/usr/bin/env bash`, `set -euo pipefail`, functions + a
-  subcommand `case` dispatcher (see `scripts/ee/manage.sh`).
-- `manage.sh` functions call `sudo podman` directly; the justfile does not
-  re-wrap them in sudo.
+## Change rules
 
-## 7. When you change something
-
-1. If you add a recipe → add it under an existing group, have it call a script
-   in `scripts/<group>/`, and document it here (§4) and in README.
-2. If you touch `scripts/` → each `.sh` must stay `bash -n` clean.
-3. If you touch the Helm chart → confirm both `Pod` and `Deployment` render.
-4. If you touch the image → keep `Containerfile` at the repo root.
-5. Before finishing, run **`just test`** and make it pass.
-
-## 8. Anti-goals (do NOT do)
-
-- Don't put executable logic directly in a justfile recipe body.
-- Don't create scripts outside `scripts/<group>/`.
-- Don't commit anything under `.local/`.
-- Don't build a second entrypoint that bypasses the justfile.
+1. Keep product requirements, feature scenarios, and implementation aligned.
+2. Put substantial recipe logic in the existing `scripts/<group>/` area.
+3. Keep shell scripts valid under `bash -n`; do not embed credentials.
+4. Do not commit `.local/` scratch output.
+5. Run `just test`; run the optional lane relevant to anything else changed.

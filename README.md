@@ -6,17 +6,17 @@ Colt aims to be a provider-independent project manager for Git repositories.
 
 With one CLI, you can connect to multiple Git hosting providers, clone repositories, work with an entire namespace, initialize projects from your own templates, and eventually mirror projects between providers.
 
-Colt talks directly to supported Git hosting providers through their HTTP APIs for hosting operations, while leaving repository operations to native `git`. GitHub and GitLab are the currently supported providers; Gitea and Forgejo are planned future providers.
+Colt talks directly to supported Git hosting providers through their HTTP APIs for hosting operations, while leaving repository operations to native `git`. GitHub, GitLab, Gitea, and Forgejo are currently supported.
 
 The project is being built progressively. Some of the core functionality is already implemented, some M1 requirements are still marked `@unimplemented`, and the rest is organized into planned milestones.
 
 ## First MVP
 
-The first MVP configures and authenticates GitHub.com, GitLab.com, and
-self-hosted GitLab providers, then initializes a blank project:
+The first MVP configures and authenticates GitHub.com, GitLab.com, self-hosted
+GitLab, and self-hosted Gitea providers, then initializes a blank project:
 
 ```text
-colt auth login <github|gitlab> <alias> \
+colt auth login <github|gitlab|gitea|forgejo> <alias> \
   --namespace <namespace> --git-name <name> --git-email <email> \
   [--host <host>] [--base-url <https-url>] [--visibility <visibility>] \
   [--token-env <environment-variable>] [--default] [--replace]
@@ -30,10 +30,7 @@ Configuration uses Go's `os.UserConfigDir()`. On Linux, this is
 tokens remain in the referenced environment variables and are never written
 there.
 
-`--namespace` is the repository owner in provider-native terms: a GitHub username or organization (for
-example `octocat` or `acme`) or a GitLab group/subgroup full path (for example
-`platform/tools`). Future provider types define their own namespace semantics
-inside their adapters.
+`--namespace` is the repository owner in provider-native terms: a GitHub, Gitea, or Forgejo user/organization (for example `octocat` or `acme`) or a GitLab group/subgroup full path (for example `platform/tools`).
 
 Colt initializes Git, applies the selected provider's repository-local identity,
 and creates an initial commit. Unless `--local` is used, it creates the remote
@@ -53,9 +50,11 @@ changes global Git identity. Provider-independent ownership is called a
 
 ## Planned Milestones
 
-Milestone 1 is partially implemented: environment authentication and blank
-initialization work, while interactive persistence, plaintext fallback, logout,
-and Git transport integration remain explicitly `@unimplemented`. Later planned
+Milestone 1 is partially implemented: environment authentication, blank
+initialization, and HTTPS Git transport work, while interactive persistence,
+plaintext fallback, and logout remain explicitly `@unimplemented`. The real
+Colt-to-Gitea and Colt-to-Forgejo initialization and push paths are exercised in container-backed CI.
+Later planned
 work adds lifecycle list/clone/release primitives (M2), parameterized data-only
 templates (M3), declarative workspace `status`/`sync` (M4), diagnostic project
 health (M5), and a read-only analyzer (M6). Colt is not a wrapper or replacement

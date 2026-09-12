@@ -5,7 +5,7 @@
 just build        # build the Execution Environment image
 just connect      # open an interactive shell inside it
 just check-tools  # verify the bundled CLI tools are present
-just test         # verify the template's principles are intact
+just test         # run the default Colt test gate
 ```
 
 All recipes are discoverable with `just` (or `just --list`).
@@ -27,7 +27,10 @@ logic.
 | `redeploy`    | Execution Environment | `scripts/ee/manage.sh redeploy`         | host    |
 | `connect`     | Execution Environment | `scripts/ee/manage.sh connect`          | host    |
 | `check-tools` | Utility               | `scripts/utility/check-tools.sh`        | container |
-| `test`        | Utility               | `scripts/utility/test.sh`               | host    |
+| `test`        | Development           | `scripts/development/test.sh` + repository checks | host |
+| `test-unit`   | Development           | `scripts/development/test.sh unit`      | host    |
+| `test-integration` | Development      | `scripts/development/test.sh integration` | host |
+| `test-bdd`    | Development           | `scripts/development/test.sh bdd`       | host    |
 
 Private helpers (not user-facing): `default`, `_kubeconfig`, `_cmd`.
 
@@ -89,11 +92,10 @@ deployments while changing only the runtime platform.
 
 | Command           | What it verifies                                        |
 |-------------------|---------------------------------------------------------|
-| `just test`       | The template's principles (structure, chart)            |
+| `just test`       | Unit, deterministic BDD, and repository checks           |
 | `just check-tools`| The bundled CLI tools are present in the environment     |
 
-`just test` is the guard for the template's own invariants — run it before
-finishing any change.
+`just test` is the default product gate. The real Colt-to-Gitea and Colt-to-Forgejo scenarios run in their own Docker-backed CI jobs; `just test-integration` additionally runs the Gitea/Forgejo backend probes.
 
 ---
 

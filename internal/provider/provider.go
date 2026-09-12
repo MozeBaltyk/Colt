@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MozeBaltyk/Colt/internal/config"
@@ -29,15 +30,39 @@ type Client interface {
 	Create(context.Context, string) (*Repository, error)
 }
 
+type adapter interface {
+	authorize(*http.Request, string)
+	isConflict(int, string) bool
+	authenticate(context.Context, *client) (string, error)
+	get(context.Context, *client, string) (*Repository, error)
+	create(context.Context, *client, string) (*Repository, error)
+}
+
 type client struct {
 	settings config.Provider
 	token    string
 	http     *http.Client
+	adapter  adapter
+	authMu   sync.Mutex
+	account  string
 }
 
 func New(settings config.Provider, token string, hc *http.Client) (Client, error) {
 	if token == "" {
 		return nil, errors.New("credential is missing or empty")
+	}
+	var providerAdapter adapter
+	switch settings.Type {
+	case "github":
+		providerAdapter = githubAdapter{}
+	case "gitlab":
+		providerAdapter = gitlabAdapter{}
+	case "gitea":
+		providerAdapter = giteaAdapter{}
+	case "forgejo":
+		providerAdapter = forgejoAdapter{}
+	default:
+		return nil, fmt.Errorf("unsupported provider type %q", settings.Type)
 	}
 	if hc == nil {
 		hc = &http.Client{}
@@ -59,43 +84,56 @@ func New(settings config.Provider, token string, hc *http.Client) (Client, error
 		}
 		return nil
 	}
-	return &client{settings: settings, token: token, http: &copy}, nil
+	return &client{settings: settings, token: token, http: &copy, adapter: providerAdapter}, nil
 }
 
 func (c *client) Authenticate(ctx context.Context) (string, error) {
-	path := "/user"
-	if c.settings.Type == "gitlab" {
-		path = "/api/v4/user"
+	return c.adapter.authenticate(ctx, c)
+}
+
+func (c *client) Get(ctx context.Context, project string) (*Repository, error) {
+	return c.adapter.get(ctx, c, project)
+}
+
+func (c *client) Create(ctx context.Context, project string) (*Repository, error) {
+	return c.adapter.create(ctx, c, project)
+}
+
+type accountResponse struct {
+	Login    string `json:"login"`
+	Username string `json:"username"`
+}
+
+func (c *client) authenticate(ctx context.Context, path string) (string, error) {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	if c.account != "" {
+		return c.account, nil
 	}
-	var result struct {
-		Login    string `json:"login"`
-		Username string `json:"username"`
-	}
+	var result accountResponse
 	if err := c.request(ctx, http.MethodGet, path, nil, &result); err != nil {
 		return "", fmt.Errorf("authentication failed: %w", err)
 	}
 	if result.Login != "" {
-		return result.Login, nil
+		c.account = result.Login
+		return c.account, nil
 	}
 	if result.Username != "" {
-		return result.Username, nil
+		c.account = result.Username
+		return c.account, nil
 	}
 	return "", errors.New("authentication failed: provider response omitted account name")
 }
 
-func (c *client) Get(ctx context.Context, project string) (*Repository, error) {
-	var path string
-	if c.settings.Type == "github" {
-		path = "/repos/" + url.PathEscape(c.settings.Namespace) + "/" + url.PathEscape(project)
-	} else {
-		path = "/api/v4/projects/" + url.PathEscape(c.settings.Namespace+"/"+project)
-	}
-	var result struct {
-		CloneURL     string `json:"clone_url"`
-		SSHURL       string `json:"ssh_url"`
-		HTTPURL      string `json:"http_url_to_repo"`
-		SSHURLToRepo string `json:"ssh_url_to_repo"`
-	}
+type repositoryResponse struct {
+	CloneURL     string `json:"clone_url"`
+	SSHURL       string `json:"ssh_url"`
+	HTTPURL      string `json:"http_url_to_repo"`
+	SSHURLToRepo string `json:"ssh_url_to_repo"`
+}
+
+func (c *client) get(ctx context.Context, path string) (*Repository, error) {
+	var result repositoryResponse
 	err := c.request(ctx, http.MethodGet, path, nil, &result)
 	if errors.Is(err, ErrNotFound) {
 		return nil, ErrNotFound
@@ -103,75 +141,42 @@ func (c *client) Get(ctx context.Context, project string) (*Repository, error) {
 	if err != nil {
 		return nil, fmt.Errorf("check repository: %w", err)
 	}
-	return c.repository(result.CloneURL, result.HTTPURL, result.SSHURL, result.SSHURLToRepo)
+	return c.repository(result)
 }
 
-func (c *client) Create(ctx context.Context, project string) (*Repository, error) {
-	if c.settings.Type == "github" {
-		account, err := c.Authenticate(ctx)
-		if err != nil {
-			return nil, err
-		}
-		path := "/user/repos"
-		if !strings.EqualFold(account, c.settings.Namespace) {
-			path = "/orgs/" + url.PathEscape(c.settings.Namespace) + "/repos"
-		}
-		body := map[string]any{"name": project, "private": c.settings.Visibility == "private"}
-		var result struct {
-			CloneURL string `json:"clone_url"`
-			SSHURL   string `json:"ssh_url"`
-		}
-		if err := c.request(ctx, http.MethodPost, path, body, &result); err != nil {
-			return nil, fmt.Errorf("create repository: %w", err)
-		}
-		return c.repository(result.CloneURL, "", result.SSHURL, "")
-	}
-	var namespace struct {
-		ID       int64  `json:"id"`
-		FullPath string `json:"full_path"`
-	}
-	if err := c.request(ctx, http.MethodGet, "/api/v4/namespaces/"+url.PathEscape(c.settings.Namespace), nil, &namespace); err != nil {
-		return nil, fmt.Errorf("resolve namespace %q: %w", c.settings.Namespace, err)
-	}
-	if namespace.ID <= 0 || namespace.FullPath != c.settings.Namespace {
-		return nil, fmt.Errorf("resolve namespace %q: provider returned a different namespace", c.settings.Namespace)
-	}
-	body := map[string]any{"name": project, "namespace_id": namespace.ID, "visibility": c.settings.Visibility}
-	var result struct {
-		HTTPURL      string `json:"http_url_to_repo"`
-		SSHURLToRepo string `json:"ssh_url_to_repo"`
-	}
-	if err := c.request(ctx, http.MethodPost, "/api/v4/projects", body, &result); err != nil {
+func (c *client) create(ctx context.Context, path string, body any) (*Repository, error) {
+	var result repositoryResponse
+	if err := c.request(ctx, http.MethodPost, path, body, &result); err != nil {
 		return nil, fmt.Errorf("create repository: %w", err)
 	}
-	return c.repository("", result.HTTPURL, "", result.SSHURLToRepo)
+	return c.repository(result)
 }
 
-func (c *client) repository(first, second, sshFirst, sshSecond string) (*Repository, error) {
-	clone := first
+func (c *client) repository(result repositoryResponse) (*Repository, error) {
+	clone := result.CloneURL
 	if clone == "" {
-		clone = second
+		clone = result.HTTPURL
 	}
 	if clone != "" {
 		u, err := url.Parse(clone)
-		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "" {
 			return nil, errors.New("provider returned an unsafe clone URL; expected clean HTTPS")
 		}
 		if !strings.EqualFold(u.Host, c.settings.Host) {
 			return nil, errors.New("provider returned a clone URL for a different host")
 		}
 	}
-	ssh := sshFirst
+	ssh := result.SSHURL
 	if ssh == "" {
-		ssh = sshSecond
+		ssh = result.SSHURLToRepo
 	}
 	return &Repository{CloneURL: clone, SSHURL: ssh}, nil
 }
 
 func (c *client) request(ctx context.Context, method, path string, body any, result any) error {
 	base, err := url.Parse(strings.TrimRight(c.settings.BaseURL, "/"))
-	if err != nil || base.Scheme != "https" || base.Host == "" {
-		return errors.New("provider base URL must use HTTPS")
+	if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil || base.RawPath != "" || base.RawQuery != "" || base.Fragment != "" {
+		return errors.New("provider base URL must be a clean HTTPS URL")
 	}
 	target := strings.TrimRight(base.String(), "/") + path
 	var reader io.Reader
@@ -186,13 +191,7 @@ func (c *client) request(ctx context.Context, method, path string, body any, res
 	if err != nil {
 		return fmt.Errorf("build provider request: %w", err)
 	}
-	if c.settings.Type == "github" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	} else {
-		req.Header.Set("PRIVATE-TOKEN", c.token)
-	}
+	c.adapter.authorize(req, c.token)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -206,7 +205,7 @@ func (c *client) request(ctx context.Context, method, path string, body any, res
 		if resp.StatusCode == http.StatusNotFound {
 			return fmt.Errorf("%w: HTTP %d", ErrNotFound, resp.StatusCode)
 		}
-		if resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusUnprocessableEntity || resp.StatusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(string(message)), "taken") {
+		if c.adapter.isConflict(resp.StatusCode, string(message)) {
 			return fmt.Errorf("%w: HTTP %d", ErrConflict, resp.StatusCode)
 		}
 		return fmt.Errorf("HTTP %d", resp.StatusCode)

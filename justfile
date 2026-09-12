@@ -42,13 +42,14 @@ compile:
     @mkdir -p bin
     @CGO_ENABLED=0 go build -buildvcs=false -o bin/colt ./cmd/colt
 
-# Run check the developer/support environment.
+# Run the default Colt suite and lightweight repository checks.
 [group('Development')]
 test:
+    bash "{{ justfile_directory() }}/scripts/development/test.sh"
     bash "{{ justfile_directory() }}/scripts/development/test_core_template.sh"
 
 # Test layers: unit (fast, no network/containers) → integration (real Gitea/
-# Forgejo in containers, -tags integration) → features (BDD end-to-end).
+# Forgejo backend characterization in containers) → product BDD.
 # Every recipe delegates to scripts/development/test.sh; see tests/README.md.
 
 # Fast unit lane: parsers, config, command generation, API mapping. No network.
@@ -56,7 +57,7 @@ test:
 test-unit:
     @bash "{{ justfile_directory() }}/scripts/development/test.sh" unit
 
-# Integration lane: real Gitea + Forgejo backends in ephemeral containers.
+# Integration lane: tagged Colt/Gitea vertical flow plus optional backend probes.
 # Env: CONTAINER_TOOL (default podman), GITEA_IMAGE, FORGEJO_IMAGE,
 # GITEA_PORT/FORGEJO_PORT (defaults 13000/13001), COLT_IT_KEEP=1 to debug.
 [group('Development')]

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Verify the template's core principles are intact. Run from the repo root:
+# Verify the repository's lightweight structural checks. Run from the repo root:
 #   just test            (preferred)
-#   bash scripts/utility/test.sh
+#   bash scripts/development/test_core_template.sh
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
@@ -19,10 +19,10 @@ check() {
     fi
 }
 
-echo "template principles"
+echo "repository checks"
 echo
 
-echo "[1] justfile is the entrypoint"
+echo "[1] convenience justfile is valid"
 check "justfile present" test -f justfile
 check "justfile parses"  just --list --unsorted
 

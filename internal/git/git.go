@@ -16,8 +16,8 @@ type Runner interface {
 	SetIdentity(context.Context, string, string, string) error
 	Commit(context.Context, string) (string, error)
 	AddOrigin(context.Context, string, string) error
-	ConfigureCredentialHelper(context.Context, string) error
-	Push(context.Context, string, string, string, string) error
+	ConfigureCredentialHelper(context.Context, string, string, string) error
+	Push(context.Context, string, string, string, string, string) error
 }
 
 type Native struct{}
@@ -58,7 +58,7 @@ func (n Native) AddOrigin(ctx context.Context, dir, cloneURL string) error {
 	return n.run(ctx, dir, nil, "remote", "add", "origin", cloneURL)
 }
 
-func (n Native) ConfigureCredentialHelper(ctx context.Context, dir string) error {
+func (n Native) ConfigureCredentialHelper(ctx context.Context, dir, cloneURL, username string) error {
 	const helper = "!colt git-credential"
 	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get-all", "credential.helper")
 	cmd.Dir = dir
@@ -72,18 +72,31 @@ func (n Native) ConfigureCredentialHelper(ctx context.Context, dir string) error
 	}
 	for _, configured := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if configured == helper {
-			return n.run(ctx, dir, nil, "config", "--local", "credential.useHttpPath", "true")
+			return n.configureCredentialScope(ctx, dir, cloneURL, username)
 		}
 	}
 	if err := n.run(ctx, dir, nil, "config", "--local", "--add", "credential.helper", helper); err != nil {
 		return err
 	}
-	return n.run(ctx, dir, nil, "config", "--local", "credential.useHttpPath", "true")
+	return n.configureCredentialScope(ctx, dir, cloneURL, username)
 }
 
-func (n Native) Push(ctx context.Context, dir, cloneURL, providerType, token string) error {
+func (n Native) configureCredentialScope(ctx context.Context, dir, cloneURL, username string) error {
+	if err := n.run(ctx, dir, nil, "config", "--local", "credential.useHttpPath", "true"); err != nil {
+		return err
+	}
+	if username == "" {
+		return nil
+	}
+	if strings.ContainsAny(username, "\r\n") {
+		return errors.New("refusing unsafe Git credential username")
+	}
+	return n.run(ctx, dir, nil, "config", "--local", "credential."+cloneURL+".username", username)
+}
+
+func (n Native) Push(ctx context.Context, dir, cloneURL, providerType, username, token string) error {
 	if strings.HasPrefix(cloneURL, "git@") {
-		if err := n.runWithEnv(ctx, dir, os.Environ(), "push", "--set-upstream", "origin", "HEAD"); err != nil {
+		if err := n.run(ctx, dir, nil, "push", "--set-upstream", "origin", "HEAD"); err != nil {
 			return errors.New("native git push failed; check SSH access and connectivity")
 		}
 		return nil
@@ -91,13 +104,18 @@ func (n Native) Push(ctx context.Context, dir, cloneURL, providerType, token str
 	if !strings.HasPrefix(cloneURL, "https://") {
 		return errors.New("unsupported Git transport")
 	}
-	username := "x-access-token"
+	gitUsername := "x-access-token"
 	if providerType == "gitlab" {
-		username = "oauth2"
+		gitUsername = "oauth2"
+	} else if providerType == "gitea" || providerType == "forgejo" {
+		if username == "" || strings.ContainsAny(username, "\r\n") {
+			return errors.New("Gitea/Forgejo Git authentication requires a safe authenticated username")
+		}
+		gitUsername = username
 	} else if providerType != "github" {
 		return fmt.Errorf("unsupported provider type %q", providerType)
 	}
-	header := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(username+":"+token))
+	header := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(gitUsername+":"+token))
 	env := []string{
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_CONFIG_COUNT=2",
@@ -106,9 +124,13 @@ func (n Native) Push(ctx context.Context, dir, cloneURL, providerType, token str
 		"GIT_CONFIG_KEY_1=http.followRedirects",
 		"GIT_CONFIG_VALUE_1=false",
 	}
+	if ca := os.Getenv("SSL_CERT_FILE"); ca != "" {
+		env[1] = "GIT_CONFIG_COUNT=3"
+		env = append(env, "GIT_CONFIG_KEY_2=http.sslCAInfo", "GIT_CONFIG_VALUE_2="+ca)
+	}
 	err := n.run(ctx, dir, env, "push", "--set-upstream", "origin", "HEAD")
 	if err != nil {
-		return errors.New("native git push failed; check authentication, remote access, and connectivity")
+		return fmt.Errorf("native git push failed; check authentication, remote access, and connectivity: %w", err)
 	}
 	return nil
 }
@@ -141,7 +163,7 @@ func gitEnv(extraEnv []string) []string {
 	env := make([]string, 0, len(os.Environ())+len(extraEnv)+2)
 	for _, item := range os.Environ() {
 		name, _, _ := strings.Cut(item, "=")
-		if strings.HasPrefix(name, "GIT_") {
+		if strings.HasPrefix(strings.ToUpper(name), "GIT_") {
 			continue
 		}
 		env = append(env, item)

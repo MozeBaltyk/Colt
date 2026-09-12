@@ -1,5 +1,5 @@
 Feature: Provider configuration and authentication
-  Provider API authentication, Git transport, and Git identity stay separate. Secure storage and interactive persistence remain unimplemented.
+  Provider API authentication, Git transport, and Git identity stay separate. Persistent storage and stored-credential logout remain unimplemented; the plaintext FileStore is not enabled in production.
 
   @unimplemented @CORE-PROVIDER-006 @CORE-PROVIDER-002 @CORE-CREDENTIAL-002
   Scenario: Interactive GitHub authentication succeeds
@@ -92,7 +92,7 @@ Feature: Provider configuration and authentication
     Then the provider receives the resolved credential without knowing its backend type
     And config.yaml contains no reusable credential value
 
-  @CORE-CREDENTIAL-005 @CORE-CREDENTIAL-006 @CORE-CREDENTIAL-007
+  @unimplemented @CORE-CREDENTIAL-005 @CORE-CREDENTIAL-006 @CORE-CREDENTIAL-007
   Scenario: Stored credential resolves from an injected plaintext credential subsystem
     Given provider "personal" has auth source "stored" with credential_id "github.com/personal"
     And a plaintext file credential store is explicitly injected with "github.com/personal"
@@ -100,7 +100,7 @@ Feature: Provider configuration and authentication
     Then the provider receives the resolved credential without knowing its backend type
     And provider configuration is unchanged
 
-  @CORE-CREDENTIAL-006 @CORE-CREDENTIAL-002
+  @unimplemented @CORE-CREDENTIAL-006 @CORE-CREDENTIAL-002
   Scenario: Plaintext credential serialization is versioned
     Given the plaintext fallback file declares "version: 1"
     And it holds credential_id "github.com/personal"
@@ -156,7 +156,7 @@ Feature: Provider configuration and authentication
     Then no reusable credential is written to any file
     And the command reports that authentication was not persisted
 
-  @CORE-CREDENTIAL-006 @CORE-CREDENTIAL-002
+  @unimplemented @CORE-CREDENTIAL-006 @CORE-CREDENTIAL-002
   Scenario Outline: Unsafe credential file permissions are rejected safely
     Given the plaintext credential file <condition>
     When Colt resolves the persisted credential
@@ -373,7 +373,7 @@ Feature: Provider configuration and authentication
     Then provider status still reports "connected"
     And the Git failure is reported separately from provider authentication
 
-  @CORE-PROVIDER-008 @CORE-CREDENTIAL-007
+  @unimplemented @CORE-PROVIDER-008 @CORE-CREDENTIAL-007
   Scenario: Logout removes only the selected credential ID
     Given provider "personal" has auth source "stored" with credential_id "github.com/personal"
     And an injected credential store holds "github.com/personal" with secret "selected-logout-secret"
@@ -385,7 +385,7 @@ Feature: Provider configuration and authentication
     And provider configuration is unchanged
     And no provider or native Git operation is invoked
 
-  @CORE-PROVIDER-008
+  @unimplemented @CORE-PROVIDER-008
   Scenario: Logout works without provider connectivity
     Given provider "personal" has auth source "stored" with credential_id "github.com/personal"
     And an injected credential store holds "github.com/personal" with secret "offline-logout-secret"
@@ -396,7 +396,7 @@ Feature: Provider configuration and authentication
     And provider configuration is unchanged
     And no provider API or Git remote is contacted
 
-  @CORE-PROVIDER-008
+  @unimplemented @CORE-PROVIDER-008
   Scenario: Environment credential remains usable after stored credential logout
     Given provider "personal" has auth source "stored" with credential_id "github.com/personal"
     And an injected credential store holds "github.com/personal" with secret "stored-logout-secret"

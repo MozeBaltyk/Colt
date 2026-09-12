@@ -73,10 +73,10 @@ func (f *FakeGit) AddOrigin(ctx context.Context, dir, url string) error {
 	return nil
 }
 
-func (f *FakeGit) ConfigureCredentialHelper(ctx context.Context, dir string) error {
+func (f *FakeGit) ConfigureCredentialHelper(ctx context.Context, dir, cloneURL, username string) error {
 	f.Operations = append(f.Operations, "helper")
 	if f.Real {
-		if err := (gitnative.Native{}).ConfigureCredentialHelper(ctx, dir); err != nil {
+		if err := (gitnative.Native{}).ConfigureCredentialHelper(ctx, dir, cloneURL, username); err != nil {
 			return err
 		}
 	}
@@ -84,7 +84,7 @@ func (f *FakeGit) ConfigureCredentialHelper(ctx context.Context, dir string) err
 	return nil
 }
 
-func (f *FakeGit) Push(_ context.Context, _ /* dir */, url, _, token string) error {
+func (f *FakeGit) Push(_ context.Context, _ /* dir */, url, _, _, token string) error {
 	f.Operations = append(f.Operations, "push")
 	if f.PushErr != nil {
 		return f.PushErr

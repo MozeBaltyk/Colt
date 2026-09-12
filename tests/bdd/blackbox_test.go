@@ -4,6 +4,7 @@ package bdd
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,6 +41,24 @@ func TestBlackbox(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, "demo", ".git")); err != nil {
 			t.Fatalf("local repository missing: %v", err)
 		}
+		repository := filepath.Join(dir, "demo")
+		for _, check := range []struct {
+			name string
+			args []string
+			want string
+		}{
+			{"commit count", []string{"rev-list", "--count", "HEAD"}, "1"},
+			{"local name", []string{"config", "--local", "user.name"}, "Example User"},
+			{"local email", []string{"config", "--local", "user.email"}, "user@example.invalid"},
+			{"commit identity", []string{"log", "-1", "--format=%an <%ae>|%cn <%ce>"}, "Example User <user@example.invalid>|Example User <user@example.invalid>"},
+			{"no origin", []string{"remote"}, ""},
+		} {
+			t.Run(check.name, func(t *testing.T) {
+				if got := runBlackboxGit(t, repository, configPath, check.args...); got != check.want {
+					t.Fatalf("git %s = %q, want %q", strings.Join(check.args, " "), got, check.want)
+				}
+			})
+		}
 	})
 
 	t.Run("offline status", func(t *testing.T) {
@@ -47,6 +66,19 @@ func TestBlackbox(t *testing.T) {
 		output := runBlackbox(t, binary, dir, configPath, "auth", "status", "--offline")
 		if output != "no providers configured\n" {
 			t.Fatalf("unexpected status output: %q", output)
+		}
+	})
+
+	t.Run("invalid command exits with a useful error", func(t *testing.T) {
+		dir, configPath := blackboxSandbox(t)
+		ctx, cancel := context.WithTimeout(context.Background(), fixture.CommandTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, binary, "not-a-command")
+		cmd.Dir, cmd.Env = dir, blackboxEnv(filepath.Join(dir, "home"), configPath)
+		output, err := cmd.CombinedOutput()
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !strings.Contains(string(output), "unknown command") {
+			t.Fatalf("error=%v output=%q", err, output)
 		}
 	})
 }
@@ -74,6 +106,19 @@ func runBlackbox(t *testing.T, binary, dir, configPath string, args ...string) s
 	return string(output)
 }
 
+func runBlackboxGit(t *testing.T, dir, configPath string, args ...string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), fixture.CommandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir, cmd.Env = dir, blackboxEnv(filepath.Join(filepath.Dir(configPath), "home"), configPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
+	}
+	return strings.TrimSpace(string(output))
+}
+
 func blackboxEnv(home, configPath string) []string {
 	overrides := map[string]string{
 		"HOME": home, "COLT_CONFIG": configPath, "COLT_BDD_TOKEN": "bdd-fake-secret",
@@ -85,7 +130,8 @@ func blackboxEnv(home, configPath string) []string {
 	env := make([]string, 0, len(os.Environ())+len(overrides))
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
-		if _, replaced := overrides[name]; !replaced {
+		_, replaced := overrides[name]
+		if !replaced && !strings.HasPrefix(name, "GIT_") {
 			env = append(env, entry)
 		}
 	}

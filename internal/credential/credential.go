@@ -77,7 +77,7 @@ func ValidateID(id string) error {
 // Resolver resolves a provider credential in the normative order:
 //
 //  1. explicitly configured token_env (missing/empty fails, no fallthrough)
-//  2. conventional provider variable (GITHUB_TOKEN/GITLAB_TOKEN, empty falls through)
+//  2. conventional provider variable (for example GITHUB_TOKEN, empty falls through)
 //  3. persisted Colt credential for credentialID (secure store, then fallback)
 //  4. otherwise credentials missing
 //
@@ -98,10 +98,18 @@ func (r Resolver) getenv(name string) string {
 
 // ConventionalVar returns the provider-default environment variable.
 func ConventionalVar(providerType string) string {
-	if providerType == "github" {
+	switch providerType {
+	case "github":
 		return "GITHUB_TOKEN"
+	case "gitlab":
+		return "GITLAB_TOKEN"
+	case "gitea":
+		return "GITEA_TOKEN"
+	case "forgejo":
+		return "FORGEJO_TOKEN"
+	default:
+		return ""
 	}
-	return "GITLAB_TOKEN"
 }
 
 // Resolve returns the credential for one provider. tokenEnv is the
@@ -116,8 +124,10 @@ func (r Resolver) Resolve(providerType, tokenEnv, credentialID string) (Credenti
 		}
 		return Credential{Kind: "bearer_token", Secret: secret, Source: SourceEnvironment}, nil
 	}
-	if secret := r.getenv(ConventionalVar(providerType)); secret != "" {
-		return Credential{Kind: "bearer_token", Secret: secret, Source: SourceEnvironment}, nil
+	if name := ConventionalVar(providerType); name != "" {
+		if secret := r.getenv(name); secret != "" {
+			return Credential{Kind: "bearer_token", Secret: secret, Source: SourceEnvironment}, nil
+		}
 	}
 	if credentialID != "" {
 		if err := ValidateID(credentialID); err != nil {

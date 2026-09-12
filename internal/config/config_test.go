@@ -13,6 +13,8 @@ func validProvider(kind string) Provider {
 	p := Provider{Type: kind, Namespace: "team", Visibility: "private", GitName: "Colt User", GitEmail: "colt@example.com", Auth: Auth{Source: "env"}}
 	if kind == "github" {
 		p.Host, p.BaseURL = "github.com", "https://api.github.com"
+	} else if kind == "gitea" {
+		p.Host, p.BaseURL = "code.example.com", "https://code.example.com"
 	} else {
 		p.Host, p.BaseURL = "gitlab.com", "https://gitlab.com"
 	}
@@ -56,6 +58,7 @@ func TestCORE_RESOLVE_001_002ProviderNeutralPrecedence(t *testing.T) {
 		{"default", "", "personal", Config{Providers: map[string]Provider{"personal": defaultGitHub, "work": gitlab}}, ""},
 		{"sole github", "", "one", Config{Providers: map[string]Provider{"one": github}}, ""},
 		{"sole gitlab", "", "one", Config{Providers: map[string]Provider{"one": gitlab}}, ""},
+		{"sole gitea", "", "one", Config{Providers: map[string]Provider{"one": validProvider("gitea")}}, ""},
 		{"none", "", "", Config{Providers: map[string]Provider{}}, "run 'colt auth login' first"},
 		{"ambiguous", "", "", Config{Providers: map[string]Provider{"one": github, "two": gitlab}}, "ambiguous"},
 		{"unknown explicit", "missing", "", Config{Providers: map[string]Provider{"one": github}}, "unknown provider"},
@@ -93,6 +96,76 @@ func TestINIT_007TransportDefaultsToHTTPSAndValidatesSSH(t *testing.T) {
 	}
 }
 
+func TestGiteaProviderValidation(t *testing.T) {
+	p := validProvider("gitea")
+	if err := ValidateProvider("work", p); err != nil {
+		t.Fatalf("valid Gitea provider rejected: %v", err)
+	}
+	for _, tc := range []struct {
+		name, want string
+		change     func(*Provider)
+	}{
+		{"HTTP base URL", "clean HTTPS", func(p *Provider) { p.BaseURL = "http://code.example.com" }},
+		{"different base host", "Gitea host and base_url host must match", func(p *Provider) { p.BaseURL = "https://other.example.com" }},
+		{"nested owner", "nested namespaces", func(p *Provider) { p.Namespace = "team/sub" }},
+		{"internal visibility", "visibility", func(p *Provider) { p.Visibility = "internal" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := p
+			tc.change(&candidate)
+			if err := ValidateProvider("work", candidate); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ValidateProvider() error = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateProviderRejectsInvalidFields(t *testing.T) {
+	tests := []struct {
+		name, want string
+		change     func(*Provider)
+	}{
+		{"legacy token environment", "top-level token_env", func(p *Provider) { p.LegacyTokenEnv = "TOKEN" }},
+		{"unsafe alias", "alias must start", func(*Provider) {}},
+		{"unknown type", "type must be", func(p *Provider) { p.Type = "bitbucket" }},
+		{"host with scheme", "host must be", func(p *Provider) { p.Host = "https://gitlab.com" }},
+		{"base URL with credentials", "clean HTTPS URL", func(p *Provider) { p.BaseURL = "https://user@gitlab.com" }},
+		{"GitLab host mismatch", "host and base_url host must match", func(p *Provider) { p.Host = "git.example.com" }},
+		{"Gitea host mismatch", "Gitea host and base_url host must match", func(p *Provider) {
+			*p = validProvider("gitea")
+			p.Host = "other.example.com"
+		}},
+		{"nested GitHub namespace", "nested namespaces", func(p *Provider) {
+			p.Type, p.Host, p.BaseURL, p.Namespace = "github", "github.com", "https://api.github.com", "team/subgroup"
+		}},
+		{"unsafe namespace segment", "safe non-empty path segments", func(p *Provider) { p.Namespace = "team/../subgroup" }},
+		{"GitHub internal visibility", "visibility must be", func(p *Provider) {
+			p.Type, p.Host, p.BaseURL, p.Visibility = "github", "github.com", "https://api.github.com", "internal"
+		}},
+		{"multiline Git name", "git_name", func(p *Provider) { p.GitName = "Colt\nUser" }},
+		{"invalid Git email", "git_email", func(p *Provider) { p.GitEmail = "not-an-email" }},
+		{"invalid token environment", "environment variable name", func(p *Provider) { p.Auth.TokenEnv = "BAD-NAME" }},
+		{"env source with credential ID", "only valid for a stored source", func(p *Provider) { p.Auth.CredentialID = "gitlab.com/personal" }},
+		{"stored source with token environment", "only valid for an env source", func(p *Provider) {
+			p.Auth = Auth{Source: "stored", CredentialID: "gitlab.com/personal", TokenEnv: "TOKEN"}
+		}},
+		{"unknown auth source", "auth.source must be", func(p *Provider) { p.Auth.Source = "file" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validProvider("gitlab")
+			tc.change(&p)
+			alias := "personal"
+			if tc.name == "unsafe alias" {
+				alias = "-personal"
+			}
+			if err := ValidateProvider(alias, p); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ValidateProvider() error = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestCORE_CREDENTIAL_001_002_003EnvironmentOnly(t *testing.T) {
 	tests := []struct {
 		name, kind, configured, envName, value string
@@ -101,6 +174,8 @@ func TestCORE_CREDENTIAL_001_002_003EnvironmentOnly(t *testing.T) {
 		{"configured", "gitlab", "COMPANY_GL_TOKEN", "COMPANY_GL_TOKEN", "secret", false},
 		{"github default", "github", "", "GITHUB_TOKEN", "secret", false},
 		{"gitlab default", "gitlab", "", "GITLAB_TOKEN", "secret", false},
+		{"gitea default", "gitea", "", "GITEA_TOKEN", "secret", false},
+		{"forgejo default", "forgejo", "", "FORGEJO_TOKEN", "secret", false},
 		{"missing", "gitlab", "MISSING_COLT_TEST_TOKEN", "MISSING_COLT_TEST_TOKEN", "", true},
 		{"empty", "github", "EMPTY_COLT_TEST_TOKEN", "EMPTY_COLT_TEST_TOKEN", "", true},
 	}

@@ -1,17 +1,17 @@
 # Tests
 
-Three layers, slowest last. Every Development test recipe delegates to
-`scripts/development/test.sh <layer>` — run `just test-unit` (preferred) or
-the script directly.
+`just test` is the default gate. It runs Colt's unit and deterministic BDD
+suites, including BDD subpackages, then the lightweight repository check.
+Development test recipes delegate to `scripts/development/test.sh <layer>`.
 
 | Layer | Location | Command | Needs |
 |---|---|---|---|
 | unit | `internal/*/*_test.go` (colocated, Go-idiomatic) | `just test-unit` | nothing (no network) |
-| integration | `integration/` (`-tags integration`) | `just test-integration` | container tool + registry access |
+| integration | `integration/` (`-tags integration`) | `just test-integration` | Podman or Docker, registry access, native Git |
 | features | `features/*.feature` driven by `tests/bdd/` | `just test-bdd` | native `git` on PATH |
 
 Plus: `just test-bdd-blackbox` (real binary smoke-test, build tag `bdd`),
-`just bdd-coverage` (regenerates `.local/bdd-coverage.md`).
+`just bdd-coverage` (regenerates `.local/bdd-coverage.md`), and `go vet ./...`.
 
 ## `tests/bdd/` layout
 
@@ -41,18 +41,18 @@ Rules:
   import them; `go build ./...` and `go vet ./...` cover them like product code.
 - Scenario status lives in feature tags, enforced by `TestBDDTagHygiene`:
   no tag = active and executed; `@planned` / `@unimplemented` = excluded from
-  `just test-bdd`; `@integration` is reserved for selected live-backend
-  workflows (none exist yet — they will run under `just test-integration`
-  when the adapters land).
+  `just test-bdd`; `@integration` workflows run the real binary against live
+  container backends under `just test-integration`.
 
 ## `integration/` layout
 
-Single build-tagged package (`integration_test.go`): container lifecycle
-(pull → run → wait-ready → admin/token bootstrap → remove) plus one test per
-backend behavior (version, token auth, repo create + HTTP clone/push
-roundtrip verified with `ls-remote`). Backend images, ports, and credentials
-are env-overridable; see the file header. When Gitea/Forgejo adapters land,
-their contract tests plug into this harness.
+Single build-tagged package (`integration_test.go`): shared container lifecycle
+(pull → run → wait-ready → admin/token bootstrap → remove), backend probes, and
+the tagged Godog Gitea and Forgejo workflows. Each workflow creates an ephemeral CA,
+runs the provider with trusted HTTPS, builds and invokes Colt, then verifies the pushed
+branch through Git using Colt's repository-local credential helper. CI runs both
+vertical scenarios with Docker; the explicit local recipe also runs the optional
+Gitea/Forgejo backend probes.
 
 ## Adding coverage
 

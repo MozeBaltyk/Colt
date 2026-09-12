@@ -97,6 +97,14 @@ func (a *App) gitCredentialCommand() *cobra.Command {
 			username := "x-access-token"
 			if p.Type == "gitlab" {
 				username = "oauth2"
+			} else if p.Type == "gitea" || p.Type == "forgejo" {
+				username = request["username"]
+				if username == "" {
+					username = p.Namespace
+				}
+				if strings.ContainsAny(username, "\r\n") {
+					return nil
+				}
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "username=%s\npassword=%s\n\n", username, token)
 			return err
@@ -179,7 +187,7 @@ func (a *App) authCommand() *cobra.Command {
 	}
 	opts := authOptions{}
 	login := &cobra.Command{
-		Use:   "login <github|gitlab> <alias>",
+		Use:   "login <github|gitlab|gitea|forgejo> <alias>",
 		Short: "Log in to a provider",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -207,9 +215,9 @@ func (a *App) authCommand() *cobra.Command {
 	}
 	logout.Flags().BoolVar(&revoke, "revoke", false, "unsupported: provider-side revocation is not implemented")
 	f := login.Flags()
-	f.StringVar(&opts.host, "host", "", "provider host (defaults to github.com or gitlab.com)")
+	f.StringVar(&opts.host, "host", "", "provider host (required for Gitea/Forgejo; defaults for GitHub and GitLab)")
 	f.StringVar(&opts.baseURL, "base-url", "", "HTTPS API base URL (defaults from provider host)")
-	f.StringVar(&opts.namespace, "namespace", "", "repository owner: GitHub username or organization; GitLab group or subgroup/full path (required)")
+	f.StringVar(&opts.namespace, "namespace", "", "repository owner: GitHub/Gitea/Forgejo user or organization; GitLab group or subgroup/full path (required)")
 	f.StringVar(&opts.visibility, "visibility", "private", "default repository visibility")
 	f.StringVar(&opts.gitName, "git-name", "", "repository-local Git author name (required)")
 	f.StringVar(&opts.gitEmail, "git-email", "", "repository-local Git author email (required)")
@@ -335,6 +343,10 @@ func providerTypeName(t string) string {
 		return "GitHub"
 	case "gitlab":
 		return "GitLab"
+	case "gitea":
+		return "Gitea"
+	case "forgejo":
+		return "Forgejo"
 	default:
 		return t
 	}
@@ -381,6 +393,10 @@ func (a *App) loginProvider(cmd *cobra.Command, providerType, alias string, opts
 		if baseURL == "" {
 			baseURL = "https://" + host
 		}
+	} else if providerType == "gitea" && host != "" && baseURL == "" {
+		baseURL = "https://" + host
+	} else if providerType == "forgejo" && host != "" && baseURL == "" {
+		baseURL = "https://" + host
 	}
 	p := config.Provider{
 		Type: providerType, Host: host, BaseURL: strings.TrimRight(baseURL, "/"), Namespace: opts.namespace,
@@ -492,10 +508,17 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) e
 		}
 	}
 	var client provider.Client
+	gitUsername := ""
 	if !opts.local {
 		client, err = a.NewClient(selected, token)
 		if err != nil {
 			return err
+		}
+		if selected.Type == "gitea" || selected.Type == "forgejo" {
+			gitUsername, err = client.Authenticate(cmd.Context())
+			if err != nil {
+				return err
+			}
 		}
 		repo, getErr := client.Get(cmd.Context(), project)
 		if getErr == nil && repo != nil {
@@ -551,11 +574,11 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) e
 	pushToken := ""
 	if transport == "https" {
 		pushToken = token
-		if err := a.Git.ConfigureCredentialHelper(cmd.Context(), destination); err != nil {
+		if err := a.Git.ConfigureCredentialHelper(cmd.Context(), destination, cloneURL, gitUsername); err != nil {
 			return partial("configure credential helper", destination, "created at "+cloneURL, "configure the Colt helper locally, then push HEAD", err)
 		}
 	}
-	if err := a.Git.Push(cmd.Context(), destination, cloneURL, selected.Type, pushToken); err != nil {
+	if err := a.Git.Push(cmd.Context(), destination, cloneURL, selected.Type, gitUsername, pushToken); err != nil {
 		return partial("push initial commit", destination, "created at "+cloneURL, "run 'git push --set-upstream origin HEAD' after fixing authentication or connectivity", err)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "initialized %s via %s in namespace %s at %s; initial commit %s; remote %s\n", project, alias, selected.Namespace, destination, commit, cloneURL)

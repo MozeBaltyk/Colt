@@ -132,24 +132,24 @@ func ValidateProvider(alias string, p Provider) error {
 	if !nameRE.MatchString(alias) {
 		return errors.New("alias must start with a letter or digit and contain only letters, digits, '.', '_' or '-'")
 	}
-	if p.Type != "github" && p.Type != "gitlab" {
-		return errors.New("type must be github or gitlab")
+	if p.Type != "github" && p.Type != "gitlab" && p.Type != "gitea" && p.Type != "forgejo" {
+		return errors.New("type must be github, gitlab, gitea or forgejo")
 	}
 	if strings.TrimSpace(p.Host) == "" || strings.ContainsAny(p.Host, "/@?#") {
 		return errors.New("host must be a hostname without a scheme or path")
 	}
 	u, err := url.Parse(p.BaseURL)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("base_url must be a clean HTTPS URL")
 	}
 	if p.Type == "github" && (p.Host != "github.com" || strings.TrimRight(p.BaseURL, "/") != "https://api.github.com") {
 		return errors.New("the MVP supports GitHub.com with https://api.github.com only")
 	}
-	if p.Type == "gitlab" && !strings.EqualFold(u.Host, p.Host) {
-		return errors.New("GitLab host and base_url host must match")
+	if p.Type != "github" && !strings.EqualFold(u.Host, p.Host) {
+		return fmt.Errorf("%s host and base_url host must match", providerName(p.Type))
 	}
 	parts := strings.Split(p.Namespace, "/")
-	if strings.TrimSpace(p.Namespace) == "" || p.Type == "github" && len(parts) != 1 {
+	if strings.TrimSpace(p.Namespace) == "" || p.Type != "gitlab" && len(parts) != 1 {
 		return errors.New("namespace is required (nested namespaces are supported only by GitLab)")
 	}
 	for _, part := range parts {
@@ -194,6 +194,19 @@ func ValidateProvider(alias string, p Provider) error {
 		return errors.New("auth.source must be env or stored")
 	}
 	return nil
+}
+
+func providerName(providerType string) string {
+	switch providerType {
+	case "gitlab":
+		return "GitLab"
+	case "gitea":
+		return "Gitea"
+	case "forgejo":
+		return "Forgejo"
+	default:
+		return providerType
+	}
 }
 
 func (c Config) Resolve(explicit string) (string, Provider, error) {

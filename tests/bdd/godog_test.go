@@ -47,8 +47,7 @@ func TestBDD(t *testing.T) {
 			Strict:      true,
 			Concurrency: 1,
 			// Status tags are the only exclusions: every other scenario executes.
-			// @integration is reserved for selected live-backend workflows
-			// (see just test-integration); none exist yet.
+			// @integration runs separately against live container backends.
 			Tags:     "~@planned&&~@unimplemented&&~@integration",
 			TestingT: t,
 		},

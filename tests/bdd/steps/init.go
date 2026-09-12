@@ -126,7 +126,7 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return os.WriteFile(w.ConfigPath, []byte(raw), 0o600)
 	})
 	ctx.Step(`^the selected provider transport is unsupported$`, func() error {
-		raw := "providers:\n  work:\n    type: gitlab\n    host: gitlab.com\n    base_url: https://gitlab.com\n    namespace: example-namespace\n    visibility: private\n    git_name: Example User\n    git_email: user@example.invalid\n    transport: ftp\n    auth:\n      source: env\n      token_env: " + fixture.TokenEnv + "\n    default: true\n"
+		raw := "providers:\n  work:\n    type: bitbucket\n    host: bitbucket.com\n    base_url: https://bitbucket.com\n    namespace: example-namespace\n    visibility: private\n    git_name: Example User\n    git_email: user@example.invalid\n    transport: ftp\n    auth:\n      source: env\n      token_env: " + fixture.TokenEnv + "\n    default: true\n"
 		return os.WriteFile(w.ConfigPath, []byte(raw), 0o600)
 	})
 	ctx.Step(`^the selected transport is (HTTPS|SSH)$`, func(transport string) error {
@@ -230,7 +230,7 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 			}
 			w.Run("colt init demo --local")
 		case "an invalid selected provider":
-			raw := "providers:\n  personal:\n    type: gitea\n    host: gitea.example.invalid\n    base_url: https://gitea.example.invalid\n    namespace: example-ns\n    visibility: private\n    git_name: Example User\n    git_email: user@example.invalid\n    auth:\n      source: env\n      token_env: " + fixture.TokenEnv + "\n    default: true\n"
+			raw := "providers:\n  personal:\n    type: bitbucket\n    host: bitbucket.example.invalid\n    base_url: https://bitbucket.example.invalid\n    namespace: example-ns\n    visibility: private\n    git_name: Example User\n    git_email: user@example.invalid\n    auth:\n      source: env\n      token_env: " + fixture.TokenEnv + "\n    default: true\n"
 			if err := os.WriteFile(w.ConfigPath, []byte(raw), 0o600); err != nil {
 				return err
 			}
@@ -250,10 +250,10 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		dst := filepath.Join(w.Dir, "demo")
 		commandCtx, cancel := context.WithTimeout(context.Background(), fixture.CommandTimeout)
 		defer cancel()
-		if err := (gitnative.Native{}).ConfigureCredentialHelper(commandCtx, dst); err != nil {
+		if err := (gitnative.Native{}).ConfigureCredentialHelper(commandCtx, dst, "", ""); err != nil {
 			return err
 		}
-		return (gitnative.Native{}).ConfigureCredentialHelper(commandCtx, dst)
+		return (gitnative.Native{}).ConfigureCredentialHelper(commandCtx, dst, "", "")
 	})
 	ctx.Step(`^I run a command with provider "([^"]*)"$`, func(alias string) error {
 		w.Run("colt init demo --local --provider " + alias)
