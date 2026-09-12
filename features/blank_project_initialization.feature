@@ -14,6 +14,29 @@ Feature: Blank project initialization
     And global Git identity is unchanged
     And no provider mutation was requested
 
+  @INIT-002 @INIT-005 @CORE-CREDENTIAL-003
+  Scenario: Local initialization does not require provider API authentication
+    Given the selected provider uses an unavailable stored API credential
+    When I run "colt init demo --local"
+    Then "demo" is a new Git repository with no remote
+    And it has exactly one initial commit
+    And no provider API credential is read
+    And no provider client, credential helper, or push is invoked
+
+  @INIT-001 @CORE-IDENTITY-001 @CORE-SAFETY-001
+  Scenario: Missing selected Git identity fails preflight
+    Given the selected provider has no Git identity
+    When I run "colt init demo --local"
+    Then the command fails before mutation
+    And preflight state is unchanged with no credential, provider, or Git operation
+
+  @INIT-001 @INIT-007 @CORE-SAFETY-001
+  Scenario: Unsupported transport fails preflight
+    Given the selected provider transport is unsupported
+    When I run "colt init demo"
+    Then the command fails before mutation
+    And preflight state is unchanged with no credential, provider, or Git operation
+
   @INIT-003 @CORE-SAFETY-001
   Scenario: Refuse an existing non-empty destination
     Given destination "demo" exists and contains user data
@@ -32,15 +55,15 @@ Feature: Blank project initialization
     Given native git is unavailable
     When I run "colt init demo --local"
     Then the command fails before mutation with an actionable native git error
+    And no provider client is constructed
 
   @INIT-006 @INIT-007
   Scenario Outline: Initialize and push a remote blank project
     Given the selected provider type is <type>
-    And provider API authentication succeeds
     When I run "colt init demo"
     Then Colt creates repository "demo" in the selected namespace through the <type> HTTP API
     And the created repository URL is the only "origin"
-    And the initial branch and commit are pushed with upstream tracking using native git
+    And the initial commit is submitted once through the configured Git runner
 
     Examples:
       | type   |
@@ -53,18 +76,33 @@ Feature: Blank project initialization
     When I run "colt init demo"
     Then the command fails before creating a remote repository
     And SSH Git access alone does not satisfy the requirement
+    And no local repository, origin, helper, or push is attempted
 
-  @INIT-007
-  Scenario Outline: Initial push may use either Git transport
-    Given the remote repository was created through the provider HTTP API
-    And the authoritative <transport> clone URL matches the selected provider, host, namespace, and repository
-    When Colt pushes the initial branch and commit
-    Then native git uses the <transport> target without persisting credentials in the remote URL
+  @INIT-007 @CORE-GIT-003 @CORE-GIT-005 @CORE-GIT-008
+  Scenario: HTTPS initialization configures the Colt credential helper locally
+    Given the selected provider type is GitHub
+    And the transport preference resolves to HTTPS
+    When I run "colt init demo"
+    Then the "origin" URL is "https://github.com/example-user/demo.git" with no credential in the URL
+    And local Git configuration contains "credential.helper = colt"
+    And ".git/config" contains no reusable credential value
+    And ordinary Git invokes the Colt credential helper to resolve credentials for a later push
 
-    Examples:
-      | transport |
-      | SSH       |
-      | HTTPS     |
+  @INIT-007 @CORE-GIT-003 @CORE-GIT-010
+  Scenario: SSH initialization uses the provider-authoritative SSH URL
+    Given the selected provider type is GitHub
+    And the transport preference resolves to SSH
+    When I run "colt init demo"
+    Then the "origin" URL is "git@github.com:example-user/demo.git"
+    And the SSH user is "git", not the provider account name
+    And native Git handles SSH authentication with no provider token or Colt credential helper injection
+
+  @INIT-004 @CORE-IDENTITY-001
+  Scenario: Colt initialization sets repository-local Git identity
+    Given a valid provider with namespace, defaults, and Git identity is selected
+    When I run "colt init demo --local"
+    Then local Git user.name is "Example User"
+    And local Git user.email is "user@example.invalid"
 
   @INIT-008 @CORE-CONFLICT-001 @CORE-SAFETY-001
   Scenario: Provider creation reports an authoritative race conflict
@@ -89,3 +127,53 @@ Feature: Blank project initialization
     Then the command returns failure and identifies the failed push
     And the local commit, "origin", and remote repository remain intact
     And the result reports local and remote state and a safe recovery action
+
+  @INIT-003 @CORE-SAFETY-001
+  Scenario: Accept an existing empty destination
+    Given destination "demo" exists and is empty
+    When I run "colt init demo --local"
+    Then "demo" is a new Git repository with no remote
+    And it has exactly one initial commit
+    And no provider client is constructed
+
+  @INIT-003 @CORE-SAFETY-001
+  Scenario Outline: Refuse non-directory destinations without changing them
+    Given destination "demo" is a <kind>
+    When I run "colt init demo --local"
+    Then the command fails before changing the <kind>
+    And no provider client is constructed
+
+    Examples:
+      | kind         |
+      | regular file |
+      | symlink      |
+
+  @INIT-001 @CORE-CREDENTIAL-003 @CORE-SAFETY-001
+  Scenario: Missing remote credential fails before any mutation or client construction
+    Given the selected provider credential is missing
+    When I run "colt init demo"
+    Then the command fails before mutation
+    And no mutating Git operation or provider client construction occurs
+
+  @INIT-006 @INIT-007 @CORE-GIT-003 @CORE-SAFETY-001
+  Scenario Outline: Provider success with an invalid selected clone target fails safely
+    Given the selected transport is <transport>
+    And provider creation succeeds with a <target> selected clone target
+    When I run "colt init demo"
+    Then clone target validation fails with the initial commit preserved
+    And no origin, credential helper, or push is attempted
+
+    Examples:
+      | transport | target           |
+      | HTTPS     | missing          |
+      | HTTPS     | wrong repository |
+      | SSH       | missing          |
+      | SSH       | wrong repository |
+
+  @INIT-007 @CORE-GIT-005
+  Scenario: Colt credential helper configuration coexists locally and is idempotent
+    Given a native repository has an existing local credential helper
+    When the Colt credential helper is configured twice
+    Then the existing helper remains and the Colt helper appears exactly once locally
+    And credential.useHttpPath is true in repository-local configuration
+    And global Git configuration is unchanged

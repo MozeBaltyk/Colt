@@ -20,6 +20,7 @@ var ErrConflict = errors.New("repository already exists")
 
 type Repository struct {
 	CloneURL string
+	SSHURL   string
 }
 
 type Client interface {
@@ -90,8 +91,10 @@ func (c *client) Get(ctx context.Context, project string) (*Repository, error) {
 		path = "/api/v4/projects/" + url.PathEscape(c.settings.Namespace+"/"+project)
 	}
 	var result struct {
-		CloneURL string `json:"clone_url"`
-		HTTPURL  string `json:"http_url_to_repo"`
+		CloneURL     string `json:"clone_url"`
+		SSHURL       string `json:"ssh_url"`
+		HTTPURL      string `json:"http_url_to_repo"`
+		SSHURLToRepo string `json:"ssh_url_to_repo"`
 	}
 	err := c.request(ctx, http.MethodGet, path, nil, &result)
 	if errors.Is(err, ErrNotFound) {
@@ -100,7 +103,7 @@ func (c *client) Get(ctx context.Context, project string) (*Repository, error) {
 	if err != nil {
 		return nil, fmt.Errorf("check repository: %w", err)
 	}
-	return c.repository(result.CloneURL, result.HTTPURL)
+	return c.repository(result.CloneURL, result.HTTPURL, result.SSHURL, result.SSHURLToRepo)
 }
 
 func (c *client) Create(ctx context.Context, project string) (*Repository, error) {
@@ -116,11 +119,12 @@ func (c *client) Create(ctx context.Context, project string) (*Repository, error
 		body := map[string]any{"name": project, "private": c.settings.Visibility == "private"}
 		var result struct {
 			CloneURL string `json:"clone_url"`
+			SSHURL   string `json:"ssh_url"`
 		}
 		if err := c.request(ctx, http.MethodPost, path, body, &result); err != nil {
 			return nil, fmt.Errorf("create repository: %w", err)
 		}
-		return c.repository(result.CloneURL, "")
+		return c.repository(result.CloneURL, "", result.SSHURL, "")
 	}
 	var namespace struct {
 		ID       int64  `json:"id"`
@@ -134,27 +138,34 @@ func (c *client) Create(ctx context.Context, project string) (*Repository, error
 	}
 	body := map[string]any{"name": project, "namespace_id": namespace.ID, "visibility": c.settings.Visibility}
 	var result struct {
-		HTTPURL string `json:"http_url_to_repo"`
+		HTTPURL      string `json:"http_url_to_repo"`
+		SSHURLToRepo string `json:"ssh_url_to_repo"`
 	}
 	if err := c.request(ctx, http.MethodPost, "/api/v4/projects", body, &result); err != nil {
 		return nil, fmt.Errorf("create repository: %w", err)
 	}
-	return c.repository("", result.HTTPURL)
+	return c.repository("", result.HTTPURL, "", result.SSHURLToRepo)
 }
 
-func (c *client) repository(first, second string) (*Repository, error) {
+func (c *client) repository(first, second, sshFirst, sshSecond string) (*Repository, error) {
 	clone := first
 	if clone == "" {
 		clone = second
 	}
-	u, err := url.Parse(clone)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return nil, errors.New("provider returned an unsafe clone URL; expected clean HTTPS")
+	if clone != "" {
+		u, err := url.Parse(clone)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return nil, errors.New("provider returned an unsafe clone URL; expected clean HTTPS")
+		}
+		if !strings.EqualFold(u.Host, c.settings.Host) {
+			return nil, errors.New("provider returned a clone URL for a different host")
+		}
 	}
-	if !strings.EqualFold(u.Host, c.settings.Host) {
-		return nil, errors.New("provider returned a clone URL for a different host")
+	ssh := sshFirst
+	if ssh == "" {
+		ssh = sshSecond
 	}
-	return &Repository{CloneURL: u.String()}, nil
+	return &Repository{CloneURL: clone, SSHURL: ssh}, nil
 }
 
 func (c *client) request(ctx context.Context, method, path string, body any, result any) error {

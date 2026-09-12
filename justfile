@@ -50,6 +50,17 @@ test:
 # Run every active deterministic BDD scenario (local fixtures only).
 [group('Development')]
 test-bdd:
+    @go test ./bdd/ -count=1
+
+# Build and smoke-test the real Colt binary in a sandbox.
+[group('Development')]
+test-bdd-blackbox:
+    @go test -tags bdd ./bdd/ -run '^TestBlackbox$' -count=1
+
+# Explicitly regenerate deterministic requirement-to-scenario coverage.
+[group('Development')]
+bdd-coverage:
+    @go test ./bdd/ -run '^TestBDDRequirementIndex$' -count=1 -args -update-bdd-coverage
 
 # Verify all CLI tools are present in the EE image. Presence check only: runs
 # the image with a read-only workspace and no Kubernetes credential mount.

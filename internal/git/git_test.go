@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -21,6 +22,7 @@ func TestINIT_007ProviderSpecificPushCredentialIsProcessScopedAndRedacted(t *tes
 			script := filepath.Join(bin, "git")
 			contents := `#!/bin/sh
 case "$*" in *test-secret*) echo "token leaked in arguments"; exit 2;; esac
+test "$*" = "push --set-upstream origin HEAD" || exit 8
 test "$GIT_CONFIG_COUNT" = 2 || exit 3
 test "$GIT_CONFIG_KEY_0" = "http.https://example.test/team/demo.git.extraHeader" || exit 4
 test "$GIT_CONFIG_KEY_1" = "http.followRedirects" || exit 5
@@ -79,5 +81,76 @@ func TestCORE_CREDENTIAL_002InheritedGitExecPathCannotStealPushCredential(t *tes
 	}
 	if _, err := os.Stat(stolen); !os.IsNotExist(err) {
 		t.Fatalf("inherited GIT_EXEC_PATH helper invoked: %v", err)
+	}
+}
+
+func TestCORE_GIT_008CredentialHelperIsLocalAndPreservesExistingHelpers(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	native := Native{}
+	ctx := context.Background()
+	if err := native.Init(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.run(ctx, dir, nil, "config", "--local", "--add", "credential.helper", "existing-helper"); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.ConfigureCredentialHelper(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.ConfigureCredentialHelper(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get-all", "credential.helper")
+	cmd.Dir, cmd.Env = dir, gitEnv(nil)
+	output, err := cmd.Output()
+	if err != nil || string(output) != "existing-helper\n!colt git-credential\n" {
+		t.Fatalf("helpers=%q error=%v", output, err)
+	}
+	cmd = exec.CommandContext(ctx, "git", "config", "--local", "--get", "credential.useHttpPath")
+	cmd.Dir, cmd.Env = dir, gitEnv(nil)
+	if output, err = cmd.Output(); err != nil || string(output) != "true\n" {
+		t.Fatalf("credential.useHttpPath=%q error=%v", output, err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".gitconfig")); !os.IsNotExist(err) {
+		t.Fatalf("global config changed: %v", err)
+	}
+}
+
+func TestCORE_GIT_010SSHPushPreservesGitAndSSHEnvironmentWithoutInjectingAuth(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-backed fake git is Unix-only")
+	}
+	bin := t.TempDir()
+	script := filepath.Join(bin, "git")
+	contents := `#!/bin/sh
+test "$*" = "push --set-upstream origin HEAD" || exit 2
+test "$GIT_SSH" = "/user/ssh-wrapper" || exit 3
+test "$GIT_SSH_COMMAND" = "ssh -F user-config" || exit 4
+test "$GIT_SSH_VARIANT" = "ssh" || exit 5
+test "$GIT_CONFIG_GLOBAL" = "/user/global.gitconfig" || exit 6
+test "$GIT_CONFIG_SYSTEM" = "/user/system.gitconfig" || exit 7
+test "$GIT_CONFIG_COUNT" = 1 || exit 8
+test "$GIT_CONFIG_KEY_0" = "core.sshCommand" || exit 9
+test "$GIT_CONFIG_VALUE_0" = "ssh inherited" || exit 10
+test -z "$GIT_CONFIG_KEY_1" || exit 11
+case "$(set)" in *must-not-be-injected*) exit 12;; esac
+`
+	if err := os.WriteFile(script, []byte(contents), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("GIT_SSH", "/user/ssh-wrapper")
+	t.Setenv("GIT_SSH_COMMAND", "ssh -F user-config")
+	t.Setenv("GIT_SSH_VARIANT", "ssh")
+	t.Setenv("GIT_CONFIG_GLOBAL", "/user/global.gitconfig")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/user/system.gitconfig")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.sshCommand")
+	t.Setenv("GIT_CONFIG_VALUE_0", "ssh inherited")
+	t.Setenv("GIT_CONFIG_KEY_1", "")
+	if err := (Native{}).Push(context.Background(), t.TempDir(), "git@example.test:team/demo.git", "github", "must-not-be-injected"); err != nil {
+		t.Fatal(err)
 	}
 }

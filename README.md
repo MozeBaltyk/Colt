@@ -1,11 +1,14 @@
 # Colt
 
-> A provider-independent project manager for Git repositories.
+> One CLI companion for all your Git projects, across providers and throughout their lifecycle.
 
-Colt talks directly to GitHub and GitLab HTTP APIs for hosting operations and
-uses the native `git` executable for repository operations. The specifications
-distinguish implemented, normative M1 behavior from planned milestones; release
-availability still requires corresponding release notes.
+Colt aims to be a provider-independent project manager for Git repositories.
+
+With one CLI, you can connect to multiple Git hosting providers, clone repositories, work with an entire namespace, initialize projects from your own templates, and eventually mirror projects between providers.
+
+Colt talks directly to GitHub and GitLab through their HTTP APIs for hosting operations, while leaving repository operations to native `git`.
+
+The project is being built progressively. Some of the core functionality is already implemented, some M1 requirements are still marked `@unimplemented`, and the rest is organized into planned milestones.
 
 ## First MVP
 
@@ -49,8 +52,10 @@ changes global Git identity. Provider-independent ownership is called a
 
 ## Planned Milestones
 
-Only Milestone 1 is implemented and normative. Planned, not-yet-implemented work
-adds lifecycle list/clone/release primitives (M2), parameterized data-only
+Milestone 1 is partially implemented: environment authentication and blank
+initialization work, while interactive persistence, plaintext fallback, logout,
+and Git transport integration remain explicitly `@unimplemented`. Later planned
+work adds lifecycle list/clone/release primitives (M2), parameterized data-only
 templates (M3), declarative workspace `status`/`sync` (M4), diagnostic project
 health (M5), and a read-only analyzer (M6). Colt is not a wrapper or replacement
 command surface for `gh` or `glab`.

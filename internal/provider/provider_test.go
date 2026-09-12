@@ -15,7 +15,7 @@ import (
 )
 
 func testSettings(kind, base string) config.Provider {
-	return config.Provider{Type: kind, Host: strings.TrimPrefix(base, "https://"), BaseURL: base, Namespace: "team/sub", Visibility: "private", GitName: "Test", GitEmail: "test@example.com"}
+	return config.Provider{Type: kind, Host: strings.TrimPrefix(base, "https://"), BaseURL: base, Namespace: "team/sub", Visibility: "private", GitName: "Test", GitEmail: "test@example.com", Auth: config.Auth{Source: "env"}}
 }
 
 func TestCORE_PROVIDER_001GitHubHTTPSAPIUserAndOrganization(t *testing.T) {
@@ -44,7 +44,7 @@ func TestCORE_PROVIDER_001GitHubHTTPSAPIUserAndOrganization(t *testing.T) {
 					if body["name"] != "demo" || body["private"] != true {
 						t.Errorf("create body = %#v", body)
 					}
-					fmt.Fprintf(w, `{"clone_url":%q}`, server.URL+"/"+tc.namespace+"/demo.git")
+					fmt.Fprintf(w, `{"clone_url":%q,"ssh_url":%q}`, server.URL+"/"+tc.namespace+"/demo.git", "git@github.com:"+tc.namespace+"/demo.git")
 				default:
 					t.Errorf("unexpected path %s", r.URL.Path)
 					w.WriteHeader(http.StatusNotFound)
@@ -58,7 +58,7 @@ func TestCORE_PROVIDER_001GitHubHTTPSAPIUserAndOrganization(t *testing.T) {
 				t.Fatalf("Get() error = %v", err)
 			}
 			repo, err := client.Create(context.Background(), "demo")
-			if err != nil || repo.CloneURL != server.URL+"/"+tc.namespace+"/demo.git" {
+			if err != nil || repo.CloneURL != server.URL+"/"+tc.namespace+"/demo.git" || repo.SSHURL != "git@github.com:"+tc.namespace+"/demo.git" {
 				t.Fatalf("Create() = %#v, %v; paths %v", repo, err, paths)
 			}
 		})
@@ -87,7 +87,7 @@ func TestCORE_PROVIDER_003GitLabConfiguredBaseAndSafeNamespace(t *testing.T) {
 			if body["namespace_id"] != float64(42) || body["visibility"] != "private" {
 				t.Errorf("create body = %#v", body)
 			}
-			fmt.Fprintf(w, `{"http_url_to_repo":%q}`, server.URL+"/team/sub/demo.git")
+			fmt.Fprintf(w, `{"http_url_to_repo":%q,"ssh_url_to_repo":"git@gitlab.com:team/sub/demo.git"}`, server.URL+"/team/sub/demo.git")
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -102,7 +102,7 @@ func TestCORE_PROVIDER_003GitLabConfiguredBaseAndSafeNamespace(t *testing.T) {
 		t.Fatalf("Get() error = %v", err)
 	}
 	repo, err := client.Create(context.Background(), "demo")
-	if err != nil || repo.CloneURL != server.URL+"/team/sub/demo.git" || !sawNamespace || !sawCreate {
+	if err != nil || repo.CloneURL != server.URL+"/team/sub/demo.git" || repo.SSHURL != "git@gitlab.com:team/sub/demo.git" || !sawNamespace || !sawCreate {
 		t.Fatalf("Create() = %#v, %v; namespace=%v create=%v", repo, err, sawNamespace, sawCreate)
 	}
 }

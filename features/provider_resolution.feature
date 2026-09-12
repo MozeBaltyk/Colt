@@ -41,6 +41,7 @@ Feature: Provider resolution
     And "personal" is otherwise selectable
     When provider selection encounters "<condition>"
     Then the command fails without selecting "personal"
+    And preflight state is unchanged with no credential, provider, or Git operation
 
     Examples:
       | condition                      |

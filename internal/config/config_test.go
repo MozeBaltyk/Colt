@@ -5,10 +5,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/MozeBaltyk/Colt/internal/credential"
 )
 
 func validProvider(kind string) Provider {
-	p := Provider{Type: kind, Namespace: "team", Visibility: "private", GitName: "Colt User", GitEmail: "colt@example.com"}
+	p := Provider{Type: kind, Namespace: "team", Visibility: "private", GitName: "Colt User", GitEmail: "colt@example.com", Auth: Auth{Source: "env"}}
 	if kind == "github" {
 		p.Host, p.BaseURL = "github.com", "https://api.github.com"
 	} else {
@@ -76,6 +78,21 @@ func TestCORE_RESOLVE_001_002ProviderNeutralPrecedence(t *testing.T) {
 	}
 }
 
+func TestINIT_007TransportDefaultsToHTTPSAndValidatesSSH(t *testing.T) {
+	p := validProvider("github")
+	if err := ValidateProvider("personal", p); err != nil {
+		t.Fatalf("omitted transport rejected: %v", err)
+	}
+	p.Transport = "ssh"
+	if err := ValidateProvider("personal", p); err != nil {
+		t.Fatalf("SSH transport rejected: %v", err)
+	}
+	p.Transport = "file"
+	if err := ValidateProvider("personal", p); err == nil || !strings.Contains(err.Error(), "https or ssh") {
+		t.Fatalf("unsupported transport error = %v", err)
+	}
+}
+
 func TestCORE_CREDENTIAL_001_002_003EnvironmentOnly(t *testing.T) {
 	tests := []struct {
 		name, kind, configured, envName, value string
@@ -91,8 +108,8 @@ func TestCORE_CREDENTIAL_001_002_003EnvironmentOnly(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(tt.envName, tt.value)
 			p := validProvider(tt.kind)
-			p.TokenEnv = tt.configured
-			token, name, err := Token(p)
+			p.Auth.TokenEnv = tt.configured
+			token, name, err := Token(p, credential.NewMemoryStore())
 			if tt.wantErr {
 				if err == nil || strings.Contains(err.Error(), tt.value+"secret") {
 					t.Fatalf("expected safe credential error, got %v", err)
@@ -103,6 +120,79 @@ func TestCORE_CREDENTIAL_001_002_003EnvironmentOnly(t *testing.T) {
 				t.Fatalf("Token() = %q, %q, %v", token, name, err)
 			}
 		})
+	}
+}
+
+func TestCORE_CREDENTIAL_004AuthSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	p := validProvider("github")
+	p.Auth.TokenEnv = "GITHUB_TOKEN"
+	if err := Save(path, Config{Providers: map[string]Provider{"personal": p}}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"auth:\n", "source: env", "token_env: GITHUB_TOKEN"} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("config %q lacks %q", data, want)
+		}
+	}
+	stored := validProvider("github")
+	stored.Auth = Auth{Source: "stored", CredentialID: "github.com/personal"}
+	if err := (Config{Providers: map[string]Provider{"personal": stored}}).Validate(); err != nil {
+		t.Fatalf("stored auth reference rejected: %v", err)
+	}
+	stored.Auth.CredentialID = ""
+	if err := (Config{Providers: map[string]Provider{"personal": stored}}).Validate(); err == nil {
+		t.Fatal("stored auth without credential_id accepted")
+	}
+	for _, id := range []string{"gitlab.com/personal", "github.com/work"} {
+		stored.Auth.CredentialID = id
+		if err := (Config{Providers: map[string]Provider{"personal": stored}}).Validate(); err == nil {
+			t.Fatalf("mismatched credential_id %q accepted", id)
+		}
+	}
+}
+
+func TestLoadMigratesLegacyTokenEnvAndSaveUsesCanonicalAuth(t *testing.T) {
+	for _, tokenEnv := range []string{"", "LEGACY_TOKEN"} {
+		t.Run(map[string]string{"": "conventional", "LEGACY_TOKEN": "explicit"}[tokenEnv], func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			raw := "providers:\n  work:\n    type: gitlab\n    host: gitlab.com\n    base_url: https://gitlab.com\n    namespace: team\n    visibility: private\n    git_name: Colt User\n    git_email: colt@example.com\n"
+			if tokenEnv != "" {
+				raw += "    token_env: " + tokenEnv + "\n"
+			}
+			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil || cfg.Providers["work"].Auth != (Auth{Source: "env", TokenEnv: tokenEnv}) {
+				t.Fatalf("Load() = %#v, %v", cfg, err)
+			}
+			if err := Save(path, cfg); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || !strings.Contains(string(data), "auth:\n") || strings.Contains(string(data), "\n    token_env:") {
+				t.Fatalf("canonical config = %q, %v", data, err)
+			}
+		})
+	}
+}
+
+func TestStoredAuthUsesConventionalEnvironmentBeforeUnsupportedStore(t *testing.T) {
+	p := validProvider("github")
+	p.Auth = Auth{Source: "stored", CredentialID: "github.com/personal"}
+	t.Setenv("GITHUB_TOKEN", "environment-secret")
+	token, name, err := Token(p, credential.NewMemoryStore())
+	if err != nil || token != "environment-secret" || name != "GITHUB_TOKEN" {
+		t.Fatalf("Token() = %q, %q, %v", token, name, err)
+	}
+	t.Setenv("GITHUB_TOKEN", "")
+	if _, _, err := Token(p, credential.NewMemoryStore()); err == nil || !strings.Contains(err.Error(), "no stored credential") {
+		t.Fatalf("missing store error = %v", err)
 	}
 }
 

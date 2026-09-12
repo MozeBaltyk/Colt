@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/MozeBaltyk/Colt/internal/credential"
 	"gopkg.in/yaml.v3"
 )
 
@@ -26,8 +27,18 @@ type Provider struct {
 	Visibility string `yaml:"visibility"`
 	GitName    string `yaml:"git_name"`
 	GitEmail   string `yaml:"git_email"`
-	TokenEnv   string `yaml:"token_env,omitempty"`
-	Default    bool   `yaml:"default,omitempty"`
+	Transport  string `yaml:"transport,omitempty"`
+	Auth       Auth   `yaml:"auth"`
+	// LegacyTokenEnv accepts pre-auth-schema config on load. Load migrates it
+	// in memory and Save writes only Auth.
+	LegacyTokenEnv string `yaml:"token_env,omitempty"`
+	Default        bool   `yaml:"default,omitempty"`
+}
+
+type Auth struct {
+	Source       string `yaml:"source"`
+	TokenEnv     string `yaml:"token_env,omitempty"`
+	CredentialID string `yaml:"credential_id,omitempty"`
 }
 
 const maxConfigSize = 1 << 20
@@ -81,6 +92,17 @@ func Load(path string) (Config, error) {
 	if cfg.Providers == nil {
 		cfg.Providers = map[string]Provider{}
 	}
+	for alias, p := range cfg.Providers {
+		if p.Auth == (Auth{}) {
+			p.Auth = Auth{Source: "env", TokenEnv: p.LegacyTokenEnv}
+			p.LegacyTokenEnv = ""
+			cfg.Providers[alias] = p
+			continue
+		}
+		if p.LegacyTokenEnv != "" {
+			return Config{}, fmt.Errorf("invalid provider %q: token_env cannot be combined with auth", alias)
+		}
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -104,6 +126,9 @@ func (c Config) Validate() error {
 }
 
 func ValidateProvider(alias string, p Provider) error {
+	if p.LegacyTokenEnv != "" {
+		return errors.New("top-level token_env is legacy input; use auth.token_env")
+	}
 	if !nameRE.MatchString(alias) {
 		return errors.New("alias must start with a letter or digit and contain only letters, digits, '.', '_' or '-'")
 	}
@@ -141,8 +166,32 @@ func ValidateProvider(alias string, p Provider) error {
 	if strings.TrimSpace(p.GitEmail) == "" || strings.HasPrefix(p.GitEmail, "-") || strings.ContainsAny(p.GitEmail, "\r\n") || !strings.Contains(p.GitEmail, "@") {
 		return errors.New("git_email must be a one-line email address")
 	}
-	if p.TokenEnv != "" && !envRE.MatchString(p.TokenEnv) {
-		return errors.New("token_env is not a valid environment variable name")
+	if p.Transport != "" && p.Transport != "https" && p.Transport != "ssh" {
+		return errors.New("transport must be https or ssh")
+	}
+	switch p.Auth.Source {
+	case "env":
+		if p.Auth.CredentialID != "" {
+			return errors.New("auth.credential_id is only valid for a stored source")
+		}
+		if p.Auth.TokenEnv != "" && !envRE.MatchString(p.Auth.TokenEnv) {
+			return errors.New("auth.token_env is not a valid environment variable name")
+		}
+	case "stored":
+		if p.Auth.CredentialID == "" {
+			return errors.New("auth.credential_id is required for a stored source")
+		}
+		if err := credential.ValidateID(p.Auth.CredentialID); err != nil {
+			return fmt.Errorf("invalid auth.credential_id: %w", err)
+		}
+		if want := p.Host + "/" + alias; p.Auth.CredentialID != want {
+			return fmt.Errorf("auth.credential_id must be %q", want)
+		}
+		if p.Auth.TokenEnv != "" {
+			return errors.New("auth.token_env is only valid for an env source")
+		}
+	default:
+		return errors.New("auth.source must be env or stored")
 	}
 	return nil
 }
@@ -174,20 +223,13 @@ func (c Config) Resolve(explicit string) (string, Provider, error) {
 	return "", Provider{}, errors.New("provider selection is ambiguous; use --provider or configure exactly one default")
 }
 
-func Token(p Provider) (string, string, error) {
-	name := p.TokenEnv
-	if name == "" {
-		if p.Type == "github" {
-			name = "GITHUB_TOKEN"
-		} else {
-			name = "GITLAB_TOKEN"
-		}
+func Token(p Provider, store credential.Store) (string, string, error) {
+	name := credential.ConventionalVar(p.Type)
+	if p.Auth.TokenEnv != "" {
+		name = p.Auth.TokenEnv
 	}
-	token := os.Getenv(name)
-	if token == "" {
-		return "", name, fmt.Errorf("credential environment variable %s is missing or empty", name)
-	}
-	return token, name, nil
+	cred, err := (credential.Resolver{Store: store}).Resolve(p.Type, p.Auth.TokenEnv, p.Auth.CredentialID)
+	return cred.Secret, name, err
 }
 
 func Save(path string, cfg Config) error {

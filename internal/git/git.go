@@ -16,6 +16,7 @@ type Runner interface {
 	SetIdentity(context.Context, string, string, string) error
 	Commit(context.Context, string) (string, error)
 	AddOrigin(context.Context, string, string) error
+	ConfigureCredentialHelper(context.Context, string) error
 	Push(context.Context, string, string, string, string) error
 }
 
@@ -57,7 +58,39 @@ func (n Native) AddOrigin(ctx context.Context, dir, cloneURL string) error {
 	return n.run(ctx, dir, nil, "remote", "add", "origin", cloneURL)
 }
 
+func (n Native) ConfigureCredentialHelper(ctx context.Context, dir string) error {
+	const helper = "!colt git-credential"
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get-all", "credential.helper")
+	cmd.Dir = dir
+	cmd.Env = gitEnv(nil)
+	output, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return errors.New("native git failed to read repository-local credential helpers")
+		}
+	}
+	for _, configured := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if configured == helper {
+			return n.run(ctx, dir, nil, "config", "--local", "credential.useHttpPath", "true")
+		}
+	}
+	if err := n.run(ctx, dir, nil, "config", "--local", "--add", "credential.helper", helper); err != nil {
+		return err
+	}
+	return n.run(ctx, dir, nil, "config", "--local", "credential.useHttpPath", "true")
+}
+
 func (n Native) Push(ctx context.Context, dir, cloneURL, providerType, token string) error {
+	if strings.HasPrefix(cloneURL, "git@") {
+		if err := n.runWithEnv(ctx, dir, os.Environ(), "push", "--set-upstream", "origin", "HEAD"); err != nil {
+			return errors.New("native git push failed; check SSH access and connectivity")
+		}
+		return nil
+	}
+	if !strings.HasPrefix(cloneURL, "https://") {
+		return errors.New("unsupported Git transport")
+	}
 	username := "x-access-token"
 	if providerType == "gitlab" {
 		username = "oauth2"
@@ -81,13 +114,17 @@ func (n Native) Push(ctx context.Context, dir, cloneURL, providerType, token str
 }
 
 func (Native) run(ctx context.Context, dir string, extraEnv []string, args ...string) error {
+	return (Native{}).runWithEnv(ctx, dir, gitEnv(extraEnv), args...)
+}
+
+func (Native) runWithEnv(ctx context.Context, dir string, env []string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = gitEnv(extraEnv)
+	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		text := strings.TrimSpace(string(output))
-		for _, item := range extraEnv {
+		for _, item := range env {
 			if strings.HasPrefix(item, "GIT_CONFIG_VALUE_0=") {
 				text = strings.ReplaceAll(text, strings.TrimPrefix(item, "GIT_CONFIG_VALUE_0="), "[REDACTED]")
 			}

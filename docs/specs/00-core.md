@@ -13,7 +13,7 @@ This document defines normative behavior shared by the active MVP. The key words
 - **Workspace:** a declared set of desired projects and the local root where Colt reconciles them.
 - **Credential:** a provider API credential used by Colt for hosting-provider API operations; distinct from Git transport credentials and from Git commit identity.
 - **Credential source:** where a credential comes from, resolved deterministically: explicitly configured `token_env`, conventional provider environment variable, or persisted Colt credential (secure store or explicitly enabled plaintext fallback).
-- **Git transport credential:** material used by native Git for clone/fetch/push over SSH or HTTPS; owned outside Colt except for ephemeral process-scoped HTTPS material.
+- **Git transport credential:** material used by native Git for clone/fetch/push over SSH or HTTPS; HTTPS transport resolves through the Colt Git credential helper from the Colt credential subsystem, while Colt-invoked operations MAY additionally use an ephemeral process-scoped mechanism.
 
 Provider account, namespace, Git identity, and Git transport identity are separate concepts:
 
@@ -21,7 +21,17 @@ Provider account, namespace, Git identity, and Git transport identity are separa
 Provider account != namespace != Git identity != Git transport identity
 ```
 
-Git identity (`user.name`/`user.email`) identifies commit authorship only. It is NOT a provider credential and NOT a Git transport credential.
+And at the authentication-layer level:
+
+``` text
+Provider API authentication
+    !=
+Git transport authentication
+    !=
+Git commit identity
+```
+
+Git identity (`user.name`/`user.email`) identifies commit authorship only. It is NOT a provider credential and NOT a Git transport credential. It is not secret and MUST be configured repository-local (`git config --local`); Colt MUST NOT modify global Git identity unless an explicit future command requests it.
 
 | ID                   | Requirement                                                                                                                                                                                                                                                  | Verification                             |
 |:---------------------|:-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:-----------------------------------------|
@@ -49,7 +59,7 @@ Configuration **MUST** use `os.UserConfigDir()` with `colt/config.yaml` appended
 | `CORE-PROVIDER-003` | Self-hosted GitLab **MUST** use its configured base URL for authentication and later provider operations.                                                                                                                                                                                                                                                                                                                                            | [`provider_configuration.feature`](../../features/provider_configuration.feature)                                                        |
 | `CORE-PROVIDER-004` | Provider API endpoints **MUST** use HTTPS, and Colt **MUST NOT** forward credentials across a redirect to another host.                                                                                                                                                                                                                                                                                                                              | Security integration test.                                                                                                               |
 | `CORE-PROVIDER-005` | `colt auth status` **MUST** show configured providers deterministically by alias. By default it **MUST** perform a lightweight read-only provider API check using the resolved credential and report the authenticated account and connection state. `--offline` **MUST** inspect configuration only and **MUST NOT** read environment, secure-store, or credential-file secret values, nor invoke provider or Git operations. Neither mode may mutate provider, Git, or configuration state. | [`provider_configuration.feature`](../../features/provider_configuration.feature) and authentication output in [shared core](00-core.md) |
-| `CORE-PROVIDER-006` | `colt auth login github <alias>` SHOULD offer a native interactive GitHub browser/device authorization flow: display the authorization URL and user code, wait for user approval, identify the authenticated account, and persist the received credential via the credential subsystem. The flow MUST communicate directly with GitHub HTTP APIs and MUST NOT invoke `gh`, `glab`, `curl`, or another provider-specific CLI. The authorization/device code is not a reusable credential and MAY be displayed. The exact authorization application model, registration details, scopes, token lifetime, and refresh behavior SHOULD remain implementation-specific unless they affect observable behavior. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
+| `CORE-PROVIDER-006` | `colt auth login github <alias>` SHOULD offer a native interactive GitHub browser/device authorization flow: display the authorization URL and user code, wait for user approval, identify the authenticated account, and persist the received credential via the credential subsystem. This optional SHOULD-level flow is not required for M1 completion and is currently `@unimplemented`. If implemented, it MUST communicate directly with GitHub HTTP APIs and MUST NOT invoke `gh`, `glab`, `curl`, or another provider-specific CLI. The authorization/device code is not a reusable credential and MAY be displayed. The exact authorization application model, registration details, scopes, token lifetime, and refresh behavior SHOULD remain implementation-specific unless they affect observable behavior. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
 | `CORE-PROVIDER-007` | Provider-specific authentication implementations MUST remain behind the provider abstraction. The common contract covers authentication, credential persistence, credential retrieval, account identification, failure classification, and secret handling. Provider-specific protocol details (for example GitHub device flow vs GitLab token mechanism) MUST remain inside provider integrations; providers NEED NOT expose identical protocols. | Architecture review. |
 | `CORE-PROVIDER-008` | `colt auth logout <alias>` MUST remove only the Colt-owned locally persisted credential for the exact credential ID of that alias, from both the secure store and the plaintext fallback when present. It MUST preserve provider configuration, environment variables, shell profiles, `~/.ssh`, SSH keys, `ssh-agent` state, Git identity, and unrelated Colt credentials. It MUST NOT require provider connectivity and MUST work offline, with an invalid credential, or when the provider API is unreachable. If an environment credential still resolves after logout, output SHOULD say so without revealing the value (for example `! GITHUB_TOKEN is still available`). | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
 | `CORE-PROVIDER-009` | `colt auth logout <alias> --revoke` MUST attempt provider-side revocation and then remove the local Colt-owned credential, reporting each outcome independently (for example `! remote revocation failed` + `✓ local credential removed`). Remote revocation is provider-dependent and MAY report supported, unsupported, or failed; ordinary logout without `--revoke` MUST NOT attempt remote revocation. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
@@ -132,7 +142,7 @@ Code: ABCD-EFGH
 
 Waiting for authorization...
 
-✓ personal · GitHub · MozeBaltyk · default
+✓ personal · GitHub · example-user · default
 ```
 
 Reusable credentials (access tokens, refresh tokens, PATs, passwords, authorization headers, store/file values, token fragments) MUST NOT be displayed. The authorization/device code is not a reusable credential and MAY be displayed when the provider protocol requires it. Exact wording and whether a browser is opened automatically are implementation details.
@@ -148,11 +158,11 @@ Providers **MUST** be displayed deterministically by alias as compact sections. 
 ``` text
 personal (default)
   GitHub · github.com
-  Account:     MozeBaltyk
-  Namespace:   mozebaltyk
+  Account:     example-user
+  Namespace:   example-user
   Credential:  stored
-  Git name:    mozebaltyk
-  Git email:   morze.baltyk@proton.me
+  Git name:    Example User
+  Git email:   user@example.invalid
   Connection:  ✓ connected
 ```
 
@@ -189,7 +199,7 @@ Example offline section:
 ``` text
 personal (default)
   GitHub · github.com
-  Namespace:      MozeBaltyk
+  Namespace:      example-user
   Auth source:    stored
   Credential ID:  github.com/personal
   Connection:     not checked
@@ -201,7 +211,24 @@ If `colt auth status` runs inside a Colt-managed Git repository with a concrete 
 Git access:  ✓ origin reachable
 ```
 
-This check **MUST** remain distinct from provider API connectivity and **MUST NOT** push, mutate remotes, or modify repository state. It **MUST NOT** run when there is no concrete repository remote to validate.
+and MAY extend it concisely with transport detail without exposing secrets:
+
+``` text
+Repository
+  Transport:      HTTPS
+  Credential:     Colt helper
+  Git access:     ✓ origin reachable
+```
+
+or:
+
+``` text
+Repository
+  Transport:      SSH
+  Git access:     ✓ origin reachable
+```
+
+This check **MUST** remain distinct from provider API connectivity and **MUST NOT** push, mutate remotes, or modify repository state. It **MUST NOT** run when there is no concrete repository remote to validate. Git access MUST NOT be claimed merely because provider API authentication succeeds, and tokens or SSH private-key material MUST NOT be exposed.
 
 The default provider **SHOULD** be displayed as `personal (default)` rather than as an internal field such as `default=true`. Standard and self-hosted hosts **SHOULD** use the same display structure.
 
@@ -241,7 +268,7 @@ providers:
   personal:
     type: github
     host: github.com
-    namespace: mozebaltyk
+    namespace: example-user
     auth:
       source: stored
       credential_id: github.com/personal
@@ -318,7 +345,7 @@ Colt MUST NOT migrate credentials between these domains. Environment credentials
 
 ## Git Repository Authentication
 
-Colt MUST NOT treat provider API credentials, Git transport credentials, and Git identity as one conceptual credential. Native Git remains responsible for Git repository mechanics:
+Colt MUST NOT treat provider API credentials, Git transport credentials, and Git identity as one conceptual credential. Native Git remains responsible for Git repository mechanics. A Colt-managed repository MUST remain usable through ordinary native Git commands (`git fetch`, `git pull`, `git push`) without requiring the user to re-enter provider credentials on every invocation or to replace them with Colt-prefixed commands (for example Colt MUST NOT require `colt git push`), provided the corresponding credential remains valid and available.
 
 ``` text
                    Colt
@@ -332,19 +359,81 @@ Colt MUST NOT treat provider API credentials, Git transport credentials, and Git
     OAuth/token         +------+------+
                         |             |
                        SSH          HTTPS
+                                      |
+                          Colt credential helper
+                                      |
+                          Colt credential subsystem
 ```
 
-Provider repository metadata conceptually exposes authoritative HTTPS and SSH clone targets; Colt MAY select either according to configuration and available authentication, provided the selected target still matches the expected provider, host, namespace, and repository. Existing protections against authority confusion, unexpected hosts, credential forwarding, malicious redirects, and repository mismatch MUST NOT be weakened to support SSH.
+Provider repository metadata conceptually exposes authoritative HTTPS and SSH clone targets; Colt MAY select either according to configuration and available authentication, provided the selected target still matches the expected provider, host, namespace, and repository. Existing protections against authority confusion, unexpected hosts, credential forwarding, malicious redirects, and repository mismatch MUST NOT be weakened to support either transport. A provider credential MAY be valid for both the provider HTTP API and Git HTTPS transport, but the two roles remain architecturally distinct: permissions may differ, and failures MUST be attributable to the correct layer.
+
+| ID | Requirement | Verification |
+|:---|:---|:---|
+| `CORE-GIT-002` | A Colt-managed repository MUST be usable with ordinary native Git commands after setup without re-entering provider credentials on every invocation while the credential remains valid and available. Colt MUST NOT require `colt git push` / `colt git pull` replacements. | Architecture review and [`provider_configuration.feature`](../../features/provider_configuration.feature) |
+| `CORE-GIT-003` | The selected Git transport (HTTPS or SSH) MUST correspond to an authoritative clone/push target returned or validated for the selected provider repository. | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
+| `CORE-GIT-004` | Colt MUST support HTTPS and SSH as first-class Git transports with the deterministic preference defined by `CORE-GIT-009`; the default transport MUST be HTTPS with the Colt credential helper unless the product direction explicitly changes it. | [`project_lifecycle.feature`](../../features/project_lifecycle.feature) |
+| `CORE-GIT-005` | The Colt Git credential helper MUST implement the standard Git credential-helper contract (`get`, `store`, `erase` over Git's stdin/stdout credential protocol with fields such as `protocol`, `host`, `path`, `username`) and MUST NOT invent a custom credential protocol. The preferred repository-local configuration is the named-helper form `helper = colt` (resolving to an installed `git-credential-colt` executable or equivalent dispatch through the Colt binary); the shell-snippet form `helper = !colt git-credential` is an accepted equivalent when the named form is impractical, with quoting and platform portability tested. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
+| `CORE-GIT-006` | The credential helper MUST reuse the Colt credential subsystem (`CredentialResolver`: explicit `token_env`, conventional provider variable, persisted Colt credential, same deterministic precedence per `CORE-CREDENTIAL-001`) and MUST NOT create an independent credential database. `get` MUST parse the request, resolve the provider safely, resolve the selected Colt credential, return only the required username/password fields, and write no unrelated output to stdout; human-readable diagnostics go to stderr without secrets. With no matching credential the helper returns no credential and follows normal Git fallback semantics. The reusable secret exists only in process memory and the configured credential backend during the interaction and MUST NOT be written into the remote URL. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
+| `CORE-GIT-007` | The helper MUST only return a credential when the request matches a configured Colt provider (validating at minimum `protocol`, `host`, configured provider, and repository context when available); a credential for one host MUST NOT be returned for an unrelated or redirected authority. Existing cross-host forwarding protections (`CORE-PROVIDER-004` and clone/release authority checks) continue to apply. For GitHub HTTPS the helper returns a safe account username when known plus the token as the password field; other providers MAY use their own username/token convention. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
+| `CORE-GIT-008` | Colt MUST configure the helper repository-local (`git config --local`) for Colt-managed repositories, MUST NOT silently overwrite unrelated local helper configuration (conflicts handled deterministically and non-destructively), and MUST NOT modify `~/.gitconfig` unless the user explicitly requests a global integration mode. `.git/config` MUST NOT contain reusable secrets: no tokens, passwords, or credential-bearing URLs (never `https://TOKEN@host/...`); the helper reference is non-secret. `store` MUST accept the protocol invocation without automatically persisting unknown Git-supplied credentials; `erase` MUST NOT silently delete a Colt persisted credential (never equivalent to `colt auth logout`). | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
+| `CORE-GIT-009` | Git transport preference MAY exist globally, per provider, or both (for example `git.transport: https` or `ssh`, adapted to existing configuration conventions), with deterministic precedence: explicit command option > provider transport preference > global transport preference > product default (HTTPS). An unsupported transport MUST fail before repository mutation. Colt MUST NOT invent command-line flags inconsistent with the existing CLI design. | [`project_lifecycle.feature`](../../features/project_lifecycle.feature) |
+| `CORE-GIT-010` | SSH transport uses the user's existing SSH infrastructure: private keys remain owned by the user/OS SSH subsystem and MUST NOT be stored in the Colt credential subsystem. For the initial implementation Colt MUST NOT generate key pairs, modify private keys, manage `ssh-agent`, or invoke `ssh-keygen`/`ssh-add`. Colt MAY rely on user-managed `~/.ssh/config` (optional, not mandatory; only required for non-default keys, multiple identities, custom hosts/ports, or enterprise hosts) and MAY perform a read-only native-Git remote query (not `ssh -T`) to validate access when requested or during setup. For GitHub-style SSH the SSH user is `git` (not the account name); the account is determined by the accepted public key, and the repository owner stays in the path (`git@github.com:example-user/example-project.git`). Multiple accounts on one host use SSH host aliases (for example `git@github-personal:example-user/project.git`); the alias is a local SSH name, not a provider authority, and security checks MUST resolve it to the expected provider/repository without confusing alias with hostname. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
+
+### Native Git outside Colt commands
+
+After Colt has initialized or cloned a repository, `git fetch` / `git pull` / `git push` SHOULD authenticate without invoking Colt explicitly: for HTTPS, native Git invokes the repository-local Colt credential helper, which resolves the provider and returns the stored credential to the Git process; for SSH, native Git uses the user's SSH configuration, agent, or private key whose public counterpart is registered with the provider account. Provider API authentication remains required for remote creation regardless of transport.
 
 ### SSH
 
-Colt SHOULD support repositories whose authoritative provider metadata exposes an SSH clone/push URL. Colt MUST NOT require ownership of the user's SSH private keys. Existing SSH configuration, keys, agents, and platform facilities may be used by native Git.
+Colt SHOULD support repositories whose authoritative provider metadata exposes an SSH clone/push URL. Colt MUST NOT require ownership of the user's SSH private keys. Existing SSH configuration, keys, agents, and platform facilities may be used by native Git. A managed SSH repository contains, for example:
 
-For the initial implementation, Colt SHOULD NOT generate SSH keys, modify SSH configuration, install keys, or manage `ssh-agent`. This preserves the architectural rule that native `git` is Colt's only required external executable. If SSH key management is introduced later, it must be specified separately because tools such as `ssh-keygen` or `ssh-agent` would change the external-executable boundary.
+``` ini
+[remote "origin"]
+    url = git@github.com:example-user/example-project.git
+    fetch = +refs/heads/*:refs/remotes/origin/*
+```
+
+with optional illustrative user-managed SSH configuration (not required when the existing SSH environment already works):
+
+``` text
+Host github.com
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/id_ed25519
+```
+
+For the initial implementation, Colt SHOULD NOT generate SSH keys, modify SSH configuration, install keys, or manage `ssh-agent`. This preserves the architectural rule that native `git` is Colt's only required external executable. If SSH key management is introduced later, it must be specified separately because tools such as `ssh-keygen` or `ssh-agent` would change the external-executable boundary. `colt auth logout` MUST NOT alter SSH access (`~/.ssh`, `ssh-agent`, provider-registered public keys, SSH config, SSH remote URL); API logout with working SSH push still working is expected.
 
 ### HTTPS
 
-For HTTPS Git operations, provider credentials MAY be supplied to native Git using an ephemeral/process-scoped mechanism. Credentials MUST NOT be embedded persistently in origin URLs (never leave `https://TOKEN@host/...`), `.git/config`, workspace manifests, Colt configuration, or command output. The persistent remote URL must remain credential-free.
+For HTTPS Git operations Colt integrates through the standard Git credential-helper protocol so native Git can resolve credentials independently. A managed HTTPS repository contains, for example:
+
+``` ini
+[remote "origin"]
+    url = https://github.com/example-user/example-project.git
+    fetch = +refs/heads/*:refs/remotes/origin/*
+
+[branch "main"]
+    remote = origin
+    merge = refs/heads/main
+
+[credential]
+    helper = colt
+
+[user]
+    name = Example User
+    email = user@example.invalid
+```
+
+Conceptually (`get`):
+
+``` text
+Git -> credential get (protocol=https, host=github.com, path=...) -> Colt helper
+  -> repository/provider resolution -> credential_id -> CredentialResolver
+  -> stored credential -> username/password response to Git
+```
+
+In addition, provider credentials MAY be supplied to Colt-invoked native Git using an ephemeral/process-scoped mechanism (for example the initial clone or push performed by Colt itself). Credentials MUST NOT be embedded persistently in origin URLs (never leave `https://TOKEN@host/...`), `.git/config`, workspace manifests, Colt configuration, or command output. The persistent remote URL must remain credential-free. `colt auth logout <alias>` removes the persisted credential but MUST NOT remove remotes or unrelated Git configuration; it MAY warn that Colt-managed HTTPS repositories relying on the removed credential may require reauthentication, and a subsequent `git push` may fail or fall through to another Git credential source per normal Git behavior.
 
 ### Architecture
 
