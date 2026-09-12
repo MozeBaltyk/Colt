@@ -10,10 +10,10 @@ The workspace is declared by a small data-only YAML document:
 workspace:
   repositories:
     - provider: work
-      namespace: platform
+      namespace: example-org
       include: [api, web]
     - provider: personal
-      namespace: octocat
+      namespace: example-user
 ```
 
 Omitting `include` selects all repositories visible in that provider and namespace selection.

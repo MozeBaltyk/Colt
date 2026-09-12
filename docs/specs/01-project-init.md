@@ -17,7 +17,7 @@ The command creates a blank project. Parameterized template selection and materi
 | `INIT-003` | Colt **MUST** refuse an existing non-empty destination without modifying it.                                                                                                                  | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
 | `INIT-004` | Colt **MUST** create the destination, initialize a new Git repository with no inherited remotes, apply `CORE-IDENTITY-001`, and create one initial commit. The blank commit **MAY** be empty. | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
 | `INIT-005` | With `--local`, Colt **MUST NOT** resolve or require provider API credentials, construct or contact a provider client, add `origin`, configure a credential helper, or push. It **MUST** stop successfully after local initialization. | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
-| `INIT-006` | Without `--local`, Colt **MUST** create a repository in the selected namespace through the selected provider's direct HTTP API using configured defaults.                                     | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
+| `INIT-006` | Without `--local`, Colt **MUST** create a repository in the selected namespace through the selected provider's direct HTTP API using configured defaults. The creation path MUST work through the provider abstraction for any supported type (currently GitHub, GitLab); future adapters (Gitea, Forgejo) reuse it unchanged. | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
 | `INIT-007` | After remote creation, Colt **MUST** add only the created repository URL as `origin` and push the initial branch and commit with upstream tracking using native `git`. The clone URL transport (HTTPS or SSH) MUST correspond to the selected provider and available authentication, selected per the deterministic transport preference (`CORE-GIT-009`) with product default HTTPS. | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
 | `INIT-008` | Colt **MUST** treat both a pre-existing remote and an authoritative conflict returned during creation as conflicts and apply `CORE-SAFETY-001` and `CORE-CONFLICT-001`.                       | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
 | `INIT-009` | Failures after local or remote mutation **MUST** follow `CORE-FAILURE-001`; a push failure **MUST** leave the local commit, `origin`, and created remote intact.                              | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
@@ -68,7 +68,7 @@ colt init project
     |
     +-> provider API creates repository
     |
-    +-> origin=git@provider:owner/project.git (authoritative SSH URL, SSH user git)
+    +-> origin=<ssh-user>@provider:owner/project.git (authoritative SSH URL; the SSH user is per-provider convention, `git` for GitHub-style remotes)
     |
     +-> existing user SSH setup used (no Colt key management per CORE-GIT-010)
     |

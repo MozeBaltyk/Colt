@@ -6,7 +6,7 @@ Colt aims to be a provider-independent project manager for Git repositories.
 
 With one CLI, you can connect to multiple Git hosting providers, clone repositories, work with an entire namespace, initialize projects from your own templates, and eventually mirror projects between providers.
 
-Colt talks directly to GitHub and GitLab through their HTTP APIs for hosting operations, while leaving repository operations to native `git`.
+Colt talks directly to supported Git hosting providers through their HTTP APIs for hosting operations, while leaving repository operations to native `git`. GitHub and GitLab are the currently supported providers; Gitea and Forgejo are planned future providers.
 
 The project is being built progressively. Some of the core functionality is already implemented, some M1 requirements are still marked `@unimplemented`, and the rest is organized into planned milestones.
 
@@ -30,9 +30,10 @@ Configuration uses Go's `os.UserConfigDir()`. On Linux, this is
 tokens remain in the referenced environment variables and are never written
 there.
 
-`--namespace` is the repository owner: a GitHub username or organization (for
+`--namespace` is the repository owner in provider-native terms: a GitHub username or organization (for
 example `octocat` or `acme`) or a GitLab group/subgroup full path (for example
-`platform/tools`).
+`platform/tools`). Future provider types define their own namespace semantics
+inside their adapters.
 
 Colt initializes Git, applies the selected provider's repository-local identity,
 and creates an initial commit. Unless `--local` is used, it creates the remote
@@ -71,5 +72,4 @@ command surface for `gh` or `glab`.
 - [Planned M5: project health](docs/specs/05-project-health.md)
 - [Planned M6: analyzer](docs/specs/06-analyzer.md)
 - [Roadmap](docs/specs/90-roadmap.md)
-- [Non-normative design notes](docs/specs/notes.md)
 - [Acceptance specifications](features/)

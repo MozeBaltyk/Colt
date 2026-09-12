@@ -5,8 +5,9 @@ This document defines normative behavior shared by the active MVP. The key words
 ## Boundaries And Terminology
 
 - **Provider:** a configured hosting integration, identified by a unique alias.
+- **Provider type:** the hosting platform family a provider speaks to (`github`, `gitlab`; `gitea` and `forgejo` are planned future types, each an independently identifiable adapter).
 - **Account:** the authenticated provider principal.
-- **Namespace:** the repository owner: a GitHub username or organization, or a GitLab group or subgroup/full path.
+- **Namespace:** the repository owner in provider-native terms (for example a GitHub username or organization, or a GitLab group or subgroup/full path). Namespace semantics differ per provider type and live inside provider adapters; common code MUST only treat a namespace as an opaque owner string.
 - **Identity:** repository-local Git `user.name` and `user.email`.
 - **Defaults:** provider- or namespace-associated choices such as visibility.
 - **Project:** a provider-hosted or local Git repository managed by Colt.
@@ -35,7 +36,7 @@ Git identity (`user.name`/`user.email`) identifies commit authorship only. It is
 
 | ID                   | Requirement                                                                                                                                                                                                                                                  | Verification                             |
 |:---------------------|:-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:-----------------------------------------|
-| `CORE-ARCH-001`      | Hosting operations **MUST** use direct GitHub or GitLab HTTP APIs and **MUST NOT** invoke `gh`, `glab`, or `curl`.                                                                                                                                           | Architecture review.                     |
+| `CORE-ARCH-001`      | Hosting operations **MUST** use direct supported-provider HTTP APIs (currently GitHub and GitLab; Gitea and Forgejo are planned future adapters) and **MUST NOT** invoke provider-specific CLIs (such as `gh` or `glab`) or `curl`.                        | Architecture review.                     |
 | `CORE-ARCH-002`      | Native `git` **MUST** be the sole external executable.                                                                                                                                                                                                       | Architecture review.                     |
 | `CORE-MODEL-001`     | Provider, account, namespace, identity, and defaults **MUST** remain logically separate concepts; the design **MUST NOT** assume a one-to-one relationship among them. The MVP **SHOULD** avoid separate configuration objects until behavior requires them. | Architecture review.                     |
 | `CORE-NAMESPACE-001` | Common commands, output, and models **MUST** use `namespace`; provider-native vocabulary **SHOULD** remain inside provider integrations.                                                                                                                     | Specification and implementation review. |
@@ -50,19 +51,42 @@ colt auth status [--offline]
 colt auth logout <alias> [--revoke]
 ```
 
+`<github|gitlab>` enumerates the currently supported provider types. Future
+types (`gitea`, `forgejo`) extend this position when their adapters land; the
+ surrounding command shape MUST NOT change to accommodate them.
+
 Configuration **MUST** use `os.UserConfigDir()` with `colt/config.yaml` appended; on Linux this is `$XDG_CONFIG_HOME/colt/config.yaml` when `XDG_CONFIG_HOME` is set, otherwise `~/.config/colt/config.yaml`. `COLT_CONFIG` **MUST** override the complete path. Storage shape is intentionally unspecified.
 
 | ID                  | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                          | Verification                                                                                                                             |
 |:--------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:-----------------------------------------------------------------------------------------------------------------------------------------|
-| `CORE-PROVIDER-001` | Colt **MUST** configure GitHub.com, GitLab.com, and self-hosted GitLab. Each provider **MUST** have a unique alias, type, host, namespace, default visibility, identity name, identity email, and credential source (interactive secure storage or environment variable).                                                                                                                                               | [`provider_configuration.feature`](../../features/provider_configuration.feature)                                                        |
+| `CORE-PROVIDER-001` | Colt **MUST** configure providers by unique alias, type, host, namespace, default visibility, identity name, identity email, and credential source (interactive secure storage or environment variable). The currently supported types are GitHub (github.com) and GitLab (GitLab.com and self-hosted); Gitea and Forgejo are planned future types (see `CORE-PROVIDER-010`). | [`provider_configuration.feature`](../../features/provider_configuration.feature)                                                        |
 | `CORE-PROVIDER-002` | `colt auth login` **MUST** validate credentials directly against the configured host and identify the authenticated account before reporting success. An existing alias **MUST** require explicit `--replace`, and replacement **MUST** preserve the prior configuration on validation or save failure.                                                                                                                                              | [`provider_configuration.feature`](../../features/provider_configuration.feature)                                                        |
-| `CORE-PROVIDER-003` | Self-hosted GitLab **MUST** use its configured base URL for authentication and later provider operations.                                                                                                                                                                                                                                                                                                                                            | [`provider_configuration.feature`](../../features/provider_configuration.feature)                                                        |
+| `CORE-PROVIDER-003` | Self-hosted GitLab **MUST** use its configured base URL for authentication and later provider operations. The same host-first principle applies to every self-hosted provider type: a provider type MUST NOT determine its API hostname (see `CORE-PROVIDER-010`).                                                                                                                                 | [`provider_configuration.feature`](../../features/provider_configuration.feature)                                                        |
 | `CORE-PROVIDER-004` | Provider API endpoints **MUST** use HTTPS, and Colt **MUST NOT** forward credentials across a redirect to another host.                                                                                                                                                                                                                                                                                                                              | Security integration test.                                                                                                               |
 | `CORE-PROVIDER-005` | `colt auth status` **MUST** show configured providers deterministically by alias. By default it **MUST** perform a lightweight read-only provider API check using the resolved credential and report the authenticated account and connection state. `--offline` **MUST** inspect configuration only and **MUST NOT** read environment, secure-store, or credential-file secret values, nor invoke provider or Git operations. Neither mode may mutate provider, Git, or configuration state. | [`provider_configuration.feature`](../../features/provider_configuration.feature) and authentication output in [shared core](00-core.md) |
 | `CORE-PROVIDER-006` | `colt auth login github <alias>` SHOULD offer a native interactive GitHub browser/device authorization flow: display the authorization URL and user code, wait for user approval, identify the authenticated account, and persist the received credential via the credential subsystem. This optional SHOULD-level flow is not required for M1 completion and is currently `@unimplemented`. If implemented, it MUST communicate directly with GitHub HTTP APIs and MUST NOT invoke `gh`, `glab`, `curl`, or another provider-specific CLI. The authorization/device code is not a reusable credential and MAY be displayed. The exact authorization application model, registration details, scopes, token lifetime, and refresh behavior SHOULD remain implementation-specific unless they affect observable behavior. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
-| `CORE-PROVIDER-007` | Provider-specific authentication implementations MUST remain behind the provider abstraction. The common contract covers authentication, credential persistence, credential retrieval, account identification, failure classification, and secret handling. Provider-specific protocol details (for example GitHub device flow vs GitLab token mechanism) MUST remain inside provider integrations; providers NEED NOT expose identical protocols. | Architecture review. |
+| `CORE-PROVIDER-007` | Provider-specific authentication implementations MUST remain behind the provider abstraction. The common contract covers authentication, credential persistence, credential retrieval, account identification, failure classification, and secret handling. Provider-specific protocol details (for example GitHub device flow vs GitLab token mechanism) MUST remain inside provider integrations; providers NEED NOT expose identical protocols. Gitea and Forgejo authorization mechanisms are planned and MUST be designed inside their adapters when those adapters are specified. | Architecture review. |
 | `CORE-PROVIDER-008` | `colt auth logout <alias>` MUST remove only the Colt-owned locally persisted credential for the exact credential ID of that alias, from both the secure store and the plaintext fallback when present. It MUST preserve provider configuration, environment variables, shell profiles, `~/.ssh`, SSH keys, `ssh-agent` state, Git identity, and unrelated Colt credentials. It MUST NOT require provider connectivity and MUST work offline, with an invalid credential, or when the provider API is unreachable. If an environment credential still resolves after logout, output SHOULD say so without revealing the value (for example `! GITHUB_TOKEN is still available`). | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
 | `CORE-PROVIDER-009` | `colt auth logout <alias> --revoke` MUST attempt provider-side revocation and then remove the local Colt-owned credential, reporting each outcome independently (for example `! remote revocation failed` + `✓ local credential removed`). Remote revocation is provider-dependent and MAY report supported, unsupported, or failed; ordinary logout without `--revoke` MUST NOT attempt remote revocation. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
+
+### Supported Provider Types And Provider Identity
+
+``` text
+Colt
+  |
+  +-- Provider API abstraction
+  |     +-- GitHub
+  |     +-- GitLab
+  |     +-- Gitea       [planned]
+  |     +-- Forgejo     [planned]
+  |
+  +-- native Git
+```
+
+| ID                  | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Verification              |
+|:--------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:--------------------------|
+| `CORE-PROVIDER-010` | Colt MUST treat `github`, `gitlab`, `gitea`, and `forgejo` as distinct provider types. GitHub and GitLab are the currently supported types; Gitea and Forgejo are planned future adapters and MUST NOT be presented as implemented. Forgejo MUST NOT be modeled as an alias for Gitea: each type MUST remain an independently identifiable adapter even where their present-day APIs resemble each other. Provider identity is conceptually `provider type + host + alias`, never provider type alone: a type MUST NOT determine its API hostname, so multiple independent installations of one type (for example several Gitea or Forgejo hosts such as `code.example.invalid`, `git.company.example`, `forge.example.invalid`) MUST be configurable side by side. Common code MUST select behavior per configured provider (adapter dispatch by type, authority checks by host) and MUST NOT assume `github.com` / `gitlab.com` are the only possible hosts. | Architecture review.      |
+| `CORE-PROVIDER-011` | The common provider abstraction MUST contain only capabilities Colt actually requires, stated generically: authenticated account, repository lookup, repository creation, repository listing, namespace listing, HTTPS clone target, SSH clone target, and releases. A provider type MAY support, omit, or implement a capability differently; adapters MUST NOT be forced to expose identical concepts where their APIs differ. Colt MUST obtain HTTPS/SSH clone targets from provider metadata and MUST NOT construct repository URLs from assumed hostname or path patterns. | Architecture review.      |
 
 Human-readable authentication output, failure categories, and the distinction between provider API connectivity and repository Git connectivity are specified in authentication output in [shared core](00-core.md).
 
@@ -120,7 +144,7 @@ Likewise, working SSH access to a Git repository MUST NOT imply that Colt has va
 
 Default authentication output is intended for humans rather than scripts. It **MUST** remain concise, provider-independent, actionable on failure, and safe for credentials.
 
-Human-readable provider names **SHOULD** use `GitHub` and `GitLab`. Compact state markers **SHOULD** use:
+Human-readable provider names **SHOULD** use the platform's own name (`GitHub`, `GitLab`, and later `Gitea`, `Forgejo` for their adapters). Compact state markers **SHOULD** use:
 
 ``` text
 ✓ success
@@ -132,7 +156,7 @@ Authenticated account, configured namespace, and Git identity are distinct conce
 
 ### `auth login`
 
-A successful interactive login **SHOULD** use the authorization prompt followed by one concise line:
+A successful interactive login **SHOULD** use the authorization prompt followed by one concise line (GitHub adapter example; other adapters define their own mechanism behind `CORE-PROVIDER-007`):
 
 ``` text
 Authorize Colt with GitHub.
@@ -249,7 +273,7 @@ A future machine-readable mode such as `colt auth status --json` **MAY** expose 
 
 | ID                    | Requirement                                                                                                                                                                                                                                                         | Verification                                                                                              |
 |:----------------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:----------------------------------------------------------------------------------------------------------|
-| `CORE-CREDENTIAL-001` | Colt MUST resolve provider API credentials deterministically in this order: (1) explicitly configured `token_env`; (2) conventional provider variable (`GITHUB_TOKEN` for GitHub, `GITLAB_TOKEN` for GitLab); (3) persisted Colt credential (secure store, then explicitly enabled plaintext fallback); (4) otherwise fail with `credentials missing`. Selecting an environment credential for one invocation MUST NOT overwrite the persisted interactive credential. Environment credentials MUST NOT be copied into `config.yaml`, the secure store, the plaintext file, or Git configuration; they remain owned by the environment. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
+| `CORE-CREDENTIAL-001` | Colt MUST resolve provider API credentials deterministically in this order: (1) explicitly configured `token_env`; (2) the conventional variable defined by the provider adapter (`GITHUB_TOKEN` for GitHub, `GITLAB_TOKEN` for GitLab; future adapters define their own); (3) persisted Colt credential (secure store, then explicitly enabled plaintext fallback); (4) otherwise fail with `credentials missing`. Selecting an environment credential for one invocation MUST NOT overwrite the persisted interactive credential. Environment credentials MUST NOT be copied into `config.yaml`, the secure store, the plaintext file, or Git configuration; they remain owned by the environment. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
 | `CORE-CREDENTIAL-002` | Reusable secret values MUST NOT appear in `config.yaml`, project files, remote URLs, stdout, stderr, normal/verbose/error output, diagnostics, or provider error dumps, and MUST be redacted from all such output. Interactive credentials in the secure store or plaintext fallback MUST NOT appear in any output either. | Security constraint and [`provider_configuration.feature`](../../features/provider_configuration.feature) |
 | `CORE-CREDENTIAL-003` | A missing or empty selected credential source MUST fail before an authenticated request or project mutation. For `colt auth status`, this is reported as a per-provider `credentials missing` connection state rather than as a successful connection. Stored-credential presence MUST NOT be reported as `✓ connected`; only a live provider check establishes that state. | [`provider_configuration.feature`](../../features/provider_configuration.feature) |
 | `CORE-CREDENTIAL-004` | Normal Colt configuration MUST contain only non-secret metadata and credential references. It MUST NOT contain reusable secret values in any field equivalent to `token`, `access_token`, `refresh_token`, `password`, or `secret`, regardless of provider. The normative reference model is `auth.source` (`env` or `stored`) plus either `token_env` (environment variable name, no secret) or `credential_id` (stable non-secret persisted-credential identifier). | Security review. |
@@ -356,7 +380,7 @@ Colt MUST NOT treat provider API credentials, Git transport credentials, and Git
           |                   |
        HTTP API             native git
           |                   |
-    OAuth/token         +------+------+
+ provider credential    +------+------+
                         |             |
                        SSH          HTTPS
                                       |
@@ -438,27 +462,28 @@ In addition, provider credentials MAY be supplied to Colt-invoked native Git usi
 ### Architecture
 
 ``` text
-                         Colt CLI
-                            |
-          +-----------------+------------------+
-          |                 |                  |
-        Config           Git Ops          Provider Ops
-          |                 |                  |
-          |              native git         HTTP APIs
-          |                 |                  |
-          |          +------+-------+     +----+----+
-          |          |              |     |         |
-          |         SSH           HTTPS GitHub   GitLab
-          |
-    Credential Resolver
-          |
-     +----+-------------------+
-     |                        |
-environment credentials   persisted credentials
-                              |
-                     +--------+---------+
-                     |                  |
-                 secure store     plaintext fallback
+                          Colt CLI
+                             |
+           +-----------------+------------------+
+           |                 |                  |
+         Config           Git Ops          Provider Ops
+           |                 |                  |
+           |              native git         HTTP APIs
+           |                 |                  |
+           |          +------+-------+     +----+----+- - - - -+
+           |          |              |     |         |         |
+           |         SSH           HTTPS GitHub   GitLab    Gitea/Forgejo
+           |                                               [planned]
+           |
+     Credential Resolver
+           |
+      +----+-------------------+
+      |                        |
+ environment credentials   persisted credentials
+                               |
+                      +--------+---------+
+                      |                  |
+                  secure store     plaintext fallback
 ```
 
 Central rule: provider operations use Colt HTTP implementations; repository mechanics use native Git; credential persistence uses the Colt credential subsystem; SSH key management stays external to Colt.
