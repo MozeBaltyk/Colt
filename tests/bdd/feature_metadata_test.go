@@ -58,7 +58,7 @@ func TestBDDRequirementIndex(t *testing.T) {
 
 func repoRoot() string {
 	_, file, _, _ := runtime.Caller(0)
-	return filepath.Clean(filepath.Join(filepath.Dir(file), ".."))
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }
 
 func loadFeatureScenarios(t *testing.T) []featureScenario {

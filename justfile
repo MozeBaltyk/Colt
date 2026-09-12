@@ -45,22 +45,38 @@ compile:
 # Run check the developer/support environment.
 [group('Development')]
 test:
-    bash "{{ justfile_directory() }}/scripts/utility/test.sh"
+    bash "{{ justfile_directory() }}/scripts/development/test_core_template.sh"
+
+# Test layers: unit (fast, no network/containers) → integration (real Gitea/
+# Forgejo in containers, -tags integration) → features (BDD end-to-end).
+# Every recipe delegates to scripts/development/test.sh; see tests/README.md.
+
+# Fast unit lane: parsers, config, command generation, API mapping. No network.
+[group('Development')]
+test-unit:
+    @bash "{{ justfile_directory() }}/scripts/development/test.sh" unit
+
+# Integration lane: real Gitea + Forgejo backends in ephemeral containers.
+# Env: CONTAINER_TOOL (default podman), GITEA_IMAGE, FORGEJO_IMAGE,
+# GITEA_PORT/FORGEJO_PORT (defaults 13000/13001), COLT_IT_KEEP=1 to debug.
+[group('Development')]
+test-integration:
+    @bash "{{ justfile_directory() }}/scripts/development/test.sh" integration
 
 # Run every active deterministic BDD scenario (local fixtures only).
 [group('Development')]
 test-bdd:
-    @go test ./bdd/ -count=1
+    @bash "{{ justfile_directory() }}/scripts/development/test.sh" bdd
 
 # Build and smoke-test the real Colt binary in a sandbox.
 [group('Development')]
 test-bdd-blackbox:
-    @go test -tags bdd ./bdd/ -run '^TestBlackbox$' -count=1
+    @bash "{{ justfile_directory() }}/scripts/development/test.sh" blackbox
 
 # Explicitly regenerate deterministic requirement-to-scenario coverage.
 [group('Development')]
 bdd-coverage:
-    @go test ./bdd/ -run '^TestBDDRequirementIndex$' -count=1 -args -update-bdd-coverage
+    @bash "{{ justfile_directory() }}/scripts/development/test.sh" coverage
 
 # Verify all CLI tools are present in the EE image. Presence check only: runs
 # the image with a read-only workspace and no Kubernetes credential mount.

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/MozeBaltyk/Colt/tests/bdd/fixture"
 )
 
 func TestBlackbox(t *testing.T) {
@@ -17,7 +19,7 @@ func TestBlackbox(t *testing.T) {
 	}
 	buildDir := t.TempDir()
 	binary := filepath.Join(buildDir, "colt")
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), fixture.CommandTimeout)
 	defer cancel()
 	build := exec.CommandContext(ctx, "go", "build", "-o", binary, "./cmd/colt")
 	build.Dir = repoRoot()
@@ -60,7 +62,7 @@ func blackboxSandbox(t *testing.T) (string, string) {
 
 func runBlackbox(t *testing.T, binary, dir, configPath string, args ...string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), fixture.CommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = dir

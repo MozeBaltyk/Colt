@@ -29,7 +29,7 @@ check "justfile parses"  just --list --unsorted
 echo
 echo "[2] grouped recipes trigger scripts under scripts/<group>/"
 check "scripts/ dir present" test -d scripts
-for d in ee utility; do
+for d in development ee utility; do
     check "scripts/$d has scripts" test -n "$(find "scripts/$d" -name '*.sh' -print -quit 2>/dev/null)"
 done
 
