@@ -62,6 +62,7 @@ Feature: Blank project initialization
     Given the selected provider type is <type>
     When I run "colt init demo"
     Then Colt creates repository "demo" in the selected namespace through the <type> HTTP API
+    And it is cloned locally as "example-namespace/demo"
     And the created repository URL is the only "origin"
     And the initial commit is submitted once through the configured Git runner
 
@@ -69,6 +70,20 @@ Feature: Blank project initialization
       | type   |
       | GitHub |
       | GitLab |
+
+  @INIT-003 @INIT-006 @CORE-GIT-003
+  Scenario: GitHub canonical owner casing is accepted without weakening clone authority
+    Given GitHub is configured as "mozebaltyk" but returns canonical owner "MozeBaltyk"
+    When I run "colt init demo"
+    Then it is cloned locally as "mozebaltyk/demo"
+    And the "origin" URL is "https://github.com/MozeBaltyk/demo.git" with no credential in the URL
+
+  @INIT-003
+  Scenario: Select an explicit remote clone destination
+    Given the selected provider type is GitLab
+    And custom destination parent "projects" exists
+    When I run "colt init demo --destination projects/renamed"
+    Then it is cloned locally as "projects/renamed"
 
   @INIT-006
   Scenario: Remote initialization requires provider API authentication
@@ -111,7 +126,7 @@ Feature: Blank project initialization
     When I run "colt init demo"
     Then the provider conflict is authoritative
     And Colt does not adopt, replace, or delete the remote repository
-    And Colt preserves completed local work and reports the conflict
+    And Colt leaves no local clone and reports the conflict
 
   @INIT-008 @CORE-SAFETY-001
   Scenario: Refuse a known existing remote repository
@@ -160,7 +175,7 @@ Feature: Blank project initialization
     Given the selected transport is <transport>
     And provider creation succeeds with a <target> selected clone target
     When I run "colt init demo"
-    Then clone target validation fails with the initial commit preserved
+    Then clone target validation fails before creating a local clone
     And no origin, credential helper, or push is attempted
 
     Examples:

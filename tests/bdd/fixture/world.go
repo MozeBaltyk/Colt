@@ -28,17 +28,20 @@ const (
 
 // World is reset for every scenario by the Before hook.
 type World struct {
-	Dir         string
-	ConfigPath  string
-	App         *app.App
-	Git         *FakeGit
-	Client      *FakeClient
-	Credentials credential.Store
-	NewClient   func(config.Provider, string) (provider.Client, error)
-	Out         string
-	RunErr      error
-	GlobalGit   string
-	Providers   map[string]config.Provider
+	Dir                 string
+	ConfigPath          string
+	App                 *app.App
+	Git                 *FakeGit
+	Client              *FakeClient
+	Credentials         credential.Store
+	FallbackCredentials *credential.FileStore
+	ReadToken           func() (string, error)
+	ConfirmPlaintext    func() (bool, error)
+	NewClient           func(config.Provider, string) (provider.Client, error)
+	Out                 string
+	RunErr              error
+	GlobalGit           string
+	Providers           map[string]config.Provider
 	// Login context for `colt auth login` steps.
 	LoginAlias  string
 	LoginType   string
@@ -111,6 +114,9 @@ func (w *World) Reset(t *testing.T) {
 	w.Git = &FakeGit{Real: true}
 	w.Client = &FakeClient{Account: "example-user"}
 	w.Credentials = nil
+	w.FallbackCredentials = nil
+	w.ReadToken = nil
+	w.ConfirmPlaintext = nil
 	w.Out = ""
 	w.RunErr = nil
 	w.GlobalGit = ""
@@ -156,11 +162,14 @@ func SetEnv(t *testing.T, name, value string) {
 
 func (w *World) BuildApp() {
 	w.App = &app.App{
-		ConfigPath:  w.ConfigPath,
-		WorkDir:     w.Dir,
-		Git:         w.Git,
-		NewClient:   w.NewClient,
-		Credentials: w.Credentials,
+		ConfigPath:          w.ConfigPath,
+		WorkDir:             w.Dir,
+		Git:                 w.Git,
+		NewClient:           w.NewClient,
+		Credentials:         w.Credentials,
+		FallbackCredentials: w.FallbackCredentials,
+		ReadToken:           w.ReadToken,
+		ConfirmPlaintext:    w.ConfirmPlaintext,
 	}
 }
 

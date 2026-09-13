@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/MozeBaltyk/Colt/internal/config"
@@ -88,22 +89,55 @@ func TestAuthHelpUsesLoginLogoutAndStatus(t *testing.T) {
 }
 
 type recordingStore struct {
+	mu          sync.Mutex
 	credentials map[string]credential.Credential
 	gets        int
 	puts        int
 	deletes     []string
 	deleteErr   error
+	getErr      error
+	putErr      error
 }
 
-func (s *recordingStore) Get(string) (credential.Credential, error) {
+func (s *recordingStore) Get(id string) (credential.Credential, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.gets++
-	return credential.Credential{}, errors.New("unexpected credential read")
+	if s.getErr != nil {
+		return credential.Credential{}, s.getErr
+	}
+	value, ok := s.credentials[id]
+	if !ok {
+		return credential.Credential{}, credential.ErrNotFound
+	}
+	return value, nil
 }
-func (s *recordingStore) Put(string, credential.Credential) error {
+func (s *recordingStore) Put(id string, value credential.Credential) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.puts++
-	return errors.New("unexpected credential write")
+	if s.putErr != nil {
+		return s.putErr
+	}
+	s.credentials[id] = value
+	return nil
+}
+func (s *recordingStore) Create(id string, value credential.Credential) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.puts++
+	if s.putErr != nil {
+		return s.putErr
+	}
+	if _, exists := s.credentials[id]; exists {
+		return credential.ErrAlreadyExists
+	}
+	s.credentials[id] = value
+	return nil
 }
 func (s *recordingStore) Delete(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.deletes = append(s.deletes, id)
 	if s.deleteErr != nil {
 		return s.deleteErr
@@ -113,6 +147,20 @@ func (s *recordingStore) Delete(id string) error {
 	}
 	delete(s.credentials, id)
 	return nil
+}
+func (s *recordingStore) DeleteIf(id string, expected credential.Credential) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deletes = append(s.deletes, id)
+	if s.deleteErr != nil {
+		return false, s.deleteErr
+	}
+	current, ok := s.credentials[id]
+	if !ok || current.Kind != expected.Kind || current.Secret != expected.Secret {
+		return false, nil
+	}
+	delete(s.credentials, id)
+	return true, nil
 }
 
 func storedProvider(alias string) config.Provider {
@@ -351,7 +399,10 @@ func TestINIT_001RuntimeWorkdirAndDestinationPreflightDoNotReadCredentials(t *te
 				workDir = filepath.Join(root, "missing")
 			}
 			if name == "destination" {
-				destination := filepath.Join(root, "demo")
+				destination := filepath.Join(root, "octocat", "demo")
+				if err := os.Mkdir(filepath.Dir(destination), 0o755); err != nil {
+					t.Fatal(err)
+				}
 				if err := os.Mkdir(destination, 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -370,7 +421,7 @@ func TestINIT_001RuntimeWorkdirAndDestinationPreflightDoNotReadCredentials(t *te
 				t.Fatalf("error=%v store=%#v clients=%d git=%v config changed=%t", err, store, clientCalls, runner.calls, !bytes.Equal(beforeConfig, afterConfig))
 			}
 			if name == "destination" {
-				data, readErr := os.ReadFile(filepath.Join(root, "demo", "keep.txt"))
+				data, readErr := os.ReadFile(filepath.Join(root, "octocat", "demo", "keep.txt"))
 				if readErr != nil || string(data) != "keep" {
 					t.Fatalf("destination changed: data=%q error=%v", data, readErr)
 				}
@@ -458,8 +509,8 @@ func TestINIT_001RemoteDestinationFailureSkipsProviderClientAndMutation(t *testi
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.yaml")
 	writeAppConfig(t, configPath, appProvider())
-	destination := filepath.Join(root, "demo")
-	if err := os.Mkdir(destination, 0o755); err != nil {
+	destination := filepath.Join(root, "team", "demo")
+	if err := os.MkdirAll(destination, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	userFile := filepath.Join(destination, "keep.txt")
@@ -531,13 +582,182 @@ func TestINIT_006_007RemoteWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantCalls := "available,init,identity,commit,origin:https://gitlab.com/team/demo.git,helper,push:https://gitlab.com/team/demo.git"
+	wantCalls := "available,clone:https://gitlab.com/team/demo.git:" + filepath.Join(root, "team", "demo") + ",identity,commit,helper,push:https://gitlab.com/team/demo.git"
 	if strings.Join(runner.calls, ",") != wantCalls || client.gets != 1 || client.creates != 1 || !strings.Contains(output, "namespace team") {
 		t.Fatalf("calls=%v gets=%d creates=%d output=%q", runner.calls, client.gets, client.creates, output)
 	}
-	if runner.pushType != "gitlab" || runner.pushToken != "test-secret-token" {
-		t.Fatal("push did not receive selected provider type and process credential")
+	if !strings.Contains(output, filepath.Join("team", "demo")) {
+		t.Fatalf("output does not preserve namespace/project path: %q", output)
 	}
+}
+
+func TestRemoteInitDefaultsToHomeAndSupportsExplicitDestination(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want func(string) string
+	}{
+		{"default home", []string{"init", "demo"}, func(home string) string { return filepath.Join(home, "team", "demo") }},
+		{"relative custom destination", []string{"init", "demo", "--destination", "custom/demo"}, func(home string) string { return filepath.Join(home, "custom", "demo") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			if len(tc.args) > 2 {
+				if err := os.Mkdir(filepath.Join(home, "custom"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			writeAppConfig(t, path, appProvider())
+			runner := &fakeGit{}
+			client := &fakeClient{getErr: provider.ErrNotFound, created: &provider.Repository{CloneURL: "https://gitlab.com/team/demo.git"}}
+			a := &App{ConfigPath: path, Git: runner, NewClient: func(config.Provider, string) (provider.Client, error) { return client, nil }}
+			if len(tc.args) > 2 {
+				a.WorkDir = home // test seam for the process current directory
+			}
+			if _, err := execute(t, a, tc.args...); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(runner.calls, ","); !strings.Contains(got, "clone:https://gitlab.com/team/demo.git:"+tc.want(home)) {
+				t.Fatalf("calls=%q", got)
+			}
+		})
+	}
+}
+
+func TestRemoteDestinationConflictsAndPathSafety(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	writeAppConfig(t, path, appProvider())
+	for _, tc := range []struct {
+		name, destination, want string
+		prepare                 func(*testing.T, string)
+	}{
+		{"local conflict", "custom/demo", "only to remote", func(*testing.T, string) {}},
+		{"missing parent", "missing/demo", "inspect destination parent", func(*testing.T, string) {}},
+		{"symlink parent", "custom/demo", "parent is not an ordinary directory", func(t *testing.T, root string) {
+			if err := os.Symlink(t.TempDir(), filepath.Join(root, "custom")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"non-empty destination", "custom/demo", "non-empty", func(t *testing.T, root string) {
+			if err := os.MkdirAll(filepath.Join(root, "custom", "demo"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "custom", "demo", "keep"), []byte("keep"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"symlink destination", "custom/demo", "not an empty ordinary directory", func(t *testing.T, root string) {
+			if err := os.Mkdir(filepath.Join(root, "custom"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(t.TempDir(), filepath.Join(root, "custom", "demo")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caseRoot := t.TempDir()
+			tc.prepare(t, caseRoot)
+			runner := &fakeGit{}
+			clientCalls := 0
+			a := &App{ConfigPath: path, WorkDir: caseRoot, Git: runner, NewClient: func(config.Provider, string) (provider.Client, error) {
+				clientCalls++
+				return &fakeClient{}, nil
+			}}
+			args := []string{"init", "demo", "--destination", tc.destination}
+			if tc.name == "local conflict" {
+				args = append(args, "--local")
+			}
+			_, err := execute(t, a, args...)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || clientCalls != 0 {
+				t.Fatalf("error=%v clients=%d", err, clientCalls)
+			}
+		})
+	}
+}
+
+func TestGitHubCanonicalOwnerCaseIsAcceptedOnlyForGitHub(t *testing.T) {
+	for _, tc := range []struct {
+		name, providerType, raw string
+		valid                   func(string, config.Provider) (string, bool)
+		want                    bool
+	}{
+		{"GitHub HTTPS", "github", "https://github.com/MozeBaltyk/demo.git", cleanHTTPSRepository, true},
+		{"GitHub SSH", "github", "git@github.com:MozeBaltyk/demo.git", cleanSSHRepository, true},
+		{"GitLab HTTPS", "gitlab", "https://gitlab.com/MozeBaltyk/demo.git", cleanHTTPSRepository, false},
+		{"GitLab SSH", "gitlab", "git@gitlab.com:MozeBaltyk/demo.git", cleanSSHRepository, false},
+		{"GitHub wrong host", "github", "https://evil.example/MozeBaltyk/demo.git", cleanHTTPSRepository, false},
+		{"GitHub wrong repository", "github", "https://github.com/MozeBaltyk/other.git", cleanHTTPSRepository, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := appProvider()
+			p.Type, p.Host, p.Namespace = tc.providerType, map[string]string{"github": "github.com", "gitlab": "gitlab.com"}[tc.providerType], "mozebaltyk"
+			project, ok := tc.valid(tc.raw, p)
+			if ok != tc.want || ok && project == "" {
+				t.Fatalf("validation = %q, %v", project, ok)
+			}
+			if tc.name == "GitHub wrong repository" && project != "other" {
+				t.Fatalf("project = %q", project)
+			}
+		})
+	}
+
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	p := storedProvider("personal")
+	p.Namespace = "mozebaltyk"
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": p}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	runner := &fakeGit{}
+	client := &fakeClient{getErr: provider.ErrNotFound, created: &provider.Repository{CloneURL: "https://github.com/MozeBaltyk/demo.git"}}
+	if _, err := execute(t, testApp(path, root, runner, client), "init", "demo"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRemoteInitPreservesNestedNamespaceAndRejectsSymlinkEscape(t *testing.T) {
+	t.Run("nested namespace", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "config.yaml")
+		p := appProvider()
+		p.Namespace = "platform/tools"
+		writeAppConfig(t, path, p)
+		runner := &fakeGit{}
+		client := &fakeClient{getErr: provider.ErrNotFound, created: &provider.Repository{CloneURL: "https://gitlab.com/platform/tools/demo.git"}}
+		if _, err := execute(t, testApp(path, root, runner, client), "init", "demo"); err != nil {
+			t.Fatal(err)
+		}
+		want := "clone:https://gitlab.com/platform/tools/demo.git:" + filepath.Join(root, "platform", "tools", "demo")
+		if !strings.Contains(strings.Join(runner.calls, ","), want) {
+			t.Fatalf("calls=%v, want %q", runner.calls, want)
+		}
+	})
+
+	t.Run("symlink namespace", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "config.yaml")
+		writeAppConfig(t, path, appProvider())
+		if err := os.Symlink(t.TempDir(), filepath.Join(root, "team")); err != nil {
+			t.Fatal(err)
+		}
+		runner := &fakeGit{}
+		clientCalls := 0
+		a := &App{ConfigPath: path, WorkDir: root, Git: runner, NewClient: func(config.Provider, string) (provider.Client, error) {
+			clientCalls++
+			return &fakeClient{}, nil
+		}}
+		if _, err := execute(t, a, "init", "demo"); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+			t.Fatalf("error=%v", err)
+		}
+		if clientCalls != 0 || strings.Join(runner.calls, ",") != "available" {
+			t.Fatalf("client calls=%d Git calls=%v", clientCalls, runner.calls)
+		}
+	})
 }
 
 func TestGiteaRemoteWorkflowUsesAuthenticatedAccountForGitHTTPS(t *testing.T) {
@@ -553,8 +773,8 @@ func TestGiteaRemoteWorkflowUsesAuthenticatedAccountForGitHTTPS(t *testing.T) {
 	if _, err := execute(t, testApp(path, root, runner, client), "init", "demo"); err != nil {
 		t.Fatal(err)
 	}
-	if runner.pushType != "gitea" || runner.pushUsername != "alice" || runner.pushToken != "gitea-test-secret" {
-		t.Fatalf("push type=%q username=%q token selected=%t", runner.pushType, runner.pushUsername, runner.pushToken == "gitea-test-secret")
+	if got := strings.Join(runner.calls, ","); !strings.Contains(got, "clone:https://code.example/team/demo.git:"+filepath.Join(root, "team", "demo")) {
+		t.Fatalf("calls=%q", got)
 	}
 }
 
@@ -585,9 +805,9 @@ func TestINIT_007SSHRemoteWorkflowUsesNoHTTPAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "available,init,identity,commit,origin:git@gitlab.com:team/demo.git,push:git@gitlab.com:team/demo.git"
-	if strings.Join(runner.calls, ",") != want || runner.pushToken != "" {
-		t.Fatalf("calls=%v push token=%q", runner.calls, runner.pushToken)
+	want := "available,clone:git@gitlab.com:team/demo.git:" + filepath.Join(root, "team", "demo") + ",identity,commit,push:git@gitlab.com:team/demo.git"
+	if strings.Join(runner.calls, ",") != want {
+		t.Fatalf("calls=%v", runner.calls)
 	}
 }
 
@@ -694,6 +914,96 @@ func TestCORE_GIT_005_006_007CredentialHelperProtocol(t *testing.T) {
 	}
 }
 
+func TestCloneCredentialHelperDisambiguatesSharedHostAndNamespace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	p := appProvider()
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": p, "work": p}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("COLT_TEST_TOKEN", "shared-helper-secret")
+	a := &App{ConfigPath: path}
+	request := "protocol=https\nhost=gitlab.com\npath=team/demo.git\n\n"
+	for _, tc := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"unscoped remains ambiguous", []string{"git-credential", "get"}, false},
+		{"selected repository", []string{"git-credential", "--provider", "work", "--repository", "demo", "get"}, true},
+		{"wrong repository", []string{"git-credential", "--provider", "work", "--repository", "other", "get"}, false},
+		{"unknown alias", []string{"git-credential", "--provider", "missing", "get"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := a.Root()
+			var output bytes.Buffer
+			cmd.SetIn(strings.NewReader(request))
+			cmd.SetOut(&output)
+			cmd.SetArgs(tc.args)
+			if err := cmd.ExecuteContext(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(output.String(), "password=shared-helper-secret"); got != tc.want {
+				t.Fatalf("credential returned=%t", got)
+			}
+		})
+	}
+}
+
+func TestPutCredentialConcurrentCreateAndRollbackOwnership(t *testing.T) {
+	store := credential.NewMemoryStore()
+	type result struct {
+		rollback func() error
+		err      error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for _, secret := range []string{"first", "second"} {
+		go func(secret string) {
+			<-start
+			rollback, err := putCredential(store, "github.com/personal", secret)
+			results <- result{rollback, err}
+		}(secret)
+	}
+	close(start)
+	first, second := <-results, <-results
+	var winner, loser result
+	if first.err == nil {
+		winner, loser = first, second
+	} else {
+		winner, loser = second, first
+	}
+	if winner.err != nil || winner.rollback == nil || !errors.Is(loser.err, credential.ErrAlreadyExists) || loser.rollback != nil {
+		t.Fatalf("results: first=%v second=%v", first.err, second.err)
+	}
+	if _, err := store.Get("github.com/personal"); err != nil {
+		t.Fatalf("losing enrollment removed winner: %v", err)
+	}
+	if err := winner.rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get("github.com/personal"); !errors.Is(err, credential.ErrNotFound) {
+		t.Fatalf("winner rollback left credential: %v", err)
+	}
+}
+
+func TestPutCredentialRollbackDoesNotDeleteReplacement(t *testing.T) {
+	store := credential.NewMemoryStore()
+	rollback, err := putCredential(store, "github.com/personal", "created")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put("github.com/personal", credential.Credential{Kind: "bearer_token", Secret: "replacement"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rollback(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get("github.com/personal")
+	if err != nil || got.Secret != "replacement" {
+		t.Fatalf("replacement was removed: credential=%+v error=%v", got, err)
+	}
+}
+
 func TestGiteaAndForgejoCredentialHelperUsername(t *testing.T) {
 	for _, providerType := range []string{"gitea", "forgejo"} {
 		t.Run(providerType, func(t *testing.T) {
@@ -734,7 +1044,7 @@ func TestINIT_008KnownAndRacingConflictsAreNotAdopted(t *testing.T) {
 		wantCalls string
 	}{
 		{"known", &fakeClient{found: &provider.Repository{CloneURL: "https://gitlab.com/team/demo.git"}}, "available"},
-		{"race", &fakeClient{getErr: provider.ErrNotFound, createErr: provider.ErrConflict}, "available,init,identity,commit"},
+		{"race", &fakeClient{getErr: provider.ErrNotFound, createErr: provider.ErrConflict}, "available"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -770,7 +1080,7 @@ func TestINIT_009CORE_FAILURE_001PushFailurePreservesAndReportsState(t *testing.
 			t.Fatalf("error %q missing %q", message, want)
 		}
 	}
-	if strings.Contains(message, "test-secret-token") || !strings.Contains(strings.Join(runner.calls, ","), "origin:") {
+	if strings.Contains(message, "test-secret-token") || !strings.Contains(strings.Join(runner.calls, ","), "clone:") {
 		t.Fatalf("unsafe or incomplete partial state: %v calls=%v", err, runner.calls)
 	}
 }
@@ -847,6 +1157,269 @@ func TestCORE_PROVIDER_001_002AuthLoginNoninteractiveAndNoTokenPersistence(t *te
 	}
 	if _, err := execute(t, a, "auth", "login", "gitlab", "work", "--host", "gitlab.example", "--base-url", "https://gitlab.example", "--namespace", "platform", "--git-name", "Alice", "--git-email", "alice@example.com", "--token-env", "CUSTOM_TOKEN"); err == nil || !strings.Contains(err.Error(), "--replace") {
 		t.Fatalf("duplicate alias error = %v", err)
+	}
+}
+
+func TestManualLoginAuthenticatesBeforeSecurePersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("GITHUB_TOKEN", "")
+	store := &recordingStore{credentials: map[string]credential.Credential{}}
+	authenticated := false
+	a := &App{
+		ConfigPath:  path,
+		Credentials: store,
+		ReadToken:   func() (string, error) { return "manual-secret", nil },
+		NewClient: func(p config.Provider, token string) (provider.Client, error) {
+			if p.Auth.Source != "stored" || token != "manual-secret" || store.puts != 0 {
+				t.Fatalf("provider=%+v token=%q puts=%d", p, token, store.puts)
+			}
+			authenticated = true
+			return &fakeClient{account: "octocat"}, nil
+		},
+	}
+	output, err := execute(t, a, "auth", "login", "github", "personal", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+	if err != nil || !authenticated || store.puts != 1 || store.credentials["github.com/personal"].Secret != "manual-secret" || strings.Contains(output, "manual-secret") {
+		t.Fatalf("error=%v authenticated=%t store=%#v output=%q", err, authenticated, store, output)
+	}
+	cfg, err := config.Load(path)
+	if err != nil || cfg.Providers["personal"].Auth != (config.Auth{Source: "stored", CredentialID: "github.com/personal"}) {
+		t.Fatalf("config=%+v error=%v", cfg, err)
+	}
+}
+
+func TestManualLoginFailureAndNonTTYDoNotPersist(t *testing.T) {
+	args := []string{"auth", "login", "github", "personal", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com"}
+	t.Run("authentication failure", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		t.Setenv("GITHUB_TOKEN", "")
+		store := &recordingStore{credentials: map[string]credential.Credential{}}
+		a := &App{ConfigPath: path, Credentials: store, ReadToken: func() (string, error) { return "manual-secret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
+			return &fakeClient{authErr: errors.New("authentication failed")}, nil
+		}}
+		if _, err := execute(t, a, args...); err == nil || store.puts != 0 {
+			t.Fatalf("error=%v store=%#v", err, store)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("config created: %v", err)
+		}
+	})
+	t.Run("non tty", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		t.Setenv("GITHUB_TOKEN", "")
+		clientCalls := 0
+		a := &App{ConfigPath: path, Credentials: credential.NewMemoryStore(), NewClient: func(config.Provider, string) (provider.Client, error) {
+			clientCalls++
+			return &fakeClient{}, nil
+		}}
+		if _, err := execute(t, a, args...); err == nil || !strings.Contains(err.Error(), "interactive terminal") || clientCalls != 0 {
+			t.Fatalf("error=%v client calls=%d", err, clientCalls)
+		}
+	})
+	t.Run("manual token CRLF", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		t.Setenv("GITHUB_TOKEN", "")
+		clientCalls := 0
+		store := &recordingStore{credentials: map[string]credential.Credential{}}
+		a := &App{ConfigPath: path, Credentials: store, ReadToken: func() (string, error) { return "bad\nsecret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
+			clientCalls++
+			return &fakeClient{}, nil
+		}}
+		if _, err := execute(t, a, args...); err == nil || !strings.Contains(err.Error(), "no CR or LF") || clientCalls != 0 || store.puts != 0 {
+			t.Fatalf("error=%v clients=%d store=%#v", err, clientCalls, store)
+		}
+	})
+}
+
+func TestExplicitTokenEnvMissingNeverPromptsInteractively(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("EXPLICIT_TOKEN", "")
+	prompts, confirmations, clientCalls := 0, 0, 0
+	store := &recordingStore{credentials: map[string]credential.Credential{}}
+	a := &App{
+		ConfigPath: path, Credentials: store,
+		ReadToken:        func() (string, error) { prompts++; return "manual-secret", nil },
+		ConfirmPlaintext: func() (bool, error) { confirmations++; return true, nil },
+		NewClient:        func(config.Provider, string) (provider.Client, error) { clientCalls++; return &fakeClient{}, nil },
+	}
+	_, err := execute(t, a, "auth", "login", "github", "personal", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com", "--token-env", "EXPLICIT_TOKEN")
+	if err == nil || !strings.Contains(err.Error(), "EXPLICIT_TOKEN is missing or empty") || prompts != 0 || confirmations != 0 || clientCalls != 0 || store.gets != 0 || store.puts != 0 {
+		t.Fatalf("error=%v prompts=%d confirmations=%d clients=%d store=%#v", err, prompts, confirmations, clientCalls, store)
+	}
+}
+
+func TestManualLoginRefusesCredentialOverwriteAndUnsafeReplacement(t *testing.T) {
+	t.Run("pre-existing target", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		t.Setenv("GITHUB_TOKEN", "")
+		store := &recordingStore{credentials: map[string]credential.Credential{"github.com/personal": {Kind: "bearer_token", Secret: "keep"}}}
+		a := &App{ConfigPath: path, Credentials: store, ReadToken: func() (string, error) { return "new-secret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
+			return &fakeClient{account: "octocat"}, nil
+		}}
+		_, err := execute(t, a, "auth", "login", "github", "personal", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+		if err == nil || !strings.Contains(err.Error(), "refusing to overwrite") || store.credentials["github.com/personal"].Secret != "keep" || store.puts != 0 {
+			t.Fatalf("error=%v store=%#v", err, store)
+		}
+	})
+
+	t.Run("pre-existing fallback target", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.Chmod(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(root, "config.yaml")
+		secure := credential.NewMemoryStore()
+		fallback := credential.NewFileStore(credential.DefaultFilePath(path))
+		if err := fallback.Put("github.com/personal", credential.Credential{Kind: "bearer_token", Secret: "keep"}); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GITHUB_TOKEN", "")
+		a := &App{ConfigPath: path, Credentials: secure, FallbackCredentials: fallback, ReadToken: func() (string, error) { return "new-secret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
+			return &fakeClient{account: "octocat"}, nil
+		}}
+		_, err := execute(t, a, "auth", "login", "github", "personal", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+		got, getErr := fallback.Get("github.com/personal")
+		if err == nil || !strings.Contains(err.Error(), "refusing to overwrite") || getErr != nil || got.Secret != "keep" {
+			t.Fatalf("error=%v fallback=%+v get=%v", err, got, getErr)
+		}
+		if _, secureErr := secure.Get("github.com/personal"); !errors.Is(secureErr, credential.ErrNotFound) {
+			t.Fatalf("secure target created: %v", secureErr)
+		}
+	})
+
+	t.Run("environment-backed replacement cannot create stored state", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": appProvider()}}); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GITHUB_TOKEN", "")
+		t.Setenv("COLT_TEST_TOKEN", "")
+		prompts := 0
+		a := &App{ConfigPath: path, Credentials: credential.NewMemoryStore(), ReadToken: func() (string, error) { prompts++; return "new", nil }}
+		_, err := execute(t, a, "auth", "login", "github", "personal", "--replace", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+		if err == nil || !strings.Contains(err.Error(), "not allowed with --replace") || prompts != 0 {
+			t.Fatalf("error=%v prompts=%d", err, prompts)
+		}
+	})
+
+	t.Run("stored replacement cannot change reference", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		old := config.Provider{Type: "gitlab", Host: "old.example", BaseURL: "https://old.example", Namespace: "team", Visibility: "private", GitName: "Test", GitEmail: "test@example.com", Auth: config.Auth{Source: "stored", CredentialID: "old.example/work"}}
+		if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"work": old}}); err != nil {
+			t.Fatal(err)
+		}
+		a := &App{ConfigPath: path, Credentials: credential.NewMemoryStore()}
+		_, err := execute(t, a, "auth", "login", "gitlab", "work", "--replace", "--host", "new.example", "--base-url", "https://new.example", "--namespace", "team", "--git-name", "Test", "--git-email", "test@example.com")
+		if err == nil || !strings.Contains(err.Error(), "would orphan") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+
+	t.Run("same stored reference is reused without overwrite", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": storedProvider("personal")}}); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GITHUB_TOKEN", "")
+		store := &recordingStore{credentials: map[string]credential.Credential{"github.com/personal": {Kind: "bearer_token", Secret: "old-secret"}}}
+		a := &App{ConfigPath: path, Credentials: store, ReadToken: func() (string, error) { t.Fatal("manual prompt called"); return "", nil }, NewClient: func(_ config.Provider, token string) (provider.Client, error) {
+			if token != "old-secret" {
+				t.Fatalf("token=%q", token)
+			}
+			return &fakeClient{account: "octocat"}, nil
+		}}
+		_, err := execute(t, a, "auth", "login", "github", "personal", "--replace", "--namespace", "new-namespace", "--git-name", "Test", "--git-email", "test@example.com")
+		cfg, loadErr := config.Load(path)
+		if err != nil || loadErr != nil || cfg.Providers["personal"].Auth.CredentialID != "github.com/personal" || cfg.Providers["personal"].Namespace != "new-namespace" || store.puts != 0 || len(store.deletes) != 0 {
+			t.Fatalf("error=%v load=%v config=%+v store=%#v", err, loadErr, cfg, store)
+		}
+	})
+}
+
+func TestManualLoginPlaintextRequiresConsentAndRollsBackOnConfigFailure(t *testing.T) {
+	for _, accepted := range []bool{false, true} {
+		t.Run(map[bool]string{false: "rejected", true: "accepted"}[accepted], func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Chmod(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(root, "config.yaml")
+			fallback := credential.NewFileStore(credential.DefaultFilePath(path))
+			t.Setenv("GITHUB_TOKEN", "")
+			a := &App{ConfigPath: path, Credentials: credential.DisabledStore{}, FallbackCredentials: fallback,
+				ReadToken: func() (string, error) { return "manual-secret", nil }, ConfirmPlaintext: func() (bool, error) { return accepted, nil },
+				NewClient: func(config.Provider, string) (provider.Client, error) { return &fakeClient{account: "octocat"}, nil }}
+			output, err := execute(t, a, "auth", "login", "github", "personal", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+			if accepted {
+				got, getErr := fallback.Get("github.com/personal")
+				if err != nil || getErr != nil || got.Secret != "manual-secret" || !strings.Contains(output, "plaintext protected only") {
+					t.Fatalf("error=%v get=%v output=%q", err, getErr, output)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), "not persisted") {
+					t.Fatalf("error=%v", err)
+				}
+				if _, statErr := os.Stat(fallback.Path); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("fallback created: %v", statErr)
+				}
+			}
+		})
+	}
+
+	t.Run("config save rollback", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "config.yaml")
+		t.Setenv("GITHUB_TOKEN", "")
+		store := &recordingStore{credentials: map[string]credential.Credential{}}
+		a := &App{ConfigPath: path, Credentials: store, ReadToken: func() (string, error) { return "manual-secret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return &fakeClient{account: "octocat"}, nil
+		}}
+		_, err := execute(t, a, "auth", "login", "github", "personal", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+		if err == nil || !strings.Contains(err.Error(), "config was not changed") || len(store.credentials) != 0 || store.puts != 1 || len(store.deletes) != 1 {
+			t.Fatalf("error=%v store=%#v", err, store)
+		}
+	})
+
+	t.Run("same-reference replacement save failure does not mutate credential", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": storedProvider("personal")}}); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := os.ReadFile(path)
+		t.Setenv("GITHUB_TOKEN", "")
+		store := &recordingStore{credentials: map[string]credential.Credential{"github.com/personal": {Kind: "bearer_token", Secret: "old-secret"}}}
+		a := &App{
+			ConfigPath: path, Credentials: store,
+			ReadToken:  func() (string, error) { t.Fatal("manual prompt called"); return "", nil },
+			NewClient:  func(config.Provider, string) (provider.Client, error) { return &fakeClient{account: "octocat"}, nil },
+			SaveConfig: func(string, config.Config) error { return errors.New("save failed") },
+		}
+		_, err := execute(t, a, "auth", "login", "github", "personal", "--replace", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+		after, _ := os.ReadFile(path)
+		if err == nil || store.credentials["github.com/personal"].Secret != "old-secret" || store.puts != 0 || !bytes.Equal(before, after) {
+			t.Fatalf("error=%v store=%#v config changed=%t", err, store, !bytes.Equal(before, after))
+		}
+	})
+}
+
+func TestManualLoginReportsUncertainPersistenceWithoutConfigMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("GITHUB_TOKEN", "")
+	store := &recordingStore{credentials: map[string]credential.Credential{}, putErr: credential.ErrPersistenceUncertain, deleteErr: errors.New("delete uncertain")}
+	a := &App{ConfigPath: path, Credentials: store, ReadToken: func() (string, error) { return "manual-secret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
+		return &fakeClient{account: "octocat"}, nil
+	}}
+	_, err := execute(t, a, "auth", "login", "github", "personal", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+	if err == nil || !strings.Contains(err.Error(), "persistence outcome is uncertain") || !strings.Contains(err.Error(), "github.com/personal") {
+		t.Fatalf("error=%v", err)
+	}
+	if len(store.deletes) != 0 {
+		t.Fatalf("uncertain create triggered unsafe rollback: deletes=%v", store.deletes)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("config changed: %v", statErr)
 	}
 }
 
@@ -977,7 +1550,7 @@ func TestStoredCredentialResolvesFromSiblingFile(t *testing.T) {
 	}
 }
 
-func TestProductionDefaultDoesNotEnablePlaintextFallback(t *testing.T) {
+func TestProductionDefaultReadsConsentCreatedPlaintextFallback(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
@@ -994,15 +1567,20 @@ func TestProductionDefaultDoesNotEnablePlaintextFallback(t *testing.T) {
 	}
 	clientCalls := 0
 	a := New()
-	if _, ok := a.Credentials.(credential.DisabledStore); !ok {
-		t.Fatalf("production credential store = %T, want disabled", a.Credentials)
+	if _, ok := a.Credentials.(*credential.SecureStore); !ok || a.FallbackCredentials == nil {
+		t.Fatalf("production credential stores = %T, %v", a.Credentials, a.FallbackCredentials)
 	}
-	a.NewClient = func(config.Provider, string) (provider.Client, error) {
+	// Do not touch the developer/CI OS keyring from a unit test.
+	a.Credentials = credential.DisabledStore{}
+	a.NewClient = func(_ config.Provider, token string) (provider.Client, error) {
 		clientCalls++
+		if token != "must-not-be-read" {
+			t.Fatalf("fallback token not resolved")
+		}
 		return &fakeClient{}, nil
 	}
 	output, err := execute(t, a, "auth", "status")
-	if err != nil || clientCalls != 0 || !strings.Contains(output, "credential storage failure") || strings.Contains(output, "credentials missing") {
+	if err != nil || clientCalls != 1 || !strings.Contains(output, "connected") || strings.Contains(output, "must-not-be-read") {
 		t.Fatalf("error=%v client calls=%d output=%q", err, clientCalls, output)
 	}
 }
@@ -1037,8 +1615,12 @@ func (s *countingStore) Get(string) (credential.Credential, error) {
 	s.gets++
 	return credential.Credential{}, credential.ErrNotFound
 }
-func (*countingStore) Put(string, credential.Credential) error { return nil }
-func (*countingStore) Delete(string) error                     { return nil }
+func (*countingStore) Put(string, credential.Credential) error    { return nil }
+func (*countingStore) Create(string, credential.Credential) error { return nil }
+func (*countingStore) Delete(string) error                        { return nil }
+func (*countingStore) DeleteIf(string, credential.Credential) (bool, error) {
+	return false, nil
+}
 
 func TestOfflineStatusDoesNotReadCredentialStore(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -1103,13 +1685,14 @@ type fakeGit struct {
 	calls        []string
 	availableErr error
 	pushErr      error
-	pushType     string
-	pushToken    string
-	pushUsername string
 }
 
 func (g *fakeGit) Available() error                   { g.calls = append(g.calls, "available"); return g.availableErr }
 func (g *fakeGit) Init(context.Context, string) error { g.calls = append(g.calls, "init"); return nil }
+func (g *fakeGit) Clone(_ context.Context, url, destination, _, _, _ string) error {
+	g.calls = append(g.calls, "clone:"+url+":"+destination)
+	return nil
+}
 func (g *fakeGit) SetIdentity(context.Context, string, string, string) error {
 	g.calls = append(g.calls, "identity")
 	return nil
@@ -1122,15 +1705,12 @@ func (g *fakeGit) AddOrigin(_ context.Context, _, url string) error {
 	g.calls = append(g.calls, "origin:"+url)
 	return nil
 }
-func (g *fakeGit) ConfigureCredentialHelper(context.Context, string, string, string) error {
+func (g *fakeGit) ConfigureCredentialHelper(context.Context, string, string, string, string, string) error {
 	g.calls = append(g.calls, "helper")
 	return nil
 }
-func (g *fakeGit) Push(_ context.Context, _, url, providerType, username, token string) error {
+func (g *fakeGit) Push(_ context.Context, _, url string) error {
 	g.calls = append(g.calls, "push:"+url)
-	g.pushType = providerType
-	g.pushToken = token
-	g.pushUsername = username
 	return g.pushErr
 }
 

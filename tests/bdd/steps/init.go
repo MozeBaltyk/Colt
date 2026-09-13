@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/MozeBaltyk/Colt/internal/config"
@@ -17,6 +18,13 @@ import (
 	"github.com/MozeBaltyk/Colt/tests/bdd/fixture"
 	"github.com/cucumber/godog"
 )
+
+func remoteProjectDir(w *fixture.World) string {
+	for _, p := range w.Providers {
+		return filepath.Join(w.Dir, filepath.FromSlash(p.Namespace), "demo")
+	}
+	return filepath.Join(w.Dir, "demo")
+}
 
 // RegisterInitSteps covers blank project initialization and provider
 // resolution scenarios: local/remote init flows, safety and conflict
@@ -78,6 +86,18 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		w.Client.CreateRepo = &provider.Repository{CloneURL: "https://" + host + "/example-namespace/demo.git"}
 		w.Client.GetErr = provider.ErrNotFound
 		return w.SaveConfig()
+	})
+	ctx.Step(`^GitHub is configured as "([^"]*)" but returns canonical owner "([^"]*)"$`, func(configured, canonical string) error {
+		w.Git.Real = true
+		p := fixture.WithTokenEnv(fixture.StdProvider("github", configured), fixture.TokenEnv)
+		p.Default = true
+		w.Providers = map[string]config.Provider{"personal": p}
+		w.Client.GetErr = provider.ErrNotFound
+		w.Client.CreateRepo = &provider.Repository{CloneURL: "https://github.com/" + canonical + "/demo.git"}
+		return w.SaveConfig()
+	})
+	ctx.Step(`^custom destination parent "([^"]*)" exists$`, func(relative string) error {
+		return os.MkdirAll(filepath.Join(w.Dir, filepath.FromSlash(relative)), 0o755)
 	})
 	ctx.Step(`^the transport preference resolves to HTTPS$`, func() error {
 		w.Git.Real = true
@@ -250,10 +270,10 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		dst := filepath.Join(w.Dir, "demo")
 		commandCtx, cancel := context.WithTimeout(context.Background(), fixture.CommandTimeout)
 		defer cancel()
-		if err := (gitnative.Native{}).ConfigureCredentialHelper(commandCtx, dst, "", ""); err != nil {
+		if err := (gitnative.Native{}).ConfigureCredentialHelper(commandCtx, dst, "", "", "work", "demo"); err != nil {
 			return err
 		}
-		return (gitnative.Native{}).ConfigureCredentialHelper(commandCtx, dst, "", "")
+		return (gitnative.Native{}).ConfigureCredentialHelper(commandCtx, dst, "", "", "work", "demo")
 	})
 	ctx.Step(`^I run a command with provider "([^"]*)"$`, func(alias string) error {
 		w.Run("colt init demo --local --provider " + alias)
@@ -481,6 +501,16 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		}
 		return nil
 	})
+	ctx.Step(`^it is cloned locally as "([^"]+)"$`, func(relative string) error {
+		destination := filepath.Join(w.Dir, filepath.FromSlash(relative))
+		if info, err := os.Stat(filepath.Join(destination, ".git")); err != nil || !info.IsDir() {
+			return fmt.Errorf("clone destination %q missing: %v", destination, err)
+		}
+		if !slices.Contains(w.Git.Operations, "clone") {
+			return fmt.Errorf("clone was not requested: %v", w.Git.Operations)
+		}
+		return nil
+	})
 	ctx.Step(`^the initial commit is submitted once through the configured Git runner$`, func() error {
 		if w.Git.Pushes != 1 {
 			return fmt.Errorf("pushes = %d", w.Git.Pushes)
@@ -491,14 +521,14 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return nil // Runner.Push owns native --set-upstream arguments; its unit test covers those exact process arguments.
 	})
 	ctx.Step(`^the "origin" URL is "([^"]*)" with no credential in the URL$`, func(want string) error {
-		got, err := fixture.GitOut(filepath.Join(w.Dir, "demo"), "remote", "get-url", "origin")
+		got, err := fixture.GitOut(remoteProjectDir(w), "remote", "get-url", "origin")
 		if err != nil || got != want || strings.Contains(got, "@") {
 			return fmt.Errorf("origin = %q, want %q: %v", got, want, err)
 		}
 		return nil
 	})
 	ctx.Step(`^the "origin" URL is "([^"]*)"$`, func(want string) error {
-		got, err := fixture.GitOut(filepath.Join(w.Dir, "demo"), "remote", "get-url", "origin")
+		got, err := fixture.GitOut(remoteProjectDir(w), "remote", "get-url", "origin")
 		if err != nil || got != want {
 			return fmt.Errorf("origin = %q, want %q: %v", got, want, err)
 		}
@@ -511,23 +541,23 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return nil
 	})
 	ctx.Step(`^native Git handles SSH authentication with no provider token or Colt credential helper injection$`, func() error {
-		if w.Git.Pushes != 1 || w.Git.PushToken != "" || w.Git.Helpers != 0 {
-			return fmt.Errorf("SSH push used Colt HTTP authentication: pushes=%d token=%q helpers=%d", w.Git.Pushes, w.Git.PushToken, w.Git.Helpers)
+		if w.Git.Pushes != 1 || w.Git.Helpers != 0 {
+			return fmt.Errorf("SSH push used Colt HTTP authentication: pushes=%d helpers=%d", w.Git.Pushes, w.Git.Helpers)
 		}
-		if helper, err := fixture.GitOut(filepath.Join(w.Dir, "demo"), "config", "--local", "--get-all", "credential.helper"); err == nil || helper != "" {
+		if helper, err := fixture.GitOut(remoteProjectDir(w), "config", "--local", "--get-all", "credential.helper"); err == nil || helper != "" {
 			return fmt.Errorf("SSH repository configured a credential helper: %q", helper)
 		}
 		return nil
 	})
 	ctx.Step(`^local Git configuration contains "credential\.helper = colt"$`, func() error {
-		got, err := fixture.GitOut(filepath.Join(w.Dir, "demo"), "config", "--local", "--get-all", "credential.helper")
-		if err != nil || !strings.Contains(got, "!colt git-credential") || w.Git.Helpers != 1 {
+		got, err := fixture.GitOut(remoteProjectDir(w), "config", "--local", "--get-all", "credential.helper")
+		if err != nil || !strings.Contains(got, "!colt git-credential --provider personal --repository demo") || w.Git.Helpers != 1 {
 			return fmt.Errorf("local credential helpers = %q: %v", got, err)
 		}
 		return nil
 	})
 	ctx.Step(`^"\.git/config" contains no reusable credential value$`, func() error {
-		data, err := os.ReadFile(filepath.Join(w.Dir, "demo", ".git", "config"))
+		data, err := os.ReadFile(filepath.Join(remoteProjectDir(w), ".git", "config"))
 		if err != nil {
 			return err
 		}
@@ -547,7 +577,7 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		gitCtx, cancelGit := context.WithTimeout(context.Background(), fixture.CommandTimeout)
 		defer cancelGit()
 		cmd := exec.CommandContext(gitCtx, "git", "credential", "fill")
-		cmd.Dir = filepath.Join(w.Dir, "demo")
+		cmd.Dir = remoteProjectDir(w)
 		cmd.Env = append(os.Environ(), "COLT_CONFIG="+w.ConfigPath, "PATH="+w.Dir+string(os.PathListSeparator)+os.Getenv("PATH"), "GIT_TERMINAL_PROMPT=0")
 		cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\npath=example-user/demo.git\n\n")
 		output, err := cmd.CombinedOutput()
@@ -568,10 +598,9 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		}
 		return nil
 	})
-	ctx.Step(`^Colt preserves completed local work and reports the conflict$`, func() error {
-		data, err := os.ReadFile(filepath.Join(w.Dir, "demo", ".git", "COMMIT"))
-		if err != nil || string(data) != "fake" || strings.Join(w.Git.Operations, ",") != "available,init,identity,commit" {
-			return fmt.Errorf("completed local work missing: data=%q err=%v operations=%v", data, err, w.Git.Operations)
+	ctx.Step(`^Colt leaves no local clone and reports the conflict$`, func() error {
+		if _, err := os.Lstat(remoteProjectDir(w)); !errors.Is(err, os.ErrNotExist) || strings.Join(w.Git.Operations, ",") != "available" {
+			return fmt.Errorf("unexpected local conflict state: err=%v operations=%v", err, w.Git.Operations)
 		}
 		if w.RunErr == nil || !strings.Contains(w.RunErr.Error(), "conflict") {
 			return fmt.Errorf("conflict not reported: %v", w.RunErr)
@@ -603,33 +632,32 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		if strings.Join(w.Client.Calls, ",") != "Get:demo,Create:demo" || len(w.Git.Origins) != 1 || w.Git.Pushes != 0 {
 			return fmt.Errorf("partial state lost: calls=%v origins=%v", w.Client.Calls, w.Git.Origins)
 		}
-		if data, err := os.ReadFile(filepath.Join(w.Dir, "demo", ".git", "COMMIT")); err != nil || string(data) != "fake" {
+		if data, err := os.ReadFile(filepath.Join(remoteProjectDir(w), ".git", "COMMIT")); err != nil || string(data) != "fake" {
 			return fmt.Errorf("local commit missing: %q, %v", data, err)
 		}
 		return nil
 	})
-	ctx.Step(`^clone target validation fails with the initial commit preserved$`, func() error {
+	ctx.Step(`^clone target validation fails before creating a local clone$`, func() error {
 		if w.RunErr == nil || !strings.Contains(w.RunErr.Error(), "validate remote repository") {
 			return fmt.Errorf("expected clone target validation failure, got %v", w.RunErr)
 		}
 		if strings.Join(w.Client.Calls, ",") != "Get:demo,Create:demo" {
 			return fmt.Errorf("provider calls = %v", w.Client.Calls)
 		}
-		data, err := os.ReadFile(filepath.Join(w.Dir, "demo", ".git", "COMMIT"))
-		if err != nil || string(data) != "fake" {
-			return fmt.Errorf("initial commit not preserved: %q, %v", data, err)
+		if _, err := os.Lstat(remoteProjectDir(w)); !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("unexpected local clone: %v", err)
 		}
 		return nil
 	})
 	ctx.Step(`^no origin, credential helper, or push is attempted$`, func() error {
-		if len(w.Git.Origins) != 0 || w.Git.Helpers != 0 || w.Git.Pushes != 0 || strings.Join(w.Git.Operations, ",") != "available,init,identity,commit" {
+		if len(w.Git.Origins) != 0 || w.Git.Helpers != 0 || w.Git.Pushes != 0 || strings.Join(w.Git.Operations, ",") != "available" {
 			return fmt.Errorf("unsafe Git operations: %v origins=%v helpers=%d pushes=%d", w.Git.Operations, w.Git.Origins, w.Git.Helpers, w.Git.Pushes)
 		}
 		return nil
 	})
 	ctx.Step(`^the existing helper remains and the Colt helper appears exactly once locally$`, func() error {
 		got, err := fixture.GitOut(filepath.Join(w.Dir, "demo"), "config", "--local", "--get-all", "credential.helper")
-		if err != nil || got != "existing-helper\n!colt git-credential" {
+		if err != nil || got != "existing-helper\n!colt git-credential --provider work --repository demo" {
 			return fmt.Errorf("credential helpers = %q: %v", got, err)
 		}
 		return nil

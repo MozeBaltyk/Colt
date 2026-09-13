@@ -9,6 +9,7 @@
 package credential
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"os"
@@ -37,11 +38,27 @@ type Credential struct {
 // ErrNotFound reports that no persisted credential exists for an ID.
 // ErrMissing reports that no credential source resolved for a provider.
 var (
-	ErrNotFound         = errors.New("credential not found")
-	ErrMissing          = errors.New("credentials missing")
-	ErrStoreUnavailable = errors.New("credential store unavailable")
-	idPartRE            = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$`)
+	ErrNotFound             = errors.New("credential not found")
+	ErrMissing              = errors.New("credentials missing")
+	ErrStoreUnavailable     = errors.New("credential store unavailable")
+	ErrPersistenceUncertain = errors.New("credential persistence outcome is uncertain")
+	ErrAlreadyExists        = errors.New("credential already exists")
+	idPartRE                = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$`)
 )
+
+func validateCredential(cred Credential) error {
+	if strings.TrimSpace(cred.Kind) == "" || cred.Secret == "" {
+		return errors.New("credential kind and secret must not be empty")
+	}
+	if cred.Kind == "bearer_token" && strings.ContainsAny(cred.Secret, "\r\n") {
+		return errors.New("bearer token must not contain CR or LF")
+	}
+	return nil
+}
+
+func ValidateBearerToken(secret string) error {
+	return validateCredential(Credential{Kind: "bearer_token", Secret: secret})
+}
 
 // Store persists Colt-owned credentials by stable non-secret ID.
 // Implementations: OS secure store, plaintext fallback file, in-memory
@@ -49,16 +66,25 @@ var (
 type Store interface {
 	Get(id string) (Credential, error)
 	Put(id string, cred Credential) error
+	// Create stores a credential only when id is absent and returns
+	// ErrAlreadyExists otherwise. The check and write are one atomic operation.
+	Create(id string, cred Credential) error
 	Delete(id string) error
+	// DeleteIf removes id only when its current value matches cred.
+	DeleteIf(id string, cred Credential) (bool, error)
 }
 
 // DisabledStore keeps stored credentials explicitly disabled until a caller
 // supplies an approved persistent backend.
 type DisabledStore struct{}
 
-func (DisabledStore) Get(string) (Credential, error) { return Credential{}, ErrStoreUnavailable }
-func (DisabledStore) Put(string, Credential) error   { return ErrStoreUnavailable }
-func (DisabledStore) Delete(string) error            { return ErrStoreUnavailable }
+func (DisabledStore) Get(string) (Credential, error)  { return Credential{}, ErrStoreUnavailable }
+func (DisabledStore) Put(string, Credential) error    { return ErrStoreUnavailable }
+func (DisabledStore) Create(string, Credential) error { return ErrStoreUnavailable }
+func (DisabledStore) Delete(string) error             { return ErrStoreUnavailable }
+func (DisabledStore) DeleteIf(string, Credential) (bool, error) {
+	return false, ErrStoreUnavailable
+}
 
 // ValidateID checks the deterministic `<provider-host>/<provider-alias>`
 // form. It validates shape only; the ID must never contain secret
@@ -122,11 +148,19 @@ func (r Resolver) Resolve(providerType, tokenEnv, credentialID string) (Credenti
 		if secret == "" {
 			return Credential{}, fmt.Errorf("%w: credential environment variable %s is missing or empty", ErrMissing, tokenEnv)
 		}
-		return Credential{Kind: "bearer_token", Secret: secret, Source: SourceEnvironment}, nil
+		cred := Credential{Kind: "bearer_token", Secret: secret, Source: SourceEnvironment}
+		if err := validateCredential(cred); err != nil {
+			return Credential{}, fmt.Errorf("invalid bearer token in credential environment variable %s", tokenEnv)
+		}
+		return cred, nil
 	}
 	if name := ConventionalVar(providerType); name != "" {
 		if secret := r.getenv(name); secret != "" {
-			return Credential{Kind: "bearer_token", Secret: secret, Source: SourceEnvironment}, nil
+			cred := Credential{Kind: "bearer_token", Secret: secret, Source: SourceEnvironment}
+			if err := validateCredential(cred); err != nil {
+				return Credential{}, fmt.Errorf("invalid bearer token in credential environment variable %s", name)
+			}
+			return cred, nil
 		}
 	}
 	if credentialID != "" {
@@ -143,7 +177,7 @@ func (r Resolver) Resolve(providerType, tokenEnv, credentialID string) (Credenti
 		if err != nil {
 			return Credential{}, err
 		}
-		if strings.TrimSpace(cred.Kind) == "" || cred.Secret == "" {
+		if validateCredential(cred) != nil {
 			return Credential{}, errors.New("stored credential is invalid for " + credentialID)
 		}
 		cred.Source = SourceStored
@@ -177,14 +211,25 @@ func (m *MemoryStore) Get(id string) (Credential, error) {
 }
 
 func (m *MemoryStore) Put(id string, cred Credential) error {
+	return m.put(id, cred, false)
+}
+
+func (m *MemoryStore) Create(id string, cred Credential) error {
+	return m.put(id, cred, true)
+}
+
+func (m *MemoryStore) put(id string, cred Credential, create bool) error {
 	if err := ValidateID(id); err != nil {
 		return err
 	}
-	if strings.TrimSpace(cred.Kind) == "" || cred.Secret == "" {
-		return errors.New("refusing to store an empty credential kind or secret for " + id)
+	if validateCredential(cred) != nil {
+		return errors.New("refusing to store an invalid credential for " + id)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if _, exists := m.creds[id]; create && exists {
+		return ErrAlreadyExists
+	}
 	m.creds[id] = cred
 	return nil
 }
@@ -203,4 +248,25 @@ func (m *MemoryStore) Delete(id string) error {
 	}
 	delete(m.creds, id)
 	return nil
+}
+
+func (m *MemoryStore) DeleteIf(id string, cred Credential) (bool, error) {
+	if err := ValidateID(id); err != nil {
+		return false, err
+	}
+	if err := validateCredential(cred); err != nil {
+		return false, errors.New("invalid credential comparison")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.creds[id]
+	if !ok || !sameCredential(current, cred) {
+		return false, nil
+	}
+	delete(m.creds, id)
+	return true, nil
+}
+
+func sameCredential(a, b Credential) bool {
+	return a.Kind == b.Kind && subtle.ConstantTimeCompare([]byte(a.Secret), []byte(b.Secret)) == 1
 }

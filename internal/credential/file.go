@@ -7,13 +7,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-const maxFileSize = 1 << 20
+const (
+	maxFileSize = 1 << 20
+	lockTimeout = time.Second
+)
 
 type fileCredential struct {
 	Kind   string `yaml:"kind"`
@@ -29,10 +32,7 @@ type fileContents struct {
 // internal credentials file, never config.yaml.
 type FileStore struct {
 	Path string
-	// ponytail: this mutex is process-local. Put/Delete are Store-completeness
-	// and test/enrollment plumbing only; add OS file locking before exposing
-	// either operation through a production command.
-	mu sync.Mutex
+	mu   sync.Mutex
 }
 
 func NewFileStore(path string) *FileStore { return &FileStore{Path: path} }
@@ -60,38 +60,151 @@ func (s *FileStore) Get(id string) (Credential, error) {
 	return Credential{Kind: cred.Kind, Secret: cred.Secret}, nil
 }
 
-func (s *FileStore) Put(id string, cred Credential) error {
+func (s *FileStore) Put(id string, cred Credential) (retErr error) {
+	return s.put(id, cred, false)
+}
+
+func (s *FileStore) Create(id string, cred Credential) error {
+	return s.put(id, cred, true)
+}
+
+func (s *FileStore) put(id string, cred Credential, create bool) (retErr error) {
 	if err := ValidateID(id); err != nil {
 		return err
 	}
-	if strings.TrimSpace(cred.Kind) == "" || cred.Secret == "" {
-		return errors.New("refusing to store an empty credential kind or secret")
+	if err := validateCredential(cred); err != nil {
+		return errors.New("refusing to store an invalid credential")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := unlock(); err != nil {
+			cleanupErr := fmt.Errorf("%w: credential lock cleanup failed", ErrPersistenceUncertain)
+			if retErr == nil {
+				retErr = cleanupErr
+			} else {
+				retErr = errors.Join(retErr, cleanupErr)
+			}
+		}
+	}()
 	contents, err := s.read()
 	if err != nil {
 		return err
+	}
+	if _, exists := contents.Credentials[id]; create && exists {
+		return ErrAlreadyExists
 	}
 	contents.Credentials[id] = fileCredential{Kind: cred.Kind, Secret: cred.Secret}
 	return s.write(contents)
 }
 
-func (s *FileStore) Delete(id string) error {
+func (s *FileStore) lockMutation() (func() error, error) {
+	if err := validatePlaintextPlatform(); err != nil {
+		return nil, err
+	}
+	dir := filepath.Dir(s.Path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fileError("create credential directory", err)
+	}
+	dirInfo, err := inspectDirectory(dir, false)
+	if err != nil {
+		return nil, err
+	}
+	lockPath := s.Path + ".lock"
+	deadline := time.Now().Add(lockTimeout)
+	var f *os.File
+	for {
+		f, err = os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, fileError("create credential lock", err)
+		}
+		if time.Now().After(deadline) {
+			return nil, errors.New("credential file is busy")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	opened, err := f.Stat()
+	if err != nil || validateFileInfo(opened) != nil {
+		_ = f.Close()
+		_ = os.Remove(lockPath)
+		return nil, errors.New("credential lock file is unsafe")
+	}
+	currentDir, err := inspectDirectory(dir, false)
+	if err != nil || !os.SameFile(dirInfo, currentDir) {
+		_ = f.Close()
+		_ = os.Remove(lockPath)
+		return nil, errors.New("credential directory changed while locking")
+	}
+	return func() error {
+		if err := f.Close(); err != nil {
+			return err
+		}
+		current, err := os.Lstat(lockPath)
+		if err != nil || !os.SameFile(opened, current) {
+			return errors.New("credential lock file changed")
+		}
+		return os.Remove(lockPath)
+	}, nil
+}
+
+func (s *FileStore) Delete(id string) (retErr error) {
+	_, err := s.delete(id, nil)
+	return err
+}
+
+func (s *FileStore) DeleteIf(id string, cred Credential) (bool, error) {
+	if err := validateCredential(cred); err != nil {
+		return false, errors.New("invalid credential comparison")
+	}
+	return s.delete(id, &cred)
+}
+
+func (s *FileStore) delete(id string, expected *Credential) (deleted bool, retErr error) {
 	if err := ValidateID(id); err != nil {
-		return err
+		return false, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		if err := unlock(); err != nil {
+			cleanupErr := fmt.Errorf("%w: credential lock cleanup failed", ErrPersistenceUncertain)
+			if retErr == nil {
+				retErr = cleanupErr
+			} else {
+				retErr = errors.Join(retErr, cleanupErr)
+			}
+		}
+	}()
 	contents, err := s.read()
 	if err != nil {
-		return err
+		return false, err
 	}
-	if _, ok := contents.Credentials[id]; !ok {
-		return ErrNotFound
+	current, ok := contents.Credentials[id]
+	if !ok {
+		if expected != nil {
+			return false, nil
+		}
+		return false, ErrNotFound
+	}
+	if expected != nil && !sameCredential(Credential{Kind: current.Kind, Secret: current.Secret}, *expected) {
+		return false, nil
 	}
 	delete(contents.Credentials, id)
-	return s.write(contents)
+	if err := s.write(contents); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func emptyFile() fileContents {
@@ -99,6 +212,9 @@ func emptyFile() fileContents {
 }
 
 func (s *FileStore) read() (fileContents, error) {
+	if err := validatePlaintextPlatform(); err != nil {
+		return fileContents{}, err
+	}
 	if filepath.Base(filepath.Clean(s.Path)) == "config.yaml" {
 		return fileContents{}, errors.New("credential file must be separate from config.yaml")
 	}
@@ -167,7 +283,7 @@ func (s *FileStore) read() (fileContents, error) {
 		contents.Credentials = map[string]fileCredential{}
 	}
 	for id, cred := range contents.Credentials {
-		if ValidateID(id) != nil || strings.TrimSpace(cred.Kind) == "" || cred.Secret == "" {
+		if ValidateID(id) != nil || validateCredential(Credential{Kind: cred.Kind, Secret: cred.Secret}) != nil {
 			return fileContents{}, errors.New("credential file contains an invalid credential entry")
 		}
 	}
@@ -208,6 +324,9 @@ func inspectDirectory(path string, missingOK bool) (os.FileInfo, error) {
 }
 
 func (s *FileStore) write(contents fileContents) error {
+	if err := validatePlaintextPlatform(); err != nil {
+		return err
+	}
 	if filepath.Base(filepath.Clean(s.Path)) == "config.yaml" {
 		return errors.New("credential file must be separate from config.yaml")
 	}
@@ -262,10 +381,10 @@ func (s *FileStore) write(contents fileContents) error {
 	}
 	currentDir, err = inspectDirectory(dir, false)
 	if err != nil || !os.SameFile(dirInfo, currentDir) {
-		return errors.New("credential directory changed after replacement")
+		return fmt.Errorf("%w: credential directory changed after replacement", ErrPersistenceUncertain)
 	}
 	if err := syncDirectory(dir); err != nil {
-		return fileError("sync credential directory", err)
+		return fmt.Errorf("%w: sync credential directory", ErrPersistenceUncertain)
 	}
 	return nil
 }

@@ -461,7 +461,7 @@ func (w *giteaWorld) initialize(project string) error {
 }
 
 func (w *giteaWorld) remoteHasCommit(branch string) error {
-	repo := filepath.Join(w.dir, "demo")
+	repo := filepath.Join(os.Getenv("HOME"), adminUser, "demo")
 	head := git(w.t, repo, "rev-parse", "HEAD")
 	remote := git(w.t, repo, "-c", "http.sslCAInfo="+w.ca, "ls-remote", "origin", "refs/heads/"+branch)
 	if !strings.HasPrefix(remote, head+"\t") {
@@ -471,7 +471,7 @@ func (w *giteaWorld) remoteHasCommit(branch string) error {
 }
 
 func (w *giteaWorld) safeLocalConfig() error {
-	repo := filepath.Join(w.dir, "demo")
+	repo := filepath.Join(os.Getenv("HOME"), adminUser, "demo")
 	origin := git(w.t, repo, "remote", "get-url", "origin")
 	helpers := git(w.t, repo, "config", "--local", "--get-all", "credential.helper")
 	username := git(w.t, repo, "config", "--local", "--get", "credential."+origin+".username")
@@ -587,7 +587,7 @@ func (w *forgejoWorld) initialize(project string) error {
 }
 
 func (w *forgejoWorld) remoteHasCommit(branch string) error {
-	repo := filepath.Join(w.dir, "demo")
+	repo := filepath.Join(os.Getenv("HOME"), adminUser, "demo")
 	head := git(w.t, repo, "rev-parse", "HEAD")
 	remote := git(w.t, repo, "-c", "http.sslCAInfo="+w.ca, "ls-remote", "origin", "refs/heads/"+branch)
 	if !strings.HasPrefix(remote, head+"\t") {
@@ -597,7 +597,7 @@ func (w *forgejoWorld) remoteHasCommit(branch string) error {
 }
 
 func (w *forgejoWorld) safeLocalConfig() error {
-	repo := filepath.Join(w.dir, "demo")
+	repo := filepath.Join(os.Getenv("HOME"), adminUser, "demo")
 	origin := git(w.t, repo, "remote", "get-url", "origin")
 	helpers := git(w.t, repo, "config", "--local", "--get-all", "credential.helper")
 	username := git(w.t, repo, "config", "--local", "--get", "credential."+origin+".username")

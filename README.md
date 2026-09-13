@@ -21,20 +21,34 @@ colt auth login <github|gitlab|gitea|forgejo> <alias> \
   [--host <host>] [--base-url <https-url>] [--visibility <visibility>] \
   [--token-env <environment-variable>] [--default] [--replace]
 colt auth status
-colt init <project> [--local] [--provider <alias>]
+colt auth logout <alias>
+colt init <project> [--local] [--provider <alias>] [--destination <path>]
 ```
 
 Configuration uses Go's `os.UserConfigDir()`. On Linux, this is
 `$XDG_CONFIG_HOME/colt/config.yaml` when `XDG_CONFIG_HOME` is set, otherwise
-`~/.config/colt/config.yaml`. `COLT_CONFIG` overrides the complete path. Provider
-tokens remain in the referenced environment variables and are never written
-there.
+`~/.config/colt/config.yaml`. `COLT_CONFIG` overrides the complete path.
+Environment tokens remain in the referenced environment variables and are
+never copied. A configured `--token-env` that is missing or empty fails without
+falling through. Only when no explicit token variable was configured and no
+conventional token resolves does `auth login` prompt without echoing,
+authenticate the token, and store it in the native OS credential facility. If
+that facility is unavailable, Colt writes the separate `credentials` plaintext
+file only after an explicit warning and confirmation; non-interactive commands
+fail rather than prompt or silently fall back. Plaintext fallback is currently
+disabled on Windows pending user-only ACL validation. Provider config contains
+only the non-secret credential ID.
 
 `--namespace` is the repository owner in provider-native terms: a GitHub, Gitea, or Forgejo user/organization (for example `octocat` or `acme`) or a GitLab group/subgroup full path (for example `platform/tools`).
 
-Colt initializes Git, applies the selected provider's repository-local identity,
-and creates an initial commit. Unless `--local` is used, it creates the remote
-repository through the provider API, adds `origin`, and pushes.
+With `--local`, Colt initializes Git directly and creates an initial commit.
+Otherwise it creates the remote through the provider API, clones it under
+`<user-home>/<namespace>/<project>`, applies repository-local identity, and
+pushes the initial commit. `--destination <path>` overrides that complete remote
+clone path; a relative path is resolved from the current directory and its
+parent must already exist. The flag is rejected with `--local`, whose current
+directory behavior is unchanged. Existing non-empty, file, and symlink
+destinations are always refused.
 
 Provider resolution is always provider-neutral, in this exact order:
 
@@ -43,16 +57,26 @@ Provider resolution is always provider-neutral, in this exact order:
 3. the only configured provider of any type;
 4. otherwise, fail and require an explicit or configured default provider.
 
-Credentials come from environment variables, including configuration references
-such as `token_env`. Colt never requires `gh`, `glab`, or `curl`, and never
-changes global Git identity. Provider-independent ownership is called a
-**namespace**.
+Credentials resolve from an explicit environment variable with no fallthrough,
+otherwise from the conventional variable, native secure storage, then an
+already-created consented plaintext fallback. macOS Keychain support requires a
+CGO-enabled build; Windows Credential Manager remains supported without the
+Windows plaintext fallback.
+`auth logout` removes the selected stored credential from both local stores,
+preserving config, environment, SSH state, and unrelated credentials. Colt
+never requires `gh`, `glab`, or `curl`, and never changes global Git identity.
+Provider-independent ownership is called a **namespace**.
+
+HTTPS repositories use a Git credential helper that invokes `colt` by name.
+Keep the trusted Colt executable on `PATH`; an absolute helper path is not used
+because portable shell-safe quoting across Git's supported platforms is not available.
 
 ## Planned Milestones
 
-Milestone 1 is partially implemented: environment authentication, blank
-initialization, and HTTPS Git transport work, while interactive persistence,
-plaintext fallback, and logout remain explicitly `@unimplemented`. The real
+Milestone 1 includes environment and manual-token authentication, secure
+persistence with consent-only plaintext fallback, local-only logout, blank
+initialization, and HTTPS Git transport. Browser/device authorization and
+provider-side revocation remain `@unimplemented`. The real
 Colt-to-Gitea and Colt-to-Forgejo initialization and push paths are exercised in container-backed CI.
 Later planned
 work adds lifecycle list/clone/release primitives (M2), parameterized data-only

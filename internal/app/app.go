@@ -17,24 +17,30 @@ import (
 	gitnative "github.com/MozeBaltyk/Colt/internal/git"
 	"github.com/MozeBaltyk/Colt/internal/provider"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 type App struct {
-	ConfigPath  string
-	WorkDir     string
-	Git         gitnative.Runner
-	NewClient   func(config.Provider, string) (provider.Client, error)
-	Credentials credential.Store
-	pathErr     error
+	ConfigPath          string
+	WorkDir             string
+	Git                 gitnative.Runner
+	NewClient           func(config.Provider, string) (provider.Client, error)
+	Credentials         credential.Store
+	FallbackCredentials *credential.FileStore
+	ReadToken           func() (string, error)
+	ConfirmPlaintext    func() (bool, error)
+	SaveConfig          func(string, config.Config) error
+	pathErr             error
 }
 
 func New() *App {
 	path, err := config.Path()
 	httpClient := &http.Client{}
 	return &App{
-		ConfigPath:  path,
-		Git:         gitnative.Native{},
-		Credentials: credential.DisabledStore{},
+		ConfigPath:          path,
+		Git:                 gitnative.Native{},
+		Credentials:         credential.NewSecureStore(),
+		FallbackCredentials: credential.NewFileStore(credential.DefaultFilePath(path)),
 		NewClient: func(p config.Provider, token string) (provider.Client, error) {
 			return provider.New(p, token, httpClient)
 		},
@@ -44,6 +50,9 @@ func New() *App {
 
 func (a *App) credentialStore() credential.Store {
 	if a.Credentials != nil {
+		if a.FallbackCredentials != nil {
+			return credential.PersistentStore{Secure: a.Credentials, Fallback: a.FallbackCredentials}
+		}
 		return a.Credentials
 	}
 	return credential.DisabledStore{}
@@ -62,7 +71,9 @@ func (a *App) Root() *cobra.Command {
 }
 
 func (a *App) gitCredentialCommand() *cobra.Command {
-	return &cobra.Command{
+	providerAlias := ""
+	repository := ""
+	cmd := &cobra.Command{
 		Use:    "git-credential <get|store|erase>",
 		Short:  "Serve credentials to Git",
 		Args:   cobra.ExactArgs(1),
@@ -83,7 +94,7 @@ func (a *App) gitCredentialCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p, ok := credentialProvider(cfg, request)
+			p, ok := credentialProvider(cfg, request, providerAlias, repository)
 			if !ok {
 				return nil
 			}
@@ -110,6 +121,11 @@ func (a *App) gitCredentialCommand() *cobra.Command {
 			return err
 		},
 	}
+	cmd.Flags().StringVar(&providerAlias, "provider", "", "provider alias")
+	cmd.Flags().StringVar(&repository, "repository", "", "repository name")
+	_ = cmd.Flags().MarkHidden("provider")
+	_ = cmd.Flags().MarkHidden("repository")
+	return cmd
 }
 
 func readGitCredential(r io.Reader) (map[string]string, error) {
@@ -135,11 +151,19 @@ func readGitCredential(r io.Reader) (map[string]string, error) {
 	return request, nil
 }
 
-func credentialProvider(cfg config.Config, request map[string]string) (config.Provider, bool) {
+func credentialProvider(cfg config.Config, request map[string]string, alias, repository string) (config.Provider, bool) {
 	if request["protocol"] != "https" || request["host"] == "" || request["path"] == "" {
 		return config.Provider{}, false
 	}
 	raw := "https://" + request["host"] + "/" + strings.TrimPrefix(request["path"], "/")
+	if alias != "" {
+		p, ok := cfg.Providers[alias]
+		if !ok || repository == "" {
+			return config.Provider{}, false
+		}
+		actual, ok := cleanHTTPSRepository(raw, p)
+		return p, ok && actual == repository
+	}
 	var match config.Provider
 	found := false
 	for _, p := range cfg.Providers {
@@ -159,12 +183,22 @@ func cleanHTTPSRepository(raw string, p config.Provider) (string, bool) {
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" || !strings.EqualFold(u.Host, p.Host) {
 		return "", false
 	}
-	prefix := "/" + p.Namespace + "/"
-	if !strings.HasPrefix(u.Path, prefix) || !strings.HasSuffix(u.Path, ".git") {
+	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+	namespaceParts := strings.Split(p.Namespace, "/")
+	if len(parts) != len(namespaceParts)+1 || !namespaceMatches(parts[:len(namespaceParts)], namespaceParts, p.Type) || !strings.HasSuffix(parts[len(parts)-1], ".git") {
 		return "", false
 	}
-	project := strings.TrimSuffix(strings.TrimPrefix(u.Path, prefix), ".git")
+	project := strings.TrimSuffix(parts[len(parts)-1], ".git")
 	return project, config.ValidProjectName(project)
+}
+
+func namespaceMatches(actual, configured []string, providerType string) bool {
+	for i := range actual {
+		if actual[i] != configured[i] && (providerType != "github" || !strings.EqualFold(actual[i], configured[i])) {
+			return false
+		}
+	}
+	return true
 }
 
 type authOptions struct {
@@ -256,6 +290,8 @@ func (a *App) logoutProvider(cmd *cobra.Command, alias string) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "no stored credential found for %s; nothing changed\n", p.Auth.CredentialID)
 	case errors.Is(err, credential.ErrStoreUnavailable):
 		return errors.New("credential storage unavailable; local credential was not removed")
+	case errors.Is(err, credential.ErrPartialDelete):
+		return errors.New("credential removal partially failed; the credential may remain in one local store; provider configuration is unchanged")
 	case err != nil:
 		return errors.New("credential storage failure; local credential was not removed safely")
 	default:
@@ -410,8 +446,15 @@ func (a *App) loginProvider(cmd *cobra.Command, providerType, alias string, opts
 	if err != nil {
 		return err
 	}
-	if _, exists := cfg.Providers[alias]; exists && !opts.replace {
+	existing, exists := cfg.Providers[alias]
+	if exists && !opts.replace {
 		return fmt.Errorf("provider alias %q already exists; use --replace to replace it", alias)
+	}
+	if exists && opts.replace && existing.Auth.Source == "stored" {
+		if opts.tokenEnv != "" || existing.Host != host {
+			return fmt.Errorf("provider alias %q has stored credential %s; replacement would orphan it", alias, existing.Auth.CredentialID)
+		}
+		p.Auth = existing.Auth
 	}
 	candidate := config.Config{Providers: make(map[string]config.Provider, len(cfg.Providers)+1)}
 	for key, value := range cfg.Providers {
@@ -425,7 +468,25 @@ func (a *App) loginProvider(cmd *cobra.Command, providerType, alias string, opts
 		return err
 	}
 	token, _, err := config.Token(p, a.credentialStore())
-	if err != nil {
+	manual := false
+	if errors.Is(err, credential.ErrMissing) {
+		if opts.tokenEnv != "" {
+			return err
+		}
+		if exists && opts.replace {
+			return fmt.Errorf("manual stored credential enrollment is not allowed with --replace for provider alias %q", alias)
+		}
+		manual = true
+		token, err = a.readToken(cmd)
+		if err != nil {
+			return err
+		}
+		p.Auth = config.Auth{Source: "stored", CredentialID: host + "/" + alias}
+		candidate.Providers[alias] = p
+		if err := candidate.Validate(); err != nil {
+			return err
+		}
+	} else if err != nil {
 		return err
 	}
 	client, err := a.NewClient(p, token)
@@ -436,16 +497,121 @@ func (a *App) loginProvider(cmd *cobra.Command, providerType, alias string, opts
 	if err != nil {
 		return err
 	}
-	if err := config.Save(a.ConfigPath, candidate); err != nil {
+	var rollback func() error
+	plaintext := false
+	if manual {
+		if _, targetErr := a.credentialStore().Get(p.Auth.CredentialID); targetErr == nil {
+			return fmt.Errorf("credential %s already exists; refusing to overwrite it", p.Auth.CredentialID)
+		} else if !errors.Is(targetErr, credential.ErrNotFound) && !errors.Is(targetErr, credential.ErrStoreUnavailable) {
+			return errors.New("credential storage failure; provider configuration was not changed")
+		}
+		rollback, err = putCredential(a.Credentials, p.Auth.CredentialID, token)
+		if errors.Is(err, credential.ErrStoreUnavailable) {
+			accepted, confirmErr := a.confirmPlaintext(cmd)
+			if confirmErr != nil {
+				return confirmErr
+			}
+			if !accepted {
+				return errors.New("authentication succeeded but the credential was not persisted; set the provider token environment variable or retry and consent to plaintext storage")
+			}
+			if a.FallbackCredentials == nil {
+				return errors.New("plaintext credential storage is unavailable")
+			}
+			rollback, err = putCredential(a.FallbackCredentials, p.Auth.CredentialID, token)
+			plaintext = err == nil
+		}
+		if err != nil {
+			if errors.Is(err, credential.ErrAlreadyExists) {
+				return fmt.Errorf("credential %s already exists; refusing to overwrite it", p.Auth.CredentialID)
+			}
+			if errors.Is(err, credential.ErrPersistenceUncertain) {
+				return fmt.Errorf("credential persistence outcome is uncertain for %s; provider configuration was not changed", p.Auth.CredentialID)
+			}
+			return errors.New("credential storage failure; provider configuration was not changed")
+		}
+	}
+	save := a.SaveConfig
+	if save == nil {
+		save = config.Save
+	}
+	if err := save(a.ConfigPath, candidate); err != nil {
+		if rollback != nil {
+			if rollbackErr := rollback(); rollbackErr != nil {
+				return errors.New("authentication succeeded but config was not changed and credential rollback failed; credential " + p.Auth.CredentialID + " may require manual removal")
+			}
+		}
 		return fmt.Errorf("authentication succeeded but config was not changed: %w", err)
+	}
+	if plaintext {
+		fmt.Fprintln(cmd.ErrOrStderr(), "! credential stored as plaintext protected only by filesystem permissions")
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "configured provider %s (authenticated as %s)\n", alias, account)
 	return nil
 }
 
+func (a *App) readToken(cmd *cobra.Command) (string, error) {
+	if a.ReadToken != nil {
+		value, err := a.ReadToken()
+		if err != nil {
+			return "", err
+		}
+		if credential.ValidateBearerToken(value) != nil {
+			return "", errors.New("token must be non-empty and contain no CR or LF")
+		}
+		return value, nil
+	}
+	f, ok := cmd.InOrStdin().(*os.File)
+	if !ok || !term.IsTerminal(int(f.Fd())) {
+		return "", errors.New("no environment token resolved; manual token entry requires an interactive terminal")
+	}
+	fmt.Fprint(cmd.ErrOrStderr(), "Token: ")
+	value, err := term.ReadPassword(int(f.Fd()))
+	fmt.Fprintln(cmd.ErrOrStderr())
+	if err != nil {
+		return "", errors.New("read token from terminal")
+	}
+	if credential.ValidateBearerToken(string(value)) != nil {
+		return "", errors.New("token must be non-empty and contain no CR or LF")
+	}
+	return string(value), nil
+}
+
+func (a *App) confirmPlaintext(cmd *cobra.Command) (bool, error) {
+	if a.ConfirmPlaintext != nil {
+		return a.ConfirmPlaintext()
+	}
+	f, ok := cmd.InOrStdin().(*os.File)
+	if !ok || !term.IsTerminal(int(f.Fd())) {
+		return false, errors.New("secure credential storage is unavailable; plaintext fallback requires explicit consent in an interactive terminal")
+	}
+	fmt.Fprint(cmd.ErrOrStderr(), "Secure credential storage is unavailable. Store as plaintext protected only by filesystem permissions? [y/N] ")
+	answer, err := bufio.NewReader(f).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, errors.New("read plaintext storage choice")
+	}
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	return answer == "y" || answer == "yes", nil
+}
+
+func putCredential(store credential.Store, id, secret string) (func() error, error) {
+	if store == nil {
+		return nil, credential.ErrStoreUnavailable
+	}
+	created := credential.Credential{Kind: "bearer_token", Secret: secret}
+	rollback := func() error {
+		_, err := store.DeleteIf(id, created)
+		return err
+	}
+	if err := store.Create(id, created); err != nil {
+		return nil, err
+	}
+	return rollback, nil
+}
+
 type initOptions struct {
-	local    bool
-	provider string
+	local       bool
+	provider    string
+	destination string
 }
 
 func (a *App) initCommand() *cobra.Command {
@@ -459,7 +625,8 @@ func (a *App) initCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&opts.local, "local", false, "create only the local repository")
-	cmd.Flags().StringVar(&opts.provider, "provider", "", "provider alias")
+	cmd.Flags().StringVarP(&opts.provider, "provider", "p", "", "provider alias")
+	cmd.Flags().StringVarP(&opts.destination, "destination", "d", "", "remote clone destination (relative to the current directory or absolute)")
 	return cmd
 }
 
@@ -469,6 +636,9 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) e
 	}
 	if !config.ValidProjectName(project) {
 		return errors.New("invalid project name; use 1-100 letters, digits, '.', '_' or '-' and no path separators")
+	}
+	if opts.local && opts.destination != "" {
+		return errors.New("--destination applies only to remote initialization; omit it with --local")
 	}
 	cfg, err := config.Load(a.ConfigPath)
 	if err != nil {
@@ -485,17 +655,10 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) e
 	if err := a.Git.Available(); err != nil {
 		return err
 	}
-	workDir := a.WorkDir
-	if workDir == "" {
-		workDir, err = os.Getwd()
-		if err != nil {
-			return fmt.Errorf("determine working directory: %w", err)
-		}
-	}
-	if err := validateWorkDir(workDir); err != nil {
+	workDir, destination, customDestination, err := a.initDestination(project, selected.Namespace, opts)
+	if err != nil {
 		return err
 	}
-	destination := filepath.Join(workDir, project)
 	exists, err := validateDestination(destination)
 	if err != nil {
 		return err
@@ -528,22 +691,22 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) e
 			return getErr
 		}
 	}
-	if !exists {
-		if err := os.Mkdir(destination, 0o755); err != nil {
-			return fmt.Errorf("create destination: %w", err)
-		}
-	}
-	if err := a.Git.Init(cmd.Context(), destination); err != nil {
-		return partial("initialize git", destination, "not created", "inspect the destination and retry after correcting git", err)
-	}
-	if err := a.Git.SetIdentity(cmd.Context(), destination, selected.GitName, selected.GitEmail); err != nil {
-		return partial("set repository-local identity", destination, "not created", "set local user.name and user.email, then create the initial commit", err)
-	}
-	commit, err := a.Git.Commit(cmd.Context(), destination)
-	if err != nil {
-		return partial("create initial commit", destination, "not created", "fix the reported git error and create the initial commit", err)
-	}
 	if opts.local {
+		if !exists {
+			if err := os.Mkdir(destination, 0o755); err != nil {
+				return fmt.Errorf("create destination: %w", err)
+			}
+		}
+		if err := a.Git.Init(cmd.Context(), destination); err != nil {
+			return partial("initialize git", destination, "not created", "inspect the destination and retry after correcting git", err)
+		}
+		if err := a.Git.SetIdentity(cmd.Context(), destination, selected.GitName, selected.GitEmail); err != nil {
+			return partial("set repository-local identity", destination, "not created", "set local user.name and user.email, then create the initial commit", err)
+		}
+		commit, err := a.Git.Commit(cmd.Context(), destination)
+		if err != nil {
+			return partial("create initial commit", destination, "not created", "fix the reported git error and create the initial commit", err)
+		}
 		fmt.Fprintf(cmd.OutOrStdout(), "initialized %s with provider %s identity at %s; initial commit %s (local only)\n", project, alias, destination, commit)
 		return nil
 	}
@@ -568,20 +731,122 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) e
 	if actual, ok := valid(cloneURL, selected); !ok || actual != project {
 		return partial("validate remote repository", destination, "created but provider returned an unexpected clone target", "inspect the provider repository and configure origin manually only after verifying its authority", errors.New("provider returned a clone URL for a different authority or repository"))
 	}
-	if err := a.Git.AddOrigin(cmd.Context(), destination, cloneURL); err != nil {
-		return partial("add origin", destination, "created at "+cloneURL, "add the validated clone URL as origin, then push HEAD", err)
+	if !customDestination {
+		err = createNamespaceDir(workDir, selected.Namespace)
 	}
-	pushToken := ""
+	if err != nil {
+		return partial("create namespace directory", destination, "created at "+cloneURL, "correct the local namespace path and clone the remote", err)
+	}
+	if exists {
+		if err := os.Remove(destination); err != nil {
+			return partial("prepare clone destination", destination, "created at "+cloneURL, "remove the empty destination and clone the remote", err)
+		}
+	}
+	if err := a.Git.Clone(cmd.Context(), cloneURL, destination, gitUsername, alias, project); err != nil {
+		return partial("clone remote repository", destination, "created at "+cloneURL, "inspect the destination and retry the clone after fixing authentication or connectivity", err)
+	}
+	if err := a.Git.SetIdentity(cmd.Context(), destination, selected.GitName, selected.GitEmail); err != nil {
+		return partial("set repository-local identity", destination, "created at "+cloneURL, "set local user.name and user.email, then create the initial commit", err)
+	}
+	commit, err := a.Git.Commit(cmd.Context(), destination)
+	if err != nil {
+		return partial("create initial commit", destination, "created at "+cloneURL, "fix the reported git error and create the initial commit", err)
+	}
 	if transport == "https" {
-		pushToken = token
-		if err := a.Git.ConfigureCredentialHelper(cmd.Context(), destination, cloneURL, gitUsername); err != nil {
+		if err := a.Git.ConfigureCredentialHelper(cmd.Context(), destination, cloneURL, gitUsername, alias, project); err != nil {
 			return partial("configure credential helper", destination, "created at "+cloneURL, "configure the Colt helper locally, then push HEAD", err)
 		}
 	}
-	if err := a.Git.Push(cmd.Context(), destination, cloneURL, selected.Type, gitUsername, pushToken); err != nil {
+	if err := a.Git.Push(cmd.Context(), destination, cloneURL); err != nil {
 		return partial("push initial commit", destination, "created at "+cloneURL, "run 'git push --set-upstream origin HEAD' after fixing authentication or connectivity", err)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "initialized %s via %s in namespace %s at %s; initial commit %s; remote %s\n", project, alias, selected.Namespace, destination, commit, cloneURL)
+	return nil
+}
+
+func (a *App) initDestination(project, namespace string, opts initOptions) (root, destination string, custom bool, err error) {
+	root = a.WorkDir
+	if opts.local {
+		if root == "" {
+			root, err = os.Getwd()
+		}
+		if err == nil {
+			err = validateWorkDir(root)
+		}
+		return root, filepath.Join(root, project), false, err
+	}
+	if opts.destination != "" {
+		destination = opts.destination
+		if !filepath.IsAbs(destination) {
+			if root == "" {
+				root, err = os.Getwd()
+			}
+			if err != nil {
+				return "", "", true, fmt.Errorf("determine working directory: %w", err)
+			}
+			destination = filepath.Join(root, destination)
+		}
+		root = filepath.Dir(destination)
+		info, statErr := os.Lstat(root)
+		if statErr != nil {
+			return root, destination, true, fmt.Errorf("inspect destination parent: %w", statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return root, destination, true, errors.New("destination parent is not an ordinary directory")
+		}
+		return root, destination, true, nil
+	}
+	if root == "" {
+		root, err = os.UserHomeDir()
+		if err != nil {
+			return "", "", false, fmt.Errorf("determine user home directory: %w", err)
+		}
+	}
+	if err = validateWorkDir(root); err == nil {
+		err = validateNamespacePath(root, namespace)
+	}
+	return root, filepath.Join(root, filepath.FromSlash(namespace), project), false, err
+}
+
+func createNamespaceDir(root, namespace string) error {
+	if err := validateNamespacePath(root, namespace); err != nil {
+		return err
+	}
+	current := root
+	for _, part := range strings.Split(namespace, "/") {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.Mkdir(current, 0o755); err != nil {
+				return fmt.Errorf("create namespace directory: %w", err)
+			}
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect namespace directory: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return errors.New("namespace path contains a non-directory or symbolic link")
+		}
+	}
+	return nil
+}
+
+func validateNamespacePath(root, namespace string) error {
+	current := root
+	for _, part := range strings.Split(namespace, "/") {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect namespace directory: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return errors.New("namespace path contains a non-directory or symbolic link")
+		}
+	}
 	return nil
 }
 
@@ -615,11 +880,12 @@ func cleanSSHRepository(raw string, p config.Provider) (string, bool) {
 	if !ok || !strings.EqualFold(authority, p.Host) {
 		return "", false
 	}
-	prefix = p.Namespace + "/"
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, ".git") {
+	parts := strings.Split(path, "/")
+	namespaceParts := strings.Split(p.Namespace, "/")
+	if len(parts) != len(namespaceParts)+1 || !namespaceMatches(parts[:len(namespaceParts)], namespaceParts, p.Type) || !strings.HasSuffix(parts[len(parts)-1], ".git") {
 		return "", false
 	}
-	project := strings.TrimSuffix(strings.TrimPrefix(path, prefix), ".git")
+	project := strings.TrimSuffix(parts[len(parts)-1], ".git")
 	return project, config.ValidProjectName(project)
 }
 

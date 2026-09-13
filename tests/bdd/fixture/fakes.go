@@ -19,7 +19,6 @@ type FakeGit struct {
 	Origins      []string
 	Pushes       int
 	PushURL      string
-	PushToken    string
 	Helpers      int
 	Operations   []string
 }
@@ -41,6 +40,29 @@ func (f *FakeGit) Init(ctx context.Context, dir string) error {
 		return gitnative.Native{}.Init(ctx, dir)
 	}
 	return os.MkdirAll(filepath.Join(dir, ".git"), 0o755) // ponytail: marker only, no history
+}
+
+func (f *FakeGit) Clone(ctx context.Context, url, dir, username, alias, project string) error {
+	f.Operations = append(f.Operations, "clone")
+	if f.Real {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		native := gitnative.Native{}
+		if err := native.Init(ctx, dir); err != nil {
+			return err
+		}
+		if err := native.AddOrigin(ctx, dir, url); err != nil {
+			return err
+		}
+		f.Origins = append(f.Origins, url)
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		return err
+	}
+	f.Origins = append(f.Origins, url)
+	return nil
 }
 
 func (f *FakeGit) SetIdentity(ctx context.Context, dir, name, email string) error {
@@ -73,10 +95,10 @@ func (f *FakeGit) AddOrigin(ctx context.Context, dir, url string) error {
 	return nil
 }
 
-func (f *FakeGit) ConfigureCredentialHelper(ctx context.Context, dir, cloneURL, username string) error {
+func (f *FakeGit) ConfigureCredentialHelper(ctx context.Context, dir, cloneURL, username, alias, project string) error {
 	f.Operations = append(f.Operations, "helper")
 	if f.Real {
-		if err := (gitnative.Native{}).ConfigureCredentialHelper(ctx, dir, cloneURL, username); err != nil {
+		if err := (gitnative.Native{}).ConfigureCredentialHelper(ctx, dir, cloneURL, username, alias, project); err != nil {
 			return err
 		}
 	}
@@ -84,13 +106,13 @@ func (f *FakeGit) ConfigureCredentialHelper(ctx context.Context, dir, cloneURL, 
 	return nil
 }
 
-func (f *FakeGit) Push(_ context.Context, _ /* dir */, url, _, _, token string) error {
+func (f *FakeGit) Push(_ context.Context, _ /* dir */, url string) error {
 	f.Operations = append(f.Operations, "push")
 	if f.PushErr != nil {
 		return f.PushErr
 	}
 	f.Pushes++
-	f.PushURL, f.PushToken = url, token
+	f.PushURL = url
 	return nil
 }
 
@@ -167,6 +189,13 @@ func (s *FakeCredentialStore) Put(id string, value credential.Credential) error 
 	return nil
 }
 
+func (s *FakeCredentialStore) Create(id string, value credential.Credential) error {
+	if _, exists := s.Credentials[id]; exists {
+		return credential.ErrAlreadyExists
+	}
+	return s.Put(id, value)
+}
+
 func (s *FakeCredentialStore) Delete(id string) error {
 	s.Deletes++
 	s.DeletedIDs = append(s.DeletedIDs, id)
@@ -178,4 +207,12 @@ func (s *FakeCredentialStore) Delete(id string) error {
 	}
 	delete(s.Credentials, id)
 	return nil
+}
+
+func (s *FakeCredentialStore) DeleteIf(id string, expected credential.Credential) (bool, error) {
+	current, ok := s.Credentials[id]
+	if !ok || current.Kind != expected.Kind || current.Secret != expected.Secret {
+		return false, nil
+	}
+	return true, s.Delete(id)
 }

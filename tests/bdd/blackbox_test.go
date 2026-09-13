@@ -81,6 +81,24 @@ func TestBlackbox(t *testing.T) {
 			t.Fatalf("error=%v output=%q", err, output)
 		}
 	})
+
+	t.Run("manual login without a tty fails without persistence", func(t *testing.T) {
+		dir, configPath := blackboxSandbox(t)
+		ctx, cancel := context.WithTimeout(context.Background(), fixture.CommandTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, binary, "auth", "login", "github", "personal", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+		cmd.Dir, cmd.Env, cmd.Stdin = dir, blackboxEnv(filepath.Join(dir, "home"), configPath), strings.NewReader("")
+		output, err := cmd.CombinedOutput()
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !strings.Contains(string(output), "interactive terminal") {
+			t.Fatalf("error=%v output=%q", err, output)
+		}
+		for _, path := range []string{configPath, filepath.Join(dir, "credentials")} {
+			if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("unexpected persisted state at %s: %v", path, statErr)
+			}
+		}
+	})
 }
 
 func blackboxSandbox(t *testing.T) (string, string) {
@@ -122,6 +140,7 @@ func runBlackboxGit(t *testing.T, dir, configPath string, args ...string) string
 func blackboxEnv(home, configPath string) []string {
 	overrides := map[string]string{
 		"HOME": home, "COLT_CONFIG": configPath, "COLT_BDD_TOKEN": "bdd-fake-secret",
+		"GITHUB_TOKEN": "", "GITLAB_TOKEN": "", "GITEA_TOKEN": "", "FORGEJO_TOKEN": "",
 		"GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
 		"HTTP_PROXY": "http://127.0.0.1:1", "HTTPS_PROXY": "http://127.0.0.1:1", "ALL_PROXY": "http://127.0.0.1:1",
 		"http_proxy": "http://127.0.0.1:1", "https_proxy": "http://127.0.0.1:1", "all_proxy": "http://127.0.0.1:1",

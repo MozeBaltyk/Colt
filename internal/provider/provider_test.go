@@ -65,6 +65,31 @@ func TestCORE_PROVIDER_001GitHubHTTPSAPIUserAndOrganization(t *testing.T) {
 	}
 }
 
+func TestGitHubResponsePreservesCanonicalOwnerCaseForAuthorityValidation(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			fmt.Fprint(w, `{"login":"MozeBaltyk"}`)
+		case "/user/repos":
+			fmt.Fprintf(w, `{"clone_url":%q,"ssh_url":"git@github.com:MozeBaltyk/demo.git"}`, server.URL+"/MozeBaltyk/demo.git")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	settings := testSettings("github", server.URL)
+	settings.Namespace = "mozebaltyk"
+	client, err := New(settings, "test-token", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := client.Create(context.Background(), "demo")
+	if err != nil || repo.CloneURL != server.URL+"/MozeBaltyk/demo.git" || repo.SSHURL != "git@github.com:MozeBaltyk/demo.git" {
+		t.Fatalf("Create() = %#v, %v", repo, err)
+	}
+}
+
 func TestCORE_PROVIDER_003GitLabConfiguredBaseAndSafeNamespace(t *testing.T) {
 	var sawNamespace, sawCreate bool
 	var server *httptest.Server

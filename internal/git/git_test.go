@@ -2,7 +2,6 @@ package git
 
 import (
 	"context"
-	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,43 +21,23 @@ func TestGitEnvStripsGitVariablesCaseInsensitively(t *testing.T) {
 	}
 }
 
-func TestINIT_007ProviderSpecificPushCredentialIsProcessScopedAndRedacted(t *testing.T) {
+func TestCloneUsesCredentialHelperWithoutReceivingASecret(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-backed fake git is Unix-only")
 	}
-	for _, tc := range []struct{ providerType, username string }{{"github", "x-access-token"}, {"gitlab", "oauth2"}, {"gitea", "alice"}, {"forgejo", "alice"}} {
-		t.Run(tc.providerType, func(t *testing.T) {
-			t.Setenv("SSL_CERT_FILE", "")
-			bin := t.TempDir()
-			script := filepath.Join(bin, "git")
-			contents := `#!/bin/sh
-case "$*" in *test-secret*) echo "token leaked in arguments"; exit 2;; esac
-test "$*" = "push --set-upstream origin HEAD" || exit 8
-test "$GIT_CONFIG_COUNT" = 2 || exit 3
-test "$GIT_CONFIG_KEY_0" = "http.https://example.test/team/demo.git.extraHeader" || exit 4
-test "$GIT_CONFIG_KEY_1" = "http.followRedirects" || exit 5
-test "$GIT_CONFIG_VALUE_1" = false || exit 6
-test "$GIT_CONFIG_VALUE_0" = "$WANT_HEADER" || exit 7
-echo "$GIT_CONFIG_VALUE_0"
-exit 1
+	bin := t.TempDir()
+	script := filepath.Join(bin, "git")
+	contents := `#!/bin/sh
+test "$*" = "-c credential.https://example.test/team/demo.git.username=alice -c http.sslCAInfo=/tmp/test-ca.pem -c http.followRedirects=false -c credential.helper=!colt git-credential --provider work --repository demo -c credential.useHttpPath=true clone -- https://example.test/team/demo.git destination" || exit 2
+test -z "$GIT_CONFIG_COUNT$GIT_CONFIG_KEY_0$GIT_CONFIG_VALUE_0" || exit 3
 `
-			if err := os.WriteFile(script, []byte(contents), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", bin)
-			t.Setenv("WANT_HEADER", "Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte(tc.username+":test-secret")))
-			pushUsername := ""
-			if tc.providerType == "gitea" || tc.providerType == "forgejo" {
-				pushUsername = tc.username
-			}
-			err := (Native{}).Push(context.Background(), t.TempDir(), "https://example.test/team/demo.git", tc.providerType, pushUsername, "test-secret")
-			if err == nil {
-				t.Fatal("fake push unexpectedly succeeded")
-			}
-			if strings.Contains(err.Error(), "test-secret") || strings.Contains(err.Error(), "Authorization: Basic") || !strings.Contains(err.Error(), "check authentication") {
-				t.Fatalf("push error exposed credentials: %v", err)
-			}
-		})
+	if err := os.WriteFile(script, []byte(contents), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("SSL_CERT_FILE", "/tmp/test-ca.pem")
+	if err := (Native{}).Clone(context.Background(), "https://example.test/team/demo.git", "destination", "alice", "work", "demo"); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -91,7 +70,7 @@ func TestCORE_CREDENTIAL_002InheritedGitExecPathCannotStealPushCredential(t *tes
 	}
 	t.Setenv("GIT_EXEC_PATH", helperDir)
 	t.Setenv("STEAL_PATH", stolen)
-	if err := native.Push(ctx, dir, remote, "github", "", "test-secret"); err == nil {
+	if err := native.Push(ctx, dir, remote); err == nil {
 		t.Fatal("push unexpectedly succeeded")
 	}
 	if _, err := os.Stat(stolen); !os.IsNotExist(err) {
@@ -111,16 +90,16 @@ func TestCORE_GIT_008CredentialHelperIsLocalAndPreservesExistingHelpers(t *testi
 	if err := native.run(ctx, dir, nil, "config", "--local", "--add", "credential.helper", "existing-helper"); err != nil {
 		t.Fatal(err)
 	}
-	if err := native.ConfigureCredentialHelper(ctx, dir, "https://gitlab.example/team/demo.git", "gitlabuser"); err != nil {
+	if err := native.ConfigureCredentialHelper(ctx, dir, "https://gitlab.example/team/demo.git", "gitlabuser", "work", "demo"); err != nil {
 		t.Fatal(err)
 	}
-	if err := native.ConfigureCredentialHelper(ctx, dir, "", ""); err != nil {
+	if err := native.ConfigureCredentialHelper(ctx, dir, "", "", "work", "demo"); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get-all", "credential.helper")
 	cmd.Dir, cmd.Env = dir, gitEnv(nil)
 	output, err := cmd.Output()
-	if err != nil || string(output) != "existing-helper\n!colt git-credential\n" {
+	if err != nil || string(output) != "existing-helper\n!colt git-credential --provider work --repository demo\n" {
 		t.Fatalf("helpers=%q error=%v", output, err)
 	}
 	cmd = exec.CommandContext(ctx, "git", "config", "--local", "--get", "credential.useHttpPath")
@@ -145,7 +124,7 @@ func TestGiteaCredentialHelperStoresOnlyAuthenticatedUsername(t *testing.T) {
 		t.Fatal(err)
 	}
 	const remote = "https://code.example/alice/demo.git"
-	if err := native.ConfigureCredentialHelper(context.Background(), dir, remote, "alice"); err != nil {
+	if err := native.ConfigureCredentialHelper(context.Background(), dir, remote, "alice", "work", "demo"); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("git", "config", "--local", "--get", "credential."+remote+".username")
@@ -166,7 +145,7 @@ func TestCORE_GIT_010SSHPushStripsGitControlsAndPreservesSSHAgentWithoutInjectin
 	bin := t.TempDir()
 	script := filepath.Join(bin, "git")
 	contents := `#!/bin/sh
-test "$*" = "push --set-upstream origin HEAD" || exit 2
+test "$*" = "-c http.followRedirects=false push --set-upstream origin HEAD" || exit 2
 test -z "$GIT_SSH" || exit 3
 test -z "$GIT_SSH_COMMAND" || exit 4
 test -z "$GIT_SSH_VARIANT" || exit 5
@@ -192,7 +171,7 @@ case "$(set)" in *must-not-be-injected*) exit 13;; esac
 	t.Setenv("GIT_CONFIG_KEY_0", "core.sshCommand")
 	t.Setenv("GIT_CONFIG_VALUE_0", "ssh inherited")
 	t.Setenv("SSH_AUTH_SOCK", "/agent/socket")
-	if err := (Native{}).Push(context.Background(), t.TempDir(), "git@example.test:team/demo.git", "github", "", "must-not-be-injected"); err != nil {
+	if err := (Native{}).Push(context.Background(), t.TempDir(), "git@example.test:team/demo.git"); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -45,6 +45,38 @@ func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		w.Credentials = store // explicit test-only injection; production enrollment remains disabled
 		return store.Put(id, credential.Credential{Kind: "bearer_token", Secret: secret})
 	})
+	ctx.Step(`^an injected secure-store double holds "([^"]*)"$`, func(id string) error {
+		secret := "secure-fake-secret-1"
+		w.Secrets = append(w.Secrets, secret)
+		w.Store = fixture.NewFakeCredentialStore()
+		w.Store.Credentials[id] = credential.Credential{Kind: "bearer_token", Secret: secret}
+		w.Credentials = w.Store
+		return nil
+	})
+	ctx.Step(`^provider "personal" has a credential in an injected secure-store double$`, func() error {
+		p := fixture.StdProvider("github", "example-user")
+		p.Auth = config.Auth{Source: "stored", CredentialID: "github.com/personal"}
+		w.Providers = map[string]config.Provider{"personal": p}
+		w.Store = fixture.NewFakeCredentialStore()
+		w.Store.Credentials[p.Auth.CredentialID] = credential.Credential{Kind: "bearer_token", Secret: "selected-secret"}
+		w.Store.Credentials["github.com/work"] = credential.Credential{Kind: "bearer_token", Secret: "neighbor-secret"}
+		w.Credentials = w.Store
+		return w.SaveConfig()
+	})
+	ctx.Step(`^provider "personal" has a persisted plaintext credential$`, func() error {
+		p := fixture.StdProvider("github", "example-user")
+		p.Auth = config.Auth{Source: "stored", CredentialID: "github.com/personal"}
+		w.Providers = map[string]config.Provider{"personal": p}
+		w.Credentials = credential.NewMemoryStore()
+		w.FallbackCredentials = credential.NewFileStore(credential.DefaultFilePath(w.ConfigPath))
+		if err := w.SaveConfig(); err != nil {
+			return err
+		}
+		if err := w.FallbackCredentials.Put(p.Auth.CredentialID, credential.Credential{Kind: "bearer_token", Secret: "selected-secret"}); err != nil {
+			return err
+		}
+		return w.FallbackCredentials.Put("github.com/work", credential.Credential{Kind: "bearer_token", Secret: "neighbor-secret"})
+	})
 	ctx.Step(`^an injected credential store holds "([^"]*)" with secret "([^"]*)"$`, func(id, secret string) error {
 		w.Store = fixture.NewFakeCredentialStore()
 		w.Store.Credentials[id] = credential.Credential{Kind: "bearer_token", Secret: secret}
@@ -55,6 +87,36 @@ func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	ctx.Step(`^an empty injected credential store is supplied$`, func() error {
 		w.Store = fixture.NewFakeCredentialStore()
 		w.Credentials = w.Store
+		return nil
+	})
+	ctx.Step(`^an injected secure-store double is available$`, func() error {
+		w.Store = fixture.NewFakeCredentialStore()
+		w.Credentials = w.Store
+		return nil
+	})
+	ctx.Step(`^the secure credential backend is unavailable$`, func() error {
+		if err := fixture.UnsetCredentialEnv(); err != nil {
+			return err
+		}
+		w.Credentials = credential.DisabledStore{}
+		w.FallbackCredentials = credential.NewFileStore(credential.DefaultFilePath(w.ConfigPath))
+		return nil
+	})
+	ctx.Step(`^the user accepts plaintext credential persistence$`, func() error {
+		w.ConfirmPlaintext = func() (bool, error) { return true, nil }
+		return nil
+	})
+	ctx.Step(`^the user has not consented to plaintext storage$`, func() error { return nil })
+	ctx.Step(`^the user rejects plaintext credential persistence$`, func() error {
+		w.ConfirmPlaintext = func() (bool, error) { return false, nil }
+		return nil
+	})
+	ctx.Step(`^no provider token environment variable resolves$`, func() error {
+		return fixture.UnsetCredentialEnv()
+	})
+	ctx.Step(`^manual token entry supplies "([^"]*)"$`, func(secret string) error {
+		w.Secrets = append(w.Secrets, secret)
+		w.ReadToken = func() (string, error) { return secret, nil }
 		return nil
 	})
 	ctx.Step(`^the injected credential store also holds "([^"]*)" with secret "([^"]*)"$`, func(id, secret string) error {
@@ -263,6 +325,18 @@ func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		w.RunArgs(w.LoginArgs())
 		return nil
 	})
+	ctx.Step(`^I manually log in to (\w+) provider "([^"]*)"$`, func(pType, alias string) error {
+		w.LoginAlias, w.LoginType = alias, pType
+		w.RunArgs(w.LoginArgs())
+		return nil
+	})
+	ctx.Step(`^interactive authentication succeeds$`, func() error {
+		secret := "plaintext-consented-secret"
+		w.Secrets = append(w.Secrets, secret)
+		w.ReadToken = func() (string, error) { return secret, nil }
+		w.RunArgs(w.LoginArgs())
+		return nil
+	})
 	ctx.Step("^I run `colt auth login (\\w+) ([\\w-]+) --replace` with the new settings$", func(pType, alias string) error {
 		w.LoginAlias, w.LoginType = alias, pType
 		w.RunArgs(w.LoginArgs("--replace"))
@@ -398,10 +472,75 @@ func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		}
 		return nil
 	})
+	ctx.Step(`^provider "([^"]*)" configuration is unchanged$`, func(_ string) error {
+		data, err := os.ReadFile(w.ConfigPath)
+		if err != nil || !bytes.Equal(data, w.ConfigBefore) {
+			return fmt.Errorf("provider configuration changed")
+		}
+		return nil
+	})
 	ctx.Step(`^the provider receives the resolved credential without knowing its backend type$`, func() error {
 		token, ok := w.LastToken()
-		if !ok || token != "plaintext-fake-secret-1" {
+		if !ok || token == "" || w.Leaked(token) == "" {
 			return fmt.Errorf("provider did not receive the fallback credential")
+		}
+		return nil
+	})
+	ctx.Step(`^the credential is stored as "([^"]*)" without its value in config$`, func(id string) error {
+		if w.Store == nil || w.Store.Puts != 1 || w.Store.Credentials[id].Secret == "" {
+			return fmt.Errorf("credential was not stored under %q: %#v", id, w.Store)
+		}
+		data, err := os.ReadFile(w.ConfigPath)
+		if err != nil || !strings.Contains(string(data), "credential_id: "+id) || w.Leaked(string(data)) != "" {
+			return fmt.Errorf("unsafe stored credential config: %v", err)
+		}
+		return nil
+	})
+	ctx.Step(`^the credential is stored in the separate credential file, not in config\.yaml$`, func() error {
+		if w.FallbackCredentials == nil {
+			return errors.New("fallback store is not configured")
+		}
+		cred, err := w.FallbackCredentials.Get("gitlab.com/work")
+		data, configErr := os.ReadFile(w.ConfigPath)
+		if err != nil || configErr != nil || cred.Secret == "" || w.Leaked(string(data)) != "" {
+			return fmt.Errorf("fallback credential/config state is invalid: credential=%v config=%v", err, configErr)
+		}
+		return nil
+	})
+	ctx.Step(`^the credential file has user-readable-only permissions$`, func() error {
+		info, err := os.Stat(w.FallbackCredentials.Path)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			return fmt.Errorf("credential file mode = %v: %v", info, err)
+		}
+		return nil
+	})
+	ctx.Step(`^output warns the file is plaintext protected only by filesystem permissions$`, func() error {
+		if !strings.Contains(w.Out, "plaintext protected only by filesystem permissions") || w.Leaked(w.Out) != "" {
+			return fmt.Errorf("unsafe or missing plaintext warning: %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^no reusable credential is written to any file$`, func() error {
+		for _, path := range []string{w.ConfigPath, credential.DefaultFilePath(w.ConfigPath)} {
+			data, err := os.ReadFile(path)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			if w.Leaked(string(data)) != "" {
+				return fmt.Errorf("credential leaked to %s", path)
+			}
+		}
+		return nil
+	})
+	ctx.Step(`^output warns that plaintext storage requires explicit consent$`, func() error {
+		if w.RunErr == nil || !strings.Contains(w.RunErr.Error(), "requires explicit consent") {
+			return fmt.Errorf("missing consent warning: %v", w.RunErr)
+		}
+		return nil
+	})
+	ctx.Step(`^the command reports that authentication was not persisted$`, func() error {
+		if w.RunErr == nil || !strings.Contains(w.RunErr.Error(), "not persisted") {
+			return fmt.Errorf("missing persistence failure: %v", w.RunErr)
 		}
 		return nil
 	})
@@ -411,6 +550,34 @@ func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		}
 		if _, exists := w.Store.Credentials[id]; exists {
 			return fmt.Errorf("credential %q still exists", id)
+		}
+		return nil
+	})
+	ctx.Step(`^the injected secure-store credential for "personal" is removed$`, func() error {
+		if w.Store == nil || w.Store.Deletes != 1 {
+			return fmt.Errorf("secure credential was not deleted: %#v", w.Store)
+		}
+		if _, ok := w.Store.Credentials["github.com/personal"]; ok {
+			return errors.New("secure credential remains")
+		}
+		return nil
+	})
+	ctx.Step(`^the stored secret for "personal" is removed$`, func() error {
+		if _, err := w.FallbackCredentials.Get("github.com/personal"); !errors.Is(err, credential.ErrNotFound) {
+			return fmt.Errorf("plaintext credential remains: %v", err)
+		}
+		return nil
+	})
+	ctx.Step(`^unrelated credentials are unchanged$`, func() error {
+		if w.Store != nil {
+			if got := w.Store.Credentials["github.com/work"].Secret; got != "neighbor-secret" {
+				return errors.New("unrelated secure credential changed")
+			}
+			return nil
+		}
+		got, err := w.FallbackCredentials.Get("github.com/work")
+		if err != nil || got.Secret != "neighbor-secret" {
+			return fmt.Errorf("unrelated plaintext credential changed: %v", err)
 		}
 		return nil
 	})

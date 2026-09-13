@@ -3,7 +3,7 @@
 This is the detailed normative **first MVP** project-creation capability. It uses every applicable requirement in [shared core](00-core.md).
 
 ``` text
-colt init <project> [--local] [--provider <alias>]
+colt init <project> [--local] [--provider <alias>] [--destination <path>]
 ```
 
 The command creates a blank project. Parameterized template selection and materialization belong to planned [Milestone 3](03-template-init.md).
@@ -15,10 +15,10 @@ The command creates a blank project. Parameterized template selection and materi
 | `INIT-001` | Colt **MUST** validate the project name, provider configuration, identity, destination, and required runtime before mutation where practical.                                                 | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
 | `INIT-002` | Colt **MUST** resolve a provider using `CORE-RESOLVE-001`, including for `--local`, because provider selection supplies identity.                                                             | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
 | `INIT-003` | Colt **MUST** refuse an existing non-empty destination without modifying it.                                                                                                                  | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
-| `INIT-004` | Colt **MUST** create the destination, initialize a new Git repository with no inherited remotes, apply `CORE-IDENTITY-001`, and create one initial commit. The blank commit **MAY** be empty. | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
+| `INIT-004` | Colt **MUST** clone provider-created repositories to `<user-home>/<namespace>/<project>` by default without injecting credentials into the URL, arguments, environment, or persistent Git configuration, apply `CORE-IDENTITY-001`, and create one initial commit. `--destination <path>` replaces the complete remote clone path; relative paths resolve from the current directory and require an existing parent. It is invalid with `--local`. With `--local`, the destination remains `<current-directory>/<project>` and is initialized directly. Existing non-empty, file, and symlink destinations are refused. The blank commit **MAY** be empty. | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
 | `INIT-005` | With `--local`, Colt **MUST NOT** resolve or require provider API credentials, construct or contact a provider client, add `origin`, configure a credential helper, or push. It **MUST** stop successfully after local initialization. | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
 | `INIT-006` | Without `--local`, Colt **MUST** create a repository in the selected namespace through the selected provider's direct HTTP API using configured defaults. The creation path MUST work through the provider abstraction for any supported type (currently GitHub, GitLab, Gitea, Forgejo). | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
-| `INIT-007` | After remote creation, Colt **MUST** add only the created repository URL as `origin` and push the initial branch and commit with upstream tracking using native `git`. The clone URL transport (HTTPS or SSH) MUST correspond to the selected provider and available authentication, selected per the deterministic transport preference (`CORE-GIT-009`) with product default HTTPS. | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
+| `INIT-007` | After remote creation, Colt **MUST** clone the created repository at the resolved destination, retain only the created repository URL as `origin`, and push the initial branch and commit with upstream tracking using native `git`. Host and repository matching remain exact; only GitHub owner matching is case-insensitive because GitHub account names are case-insensitive and its API may canonicalize owner casing. The clone URL transport (HTTPS or SSH) MUST correspond to the selected provider and available authentication, selected per the deterministic transport preference (`CORE-GIT-009`) with product default HTTPS. | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
 | `INIT-008` | Colt **MUST** treat both a pre-existing remote and an authoritative conflict returned during creation as conflicts and apply `CORE-SAFETY-001` and `CORE-CONFLICT-001`.                       | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
 | `INIT-009` | Failures after local or remote mutation **MUST** follow `CORE-FAILURE-001`; a push failure **MUST** leave the local commit, `origin`, and created remote intact.                              | [`blank_project_initialization.feature`](../../features/blank_project_initialization.feature) |
 
@@ -33,7 +33,8 @@ colt init project
         |       |
         |       +-> create remote repository
         |
-        +-> local Git initialization
+
+        +-> clone to <user-home>/<namespace>/<project> (or --destination)
         |
         +-> select authoritative Git transport (SSH or HTTPS)
         |
@@ -51,7 +52,8 @@ colt init project
     |
     +-> provider API creates repository
     |
-    +-> origin=https://provider/owner/project.git (authoritative, credential-free)
+    +-> clone to owner/project with origin=https://provider/owner/project.git
+        (authoritative, credential-free; transient Colt helper authenticates clone)
     |
     +-> local credential.helper configured for Colt (helper = colt)
     |

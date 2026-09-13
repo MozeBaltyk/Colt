@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func secureTempDir(t *testing.T) string {
@@ -187,4 +188,39 @@ func TestFileStoreValidatesImmediateDirectory(t *testing.T) {
 			t.Fatalf("symlink directory error = %v", err)
 		}
 	})
+}
+
+func TestFileStoreLockIsExclusiveBoundedAndNeverFollowsSymlink(t *testing.T) {
+	dir := secureTempDir(t)
+	path := filepath.Join(dir, "credentials")
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("unchanged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path+".lock"); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	err := NewFileStore(path).Put("github.com/personal", Credential{Kind: "bearer_token", Secret: "secret"})
+	if err == nil || time.Since(started) > 2*lockTimeout {
+		t.Fatalf("lock error=%v duration=%v", err, time.Since(started))
+	}
+	data, readErr := os.ReadFile(target)
+	if readErr != nil || string(data) != "unchanged" {
+		t.Fatalf("symlink target changed: %q, %v", data, readErr)
+	}
+}
+
+func TestFileStoreRemovesMutationLockAndRejectsCRLF(t *testing.T) {
+	path := filepath.Join(secureTempDir(t), "credentials")
+	store := NewFileStore(path)
+	if err := store.Put("github.com/personal", Credential{Kind: "bearer_token", Secret: "safe"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path + ".lock"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock was not cleaned up: %v", err)
+	}
+	if err := store.Put("github.com/work", Credential{Kind: "bearer_token", Secret: "bad\nsecret"}); err == nil {
+		t.Fatal("FileStore accepted bearer token with CR/LF")
+	}
 }
