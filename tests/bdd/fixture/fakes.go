@@ -126,12 +126,7 @@ func (f *FakeGit) AddOrigin(ctx context.Context, dir, url string) error {
 
 func (f *FakeGit) ConfigureCredentialHelper(ctx context.Context, dir, cloneURL, username, alias, project string) error {
 	f.Operations = append(f.Operations, "helper")
-	safe := func(value string) bool {
-		return value != "" && strings.IndexFunc(value, func(r rune) bool {
-			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-')
-		}) < 0
-	}
-	if !safe(alias) || !safe(project) {
+	if !gitnative.SafeIdentifier(alias) || !gitnative.SafeIdentifier(project) {
 		return fmt.Errorf("refusing unsafe provider or repository scope for Git credential helper")
 	}
 	helper := "!colt git-credential --provider " + alias + " --repository " + project

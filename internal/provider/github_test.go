@@ -45,12 +45,13 @@ func TestGitHubDeviceFlowPollsAndReturnsTokenWithoutDisplayingIt(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(response)), Header: make(http.Header)}, nil
 	})}
 	var waits []time.Duration
-	flow := githubDeviceFlow{http: hc, baseURL: githubDeviceBaseURL, wait: func(_ context.Context, d time.Duration) error {
+	githubDeviceWait = func(_ context.Context, d time.Duration) error {
 		waits = append(waits, d)
 		return nil
-	}}
+	}
+	defer func() { githubDeviceWait = nil }()
 	var output bytes.Buffer
-	token, err := flow.authorize(context.Background(), &output)
+	token, err := authorizeGitHubDevice(context.Background(), hc, githubDeviceBaseURL, &output, githubDeviceWait)
 	if err != nil || token != "device-secret" || !reflect.DeepEqual(waits, []time.Duration{time.Second, time.Second, 6 * time.Second}) {
 		t.Fatalf("token=%q error=%v waits=%v", token, err, waits)
 	}

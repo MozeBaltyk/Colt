@@ -1107,7 +1107,15 @@ func TestPutCredentialConcurrentCreateAndRollbackOwnership(t *testing.T) {
 	for _, secret := range []string{"first", "second"} {
 		go func(secret string) {
 			<-start
-			rollback, err := putCredential(store, "github.com/personal", secret)
+			created := credential.Credential{Kind: "bearer_token", Secret: secret}
+			err := store.Create("github.com/personal", created)
+			var rollback func() error
+			if err == nil {
+				rollback = func() error {
+					_, rErr := store.DeleteIf("github.com/personal", created)
+					return rErr
+				}
+			}
 			results <- result{rollback, err}
 		}(secret)
 	}
@@ -1135,7 +1143,12 @@ func TestPutCredentialConcurrentCreateAndRollbackOwnership(t *testing.T) {
 
 func TestPutCredentialRollbackDoesNotDeleteReplacement(t *testing.T) {
 	store := credential.NewMemoryStore()
-	rollback, err := putCredential(store, "github.com/personal", "created")
+	created := credential.Credential{Kind: "bearer_token", Secret: "created"}
+	rollback := func() error {
+		_, rErr := store.DeleteIf("github.com/personal", created)
+		return rErr
+	}
+	err := store.Create("github.com/personal", created)
 	if err != nil {
 		t.Fatal(err)
 	}

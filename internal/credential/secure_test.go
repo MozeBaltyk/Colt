@@ -14,11 +14,10 @@ func TestStoresCreateIsAtomic(t *testing.T) {
 	backend := &fakeKeyring{items: map[string]keyring.Item{}}
 	memory := NewMemoryStore()
 	filePath := filepath.Join(secureTempDir(t), "credentials")
-	lockDir := t.TempDir()
 	stores := map[string][2]Store{
 		"memory": {memory, memory},
 		"file":   {NewFileStore(filePath), NewFileStore(filePath)},
-		"secure": {&SecureStore{ring: backend, lockDir: lockDir}, &SecureStore{ring: backend, lockDir: lockDir}},
+		"secure": {&SecureStore{ring: backend}, &SecureStore{ring: backend}},
 	}
 	for name, pair := range stores {
 		t.Run(name, func(t *testing.T) {
@@ -120,14 +119,14 @@ func (f *fakeKeyring) Remove(id string) error {
 
 func TestSecureStoreDeleteVerifiesAbsence(t *testing.T) {
 	backend := &fakeKeyring{items: map[string]keyring.Item{"github.com/personal": {Data: []byte("secret")}}, keepAfterRemove: true}
-	if err := (&SecureStore{ring: backend, lockDir: t.TempDir()}).Delete("github.com/personal"); !errors.Is(err, ErrStoreUnavailable) {
+	if err := (&SecureStore{ring: backend}).Delete("github.com/personal"); !errors.Is(err, ErrStoreUnavailable) {
 		t.Fatalf("Delete() = %v", err)
 	}
 }
 
 func TestSecureStoreRejectsCRLFAndTreatsSetFailureAsUncertain(t *testing.T) {
 	backend := &fakeKeyring{items: map[string]keyring.Item{}, setErr: errors.New("backend failed")}
-	store := &SecureStore{ring: backend, lockDir: t.TempDir()}
+	store := &SecureStore{ring: backend}
 	if err := store.Put("github.com/personal", Credential{Kind: "bearer_token", Secret: "bad\nsecret"}); err == nil {
 		t.Fatal("SecureStore accepted bearer token with CR/LF")
 	}
@@ -140,7 +139,7 @@ func (f *fakeKeyring) Keys() ([]string, error) { return nil, nil }
 func TestSecureStoreMapsBackendErrorsWithoutLeakingThem(t *testing.T) {
 	secret := "secure-test-secret"
 	backend := &fakeKeyring{items: map[string]keyring.Item{}}
-	store := &SecureStore{ring: backend, lockDir: t.TempDir()}
+	store := &SecureStore{ring: backend}
 	if err := store.Put("github.com/personal", Credential{Kind: "bearer_token", Secret: secret}); err != nil {
 		t.Fatal(err)
 	}

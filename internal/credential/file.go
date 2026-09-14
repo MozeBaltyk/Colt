@@ -18,14 +18,9 @@ const (
 	lockTimeout = time.Second
 )
 
-type fileCredential struct {
-	Kind   string `yaml:"kind"`
-	Secret string `yaml:"secret"`
-}
-
 type fileContents struct {
-	Version     int                       `yaml:"version"`
-	Credentials map[string]fileCredential `yaml:"credentials"`
+	Version     int                      `yaml:"version"`
+	Credentials map[string]Credential    `yaml:"credentials"`
 }
 
 // FileStore is the explicitly selected plaintext fallback. Path must name the
@@ -98,7 +93,7 @@ func (s *FileStore) put(id string, cred Credential, create bool) (retErr error) 
 	if _, exists := contents.Credentials[id]; create && exists {
 		return ErrAlreadyExists
 	}
-	contents.Credentials[id] = fileCredential{Kind: cred.Kind, Secret: cred.Secret}
+	contents.Credentials[id] = Credential{Kind: cred.Kind, Secret: cred.Secret}
 	return s.write(contents)
 }
 
@@ -110,13 +105,10 @@ func (s *FileStore) lockMutation() (func() error, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fileError("create credential directory", err)
 	}
-	dirInfo, err := inspectDirectory(dir, false)
-	if err != nil {
-		return nil, err
-	}
 	lockPath := s.Path + ".lock"
 	deadline := time.Now().Add(lockTimeout)
 	var f *os.File
+	var err error
 	for {
 		f, err = os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
@@ -136,19 +128,9 @@ func (s *FileStore) lockMutation() (func() error, error) {
 		_ = os.Remove(lockPath)
 		return nil, errors.New("credential lock file is unsafe")
 	}
-	currentDir, err := inspectDirectory(dir, false)
-	if err != nil || !os.SameFile(dirInfo, currentDir) {
-		_ = f.Close()
-		_ = os.Remove(lockPath)
-		return nil, errors.New("credential directory changed while locking")
-	}
 	return func() error {
 		if err := f.Close(); err != nil {
 			return err
-		}
-		current, err := os.Lstat(lockPath)
-		if err != nil || !os.SameFile(opened, current) {
-			return errors.New("credential lock file changed")
 		}
 		return os.Remove(lockPath)
 	}, nil
@@ -208,7 +190,7 @@ func (s *FileStore) delete(id string, expected *Credential) (deleted bool, retEr
 }
 
 func emptyFile() fileContents {
-	return fileContents{Version: 1, Credentials: map[string]fileCredential{}}
+	return fileContents{Version: 1, Credentials: map[string]Credential{}}
 }
 
 func (s *FileStore) read() (fileContents, error) {
@@ -280,7 +262,7 @@ func (s *FileStore) read() (fileContents, error) {
 		return fileContents{}, errors.New("unsupported credential file version")
 	}
 	if contents.Credentials == nil {
-		contents.Credentials = map[string]fileCredential{}
+		contents.Credentials = map[string]Credential{}
 	}
 	for id, cred := range contents.Credentials {
 		if ValidateID(id) != nil || validateCredential(Credential{Kind: cred.Kind, Secret: cred.Secret}) != nil {

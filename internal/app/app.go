@@ -551,7 +551,7 @@ func (a *App) providerStatus(cmd *cobra.Command, args []string, repository strin
 			defaultMarker = " (default)"
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "%s%s\n", alias, defaultMarker)
-		fmt.Fprintf(cmd.OutOrStdout(), "  %s · %s\n", providerTypeName(p.Type), p.Host)
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s · %s\n", config.ProviderTypeName(p.Type), p.Host)
 		if offline {
 			fmt.Fprintf(cmd.OutOrStdout(), "  Namespace:   %s\n", p.Namespace)
 			fmt.Fprintf(cmd.OutOrStdout(), "  Auth source: %s\n", p.Auth.Source)
@@ -699,21 +699,6 @@ func matchingOrigin(cfg config.Config, origin string) (alias, transport, project
 		alias, transport, project = candidate, selected, actual
 	}
 	return
-}
-
-func providerTypeName(t string) string {
-	switch t {
-	case "github":
-		return "GitHub"
-	case "gitlab":
-		return "GitLab"
-	case "gitea":
-		return "Gitea"
-	case "forgejo":
-		return "Forgejo"
-	default:
-		return t
-	}
 }
 
 func authState(err error) string {
@@ -900,7 +885,12 @@ func (a *App) loginProvider(cmd *cobra.Command, providerType, alias string, opts
 		} else if !errors.Is(targetErr, credential.ErrNotFound) && !errors.Is(targetErr, credential.ErrStoreUnavailable) {
 			return errors.New("credential storage failure; provider configuration was not changed")
 		}
-		rollback, err = putCredential(a.Credentials, p.Auth.CredentialID, token)
+		created := credential.Credential{Kind: "bearer_token", Secret: token}
+		rollback = func() error {
+			_, rErr := a.Credentials.DeleteIf(p.Auth.CredentialID, created)
+			return rErr
+		}
+		err = a.Credentials.Create(p.Auth.CredentialID, created)
 		if errors.Is(err, credential.ErrStoreUnavailable) {
 			accepted, confirmErr := a.confirmPlaintext(cmd)
 			if confirmErr != nil {
@@ -912,7 +902,12 @@ func (a *App) loginProvider(cmd *cobra.Command, providerType, alias string, opts
 			if a.FallbackCredentials == nil {
 				return errors.New("plaintext credential storage is unavailable")
 			}
-			rollback, err = putCredential(a.FallbackCredentials, p.Auth.CredentialID, token)
+			created := credential.Credential{Kind: "bearer_token", Secret: token}
+			rollback = func() error {
+				_, rErr := a.FallbackCredentials.DeleteIf(p.Auth.CredentialID, created)
+				return rErr
+			}
+			err = a.FallbackCredentials.Create(p.Auth.CredentialID, created)
 			plaintext = err == nil
 		}
 		if err != nil {
@@ -992,21 +987,6 @@ func (a *App) confirmPlaintext(cmd *cobra.Command) (bool, error) {
 	}
 	answer = strings.ToLower(strings.TrimSpace(answer))
 	return answer == "y" || answer == "yes", nil
-}
-
-func putCredential(store credential.Store, id, secret string) (func() error, error) {
-	if store == nil {
-		return nil, credential.ErrStoreUnavailable
-	}
-	created := credential.Credential{Kind: "bearer_token", Secret: secret}
-	rollback := func() error {
-		_, err := store.DeleteIf(id, created)
-		return err
-	}
-	if err := store.Create(id, created); err != nil {
-		return nil, err
-	}
-	return rollback, nil
 }
 
 type initOptions struct {
@@ -1345,7 +1325,6 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) (
 	report.transport = transport
 	if !opts.local {
 		report.remoteSteps(transport == "https", selected.Type == "gitea" || selected.Type == "forgejo")
-		report.begin("Preflight")
 	}
 	if err := a.Git.Available(); err != nil {
 		return err

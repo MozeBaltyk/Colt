@@ -1,13 +1,9 @@
 package credential
 
 import (
-	"crypto/sha256"
 	"errors"
-	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
-	"time"
 
 	keyring "github.com/99designs/keyring"
 )
@@ -18,7 +14,6 @@ type SecureStore struct {
 	ring    keyring.Keyring
 	openErr error
 	once    sync.Once
-	lockDir string
 }
 
 var secureMutationMu sync.Mutex
@@ -83,15 +78,6 @@ func (s *SecureStore) put(id string, cred Credential, create bool) (retErr error
 	}
 	secureMutationMu.Lock()
 	defer secureMutationMu.Unlock()
-	unlock, err := s.lockMutation(id)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := unlock(); err != nil {
-			retErr = ErrPersistenceUncertain
-		}
-	}()
 	if create {
 		if _, err := s.ring.Get(id); err == nil {
 			return ErrAlreadyExists
@@ -105,37 +91,6 @@ func (s *SecureStore) put(id string, cred Credential, create bool) (retErr error
 	return nil
 }
 
-func (s *SecureStore) lockMutation(id string) (func() error, error) {
-	dir := s.lockDir
-	if dir == "" {
-		cache, err := os.UserCacheDir()
-		if err != nil {
-			return nil, ErrStoreUnavailable
-		}
-		dir = filepath.Join(cache, "colt", "credential-locks")
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, ErrStoreUnavailable
-	}
-	path := filepath.Join(dir, fmt.Sprintf("%x.lock", sha256.Sum256([]byte(id))))
-	deadline := time.Now().Add(time.Second)
-	for {
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err == nil {
-			return func() error {
-				if err := f.Close(); err != nil {
-					return err
-				}
-				return os.Remove(path)
-			}, nil
-		}
-		if !errors.Is(err, os.ErrExist) || time.Now().After(deadline) {
-			return nil, ErrStoreUnavailable
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-}
-
 func (s *SecureStore) Delete(id string) (retErr error) {
 	if err := ValidateID(id); err != nil {
 		return err
@@ -145,15 +100,6 @@ func (s *SecureStore) Delete(id string) (retErr error) {
 	}
 	secureMutationMu.Lock()
 	defer secureMutationMu.Unlock()
-	unlock, err := s.lockMutation(id)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := unlock(); err != nil {
-			retErr = ErrPersistenceUncertain
-		}
-	}()
 	return s.deleteLocked(id)
 }
 
@@ -169,15 +115,6 @@ func (s *SecureStore) DeleteIf(id string, cred Credential) (deleted bool, retErr
 	}
 	secureMutationMu.Lock()
 	defer secureMutationMu.Unlock()
-	unlock, err := s.lockMutation(id)
-	if err != nil {
-		return false, err
-	}
-	defer func() {
-		if err := unlock(); err != nil {
-			retErr = ErrPersistenceUncertain
-		}
-	}()
 	item, err := s.ring.Get(id)
 	if errors.Is(err, keyring.ErrKeyNotFound) {
 		return false, nil

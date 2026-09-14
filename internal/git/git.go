@@ -202,13 +202,14 @@ func (n Native) configureScopedCredentialHelper(ctx context.Context, dir, cloneU
 	return nil
 }
 
+func SafeIdentifier(value string) bool {
+	return value != "" && strings.IndexFunc(value, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-')
+	}) < 0
+}
+
 func credentialHelper(alias, project string) (string, error) {
-	safe := func(value string) bool {
-		return value != "" && strings.IndexFunc(value, func(r rune) bool {
-			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-')
-		}) < 0
-	}
-	if !safe(alias) || !safe(project) {
+	if !SafeIdentifier(alias) || !SafeIdentifier(project) {
 		return "", errors.New("refusing unsafe provider or repository scope for Git credential helper")
 	}
 	return "!colt git-credential --provider " + alias + " --repository " + project, nil

@@ -30,9 +30,9 @@ const (
 
 // Credential is the common result every credential source resolves to.
 type Credential struct {
-	Kind   string // e.g. "bearer_token"
-	Secret string
-	Source Source
+	Kind   string `yaml:"kind"`
+	Secret string `yaml:"secret"`
+	Source Source `yaml:",omitempty"`
 }
 
 // ErrNotFound reports that no persisted credential exists for an ID.

@@ -147,7 +147,7 @@ func ValidateProvider(alias string, p Provider) error {
 		return errors.New("the MVP supports GitHub.com with https://api.github.com only")
 	}
 	if p.Type != "github" && !strings.EqualFold(u.Host, p.Host) {
-		return fmt.Errorf("%s host and base_url host must match", providerName(p.Type))
+		return fmt.Errorf("%s host and base_url host must match", ProviderTypeName(p.Type))
 	}
 	parts := strings.Split(p.Namespace, "/")
 	if strings.TrimSpace(p.Namespace) == "" || p.Type != "gitlab" && len(parts) != 1 {
@@ -197,8 +197,10 @@ func ValidateProvider(alias string, p Provider) error {
 	return nil
 }
 
-func providerName(providerType string) string {
+func ProviderTypeName(providerType string) string {
 	switch providerType {
+	case "github":
+		return "GitHub"
 	case "gitlab":
 		return "GitLab"
 	case "gitea":

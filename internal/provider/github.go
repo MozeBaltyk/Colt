@@ -105,32 +105,28 @@ const (
 	githubClientID      = "Ov23liERaF30k06vMN8L"
 )
 
-type githubDeviceFlow struct {
-	http    *http.Client
-	baseURL string
-	wait    func(context.Context, time.Duration) error
-}
+var githubDeviceWait func(context.Context, time.Duration) error
 
 // AuthorizeGitHubDevice performs GitHub's OAuth device flow without launching
 // a browser or exposing the resulting reusable token.
 func AuthorizeGitHubDevice(ctx context.Context, hc *http.Client, out io.Writer) (string, error) {
-	return (githubDeviceFlow{http: hc, baseURL: githubDeviceBaseURL}).authorize(ctx, out)
+	return authorizeGitHubDevice(ctx, hc, githubDeviceBaseURL, out, githubDeviceWait)
 }
 
-func (f githubDeviceFlow) authorize(ctx context.Context, out io.Writer) (string, error) {
-	base, err := url.Parse(f.baseURL)
+func authorizeGitHubDevice(ctx context.Context, hc *http.Client, baseURL string, out io.Writer, wait func(context.Context, time.Duration) error) (string, error) {
+	base, err := url.Parse(baseURL)
 	if err != nil || base.Scheme != "https" || base.Host != "github.com" || base.Path != "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
 		return "", errors.New("GitHub device authorization endpoint must be https://github.com")
 	}
-	if f.http == nil {
-		f.http = &http.Client{}
+	if hc == nil {
+		hc = &http.Client{}
 	}
-	hc := *f.http
-	if hc.Timeout == 0 {
-		hc.Timeout = 15 * time.Second
+	httpClient := *hc
+	if httpClient.Timeout == 0 {
+		httpClient.Timeout = 15 * time.Second
 	}
-	previous := hc.CheckRedirect
-	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+	previous := httpClient.CheckRedirect
+	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if req.URL.Scheme != "https" || !strings.EqualFold(req.URL.Host, "github.com") {
 			return errors.New("refusing GitHub device authorization redirect to another host")
 		}
@@ -142,7 +138,6 @@ func (f githubDeviceFlow) authorize(ctx context.Context, out io.Writer) (string,
 		}
 		return nil
 	}
-	f.http = &hc
 	form := url.Values{"client_id": {githubClientID}, "scope": {"repo"}}
 	var code struct {
 		DeviceCode      string `json:"device_code"`
@@ -151,7 +146,7 @@ func (f githubDeviceFlow) authorize(ctx context.Context, out io.Writer) (string,
 		ExpiresIn       int    `json:"expires_in"`
 		Interval        int    `json:"interval"`
 	}
-	if err := f.post(ctx, "/login/device/code", form, &code); err != nil {
+	if err := postGitHubDevice(ctx, &httpClient, baseURL, "/login/device/code", form, &code); err != nil {
 		return "", err
 	}
 	if code.DeviceCode == "" || code.UserCode == "" || strings.ContainsAny(code.DeviceCode+code.UserCode, "\r\n") || code.ExpiresIn <= 0 || code.ExpiresIn > 3600 || code.Interval <= 0 || code.Interval > 60 {
@@ -167,7 +162,7 @@ func (f githubDeviceFlow) authorize(ctx context.Context, out io.Writer) (string,
 	deadline := time.Now().Add(time.Duration(code.ExpiresIn) * time.Second)
 	interval := time.Duration(code.Interval) * time.Second
 	for {
-		if err := f.sleep(ctx, interval); err != nil {
+		if err := sleepGitHubDevice(ctx, interval, wait); err != nil {
 			return "", errors.New("GitHub device authorization canceled")
 		}
 		if time.Now().After(deadline) {
@@ -185,7 +180,7 @@ func (f githubDeviceFlow) authorize(ctx context.Context, out io.Writer) (string,
 			"device_code": {code.DeviceCode},
 			"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
 		}
-		if err := f.post(ctx, "/login/oauth/access_token", poll, &token); err != nil {
+		if err := postGitHubDevice(ctx, &httpClient, baseURL, "/login/oauth/access_token", poll, &token); err != nil {
 			return "", err
 		}
 		switch token.Error {
@@ -214,14 +209,14 @@ func (f githubDeviceFlow) authorize(ctx context.Context, out io.Writer) (string,
 	}
 }
 
-func (f githubDeviceFlow) post(ctx context.Context, path string, form url.Values, result any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.baseURL+path, strings.NewReader(form.Encode()))
+func postGitHubDevice(ctx context.Context, hc *http.Client, baseURL, path string, form url.Values, result any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+path, strings.NewReader(form.Encode()))
 	if err != nil {
 		return errors.New("build GitHub device authorization request")
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := f.http.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return errors.New("GitHub device authorization request failed")
 	}
@@ -236,9 +231,9 @@ func (f githubDeviceFlow) post(ctx context.Context, path string, form url.Values
 	return nil
 }
 
-func (f githubDeviceFlow) sleep(ctx context.Context, duration time.Duration) error {
-	if f.wait != nil {
-		return f.wait(ctx, duration)
+func sleepGitHubDevice(ctx context.Context, duration time.Duration, wait func(context.Context, time.Duration) error) error {
+	if wait != nil {
+		return wait(ctx, duration)
 	}
 	timer := time.NewTimer(duration)
 	defer timer.Stop()

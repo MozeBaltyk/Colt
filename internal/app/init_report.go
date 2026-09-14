@@ -10,6 +10,18 @@ import (
 	"golang.org/x/term"
 )
 
+const (
+	colorSuccess = "32"
+	colorFailed  = "31"
+	colorSkipped = "33"
+)
+
+var stepStateNames = map[string]string{
+	"success": "succeeded",
+	"failed":  "failed",
+	"skipped": "skipped",
+}
+
 type initStep struct {
 	name, state string
 }
@@ -20,6 +32,7 @@ type initReport struct {
 	current                                                      int
 	commit                                                       string
 	color                                                        bool
+	stepIndex                                                    map[string]int
 }
 
 func newInitReport(project string, local bool) *initReport {
@@ -28,10 +41,12 @@ func newInitReport(project string, local bool) *initReport {
 		names = append(names, "Initialize local repository", "Set repository-local identity", "Create initial commit")
 	}
 	steps := make([]initStep, len(names))
+	stepIndex := make(map[string]int, len(names))
 	for i, name := range names {
 		steps[i] = initStep{name: name}
+		stepIndex[name] = i
 	}
-	return &initReport{project: project, steps: steps, current: -1, remote: "not applicable"}
+	return &initReport{project: project, steps: steps, current: -1, remote: "not applicable", stepIndex: stepIndex}
 }
 
 func (r *initReport) remoteSteps(https, authenticate bool) {
@@ -45,17 +60,16 @@ func (r *initReport) remoteSteps(https, authenticate bool) {
 	}
 	names = append(names, "Push initial commit")
 	r.steps = make([]initStep, len(names))
+	r.stepIndex = make(map[string]int, len(names))
 	for i, name := range names {
 		r.steps[i] = initStep{name: name}
+		r.stepIndex[name] = i
 	}
 }
 
 func (r *initReport) begin(name string) {
-	for i := range r.steps {
-		if r.steps[i].name == name {
-			r.current = i
-			return
-		}
+	if i, ok := r.stepIndex[name]; ok {
+		r.current = i
 	}
 }
 
@@ -111,16 +125,16 @@ func (r *initReport) write(w io.Writer) {
 		marker, color := "·", ""
 		switch step.state {
 		case "success":
-			marker, color = "✓", "32"
+			marker, color = "✓", colorSuccess
 		case "failed":
-			marker, color = "✗", "31"
+			marker, color = "✗", colorFailed
 		case "skipped":
-			marker, color = "!", "33"
+			marker, color = "!", colorSkipped
 		}
 		if r.color && color != "" {
 			marker = "\x1b[" + color + "m" + marker + "\x1b[0m"
 		}
-		state := map[string]string{"success": "succeeded", "failed": "failed", "skipped": "skipped"}[step.state]
+		state := stepStateNames[step.state]
 		fmt.Fprintf(w, "  %s %s: %s\n", marker, step.name, state)
 	}
 	if r.provider != "" {
