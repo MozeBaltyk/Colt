@@ -18,6 +18,12 @@ import (
 
 var ErrNotFound = errors.New("repository not found")
 var ErrConflict = errors.New("repository already exists")
+var ErrRevocationUnsupported = errors.New("provider-side revocation unsupported")
+
+type RevocationOptions struct {
+	ClientID     string
+	ClientSecret string
+}
 
 type Repository struct {
 	CloneURL string
@@ -27,7 +33,8 @@ type Repository struct {
 type Client interface {
 	Authenticate(context.Context) (string, error)
 	Get(context.Context, string) (*Repository, error)
-	Create(context.Context, string) (*Repository, error)
+	Create(context.Context, string, ...string) (*Repository, error)
+	Revoke(context.Context, RevocationOptions) error
 }
 
 type adapter interface {
@@ -35,7 +42,8 @@ type adapter interface {
 	isConflict(int, string) bool
 	authenticate(context.Context, *client) (string, error)
 	get(context.Context, *client, string) (*Repository, error)
-	create(context.Context, *client, string) (*Repository, error)
+	create(context.Context, *client, string, string) (*Repository, error)
+	revoke(context.Context, *client, RevocationOptions) error
 }
 
 type client struct {
@@ -95,8 +103,16 @@ func (c *client) Get(ctx context.Context, project string) (*Repository, error) {
 	return c.adapter.get(ctx, c, project)
 }
 
-func (c *client) Create(ctx context.Context, project string) (*Repository, error) {
-	return c.adapter.create(ctx, c, project)
+func (c *client) Create(ctx context.Context, project string, override ...string) (*Repository, error) {
+	visibility := c.settings.Visibility
+	if len(override) > 0 {
+		visibility = override[0]
+	}
+	return c.adapter.create(ctx, c, project, visibility)
+}
+
+func (c *client) Revoke(ctx context.Context, opts RevocationOptions) error {
+	return c.adapter.revoke(ctx, c, opts)
 }
 
 type accountResponse struct {

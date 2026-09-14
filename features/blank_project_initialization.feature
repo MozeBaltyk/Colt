@@ -71,6 +71,35 @@ Feature: Blank project initialization
       | GitHub |
       | GitLab |
 
+  @INIT-006 @INIT-010 @CORE-SAFETY-001
+  Scenario Outline: Override configured repository visibility for one remote initialization
+    Given the selected provider default visibility is "<default>"
+    When I run "colt init demo --visibility <override>"
+    Then Colt creates repository "demo" with visibility "<override>"
+    And the selected provider default visibility remains "<default>"
+
+    Examples:
+      | default | override |
+      | private | public   |
+      | public  | private  |
+
+  @INIT-006 @INIT-010
+  Scenario: Use configured repository visibility when init has no override
+    Given the selected provider default visibility is "public"
+    When I run "colt init demo"
+    Then Colt creates repository "demo" with visibility "public"
+
+  @INIT-001 @INIT-010 @CORE-SAFETY-001
+  Scenario Outline: Reject an invalid or inapplicable visibility override before mutation
+    When I run "<command>"
+    Then the command fails before mutation
+    And preflight state is unchanged with no credential, provider, or Git operation
+
+    Examples:
+      | command                                      |
+      | colt init demo --visibility internal         |
+      | colt init demo --visibility public --local   |
+
   @INIT-003 @INIT-006 @CORE-GIT-003
   Scenario: GitHub canonical owner casing is accepted without weakening clone authority
     Given GitHub is configured as "mozebaltyk" but returns canonical owner "MozeBaltyk"
@@ -142,6 +171,32 @@ Feature: Blank project initialization
     Then the command returns failure and identifies the failed push
     And the local commit, "origin", and remote repository remain intact
     And the result reports local and remote state and a safe recovery action
+
+  @INIT-011
+  Scenario: Local initialization reports only applicable ordered work
+    When I run "colt init demo --local"
+    Then the initialization report has the operation title followed by these successful steps in order:
+      | Preflight                    |
+      | Initialize local repository  |
+      | Set repository-local identity |
+      | Create initial commit        |
+    And the initialization report contains no remote, clone, helper, or push step
+
+  @INIT-009 @INIT-011 @CORE-FAILURE-001
+  Scenario: Push failure reports progress and evidence-based recovery once
+    Given Colt created the local repository, initial commit, remote repository, and "origin"
+    When pushing the initial branch fails
+    Then completed initialization steps precede the failed push step
+    And the result reports the preserved local commit and remote repository
+    And the result gives a bounded cause and a safe push recovery command
+    And no reusable credential or authorization header appears in the report
+
+  @INIT-011 @CORE-CREDENTIAL-002
+  Scenario: Initialization report decoration follows the output terminal
+    Given command output is not a terminal
+    When I run "colt init demo --local"
+    Then initialization status text and symbols are meaningful without color
+    And the initialization report contains no ANSI color
 
   @INIT-003 @CORE-SAFETY-001
   Scenario: Accept an existing empty destination

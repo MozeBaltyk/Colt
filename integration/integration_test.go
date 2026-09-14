@@ -259,6 +259,21 @@ func doWithClient(t *testing.T, hc *http.Client, method, url, auth string, body 
 	return requestWithClient(t, hc, method, url, auth, body, result)
 }
 
+func gitWithEnvE(t *testing.T, dir string, env, secrets []string, args ...string) (string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
+	var buf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &buf, &buf
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git failed: %v\n%s", err, redact(buf.String(), secrets...))
+	}
+	return strings.TrimSpace(buf.String()), nil
+}
+
 func git(t *testing.T, dir string, args ...string) string {
 	return gitWithEnv(t, dir, nil, nil, args...)
 }
@@ -473,8 +488,18 @@ func (w *giteaWorld) remoteHasCommit(branch string) error {
 func (w *giteaWorld) safeLocalConfig() error {
 	repo := filepath.Join(os.Getenv("HOME"), adminUser, "demo")
 	origin := git(w.t, repo, "remote", "get-url", "origin")
-	helpers := git(w.t, repo, "config", "--local", "--get-all", "credential.helper")
-	username := git(w.t, repo, "config", "--local", "--get", "credential."+origin+".username")
+	scopedKey := "credential." + origin + ".helper"
+	helpers, err := gitWithEnvE(w.t, repo, nil, nil, "config", "--local", "--get-all", scopedKey)
+	if err != nil {
+		helpers, err = gitWithEnvE(w.t, repo, nil, nil, "config", "--local", "--get-all", "credential.helper")
+		if err != nil {
+			return fmt.Errorf("credential helper missing: %v", err)
+		}
+	}
+	username, err := gitWithEnvE(w.t, repo, nil, nil, "config", "--local", "--get", "credential."+origin+".username")
+	if err != nil {
+		return fmt.Errorf("credential username missing: %v", err)
+	}
 	data, err := os.ReadFile(filepath.Join(repo, ".git", "config"))
 	if err != nil {
 		return err
@@ -599,8 +624,18 @@ func (w *forgejoWorld) remoteHasCommit(branch string) error {
 func (w *forgejoWorld) safeLocalConfig() error {
 	repo := filepath.Join(os.Getenv("HOME"), adminUser, "demo")
 	origin := git(w.t, repo, "remote", "get-url", "origin")
-	helpers := git(w.t, repo, "config", "--local", "--get-all", "credential.helper")
-	username := git(w.t, repo, "config", "--local", "--get", "credential."+origin+".username")
+	scopedKey := "credential." + origin + ".helper"
+	helpers, err := gitWithEnvE(w.t, repo, nil, nil, "config", "--local", "--get-all", scopedKey)
+	if err != nil {
+		helpers, err = gitWithEnvE(w.t, repo, nil, nil, "config", "--local", "--get-all", "credential.helper")
+		if err != nil {
+			return fmt.Errorf("credential helper missing: %v", err)
+		}
+	}
+	username, err := gitWithEnvE(w.t, repo, nil, nil, "config", "--local", "--get", "credential."+origin+".username")
+	if err != nil {
+		return fmt.Errorf("credential username missing: %v", err)
+	}
 	data, err := os.ReadFile(filepath.Join(repo, ".git", "config"))
 	if err != nil {
 		return err

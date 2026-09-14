@@ -87,6 +87,15 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		w.Client.GetErr = provider.ErrNotFound
 		return w.SaveConfig()
 	})
+	ctx.Step(`^the selected provider default visibility is "(private|public)"$`, func(visibility string) error {
+		w.Git.Real = false
+		p := fixture.WithTokenEnv(fixture.StdProvider("gitlab", "example-namespace"), fixture.TokenEnv)
+		p.Default, p.Visibility = true, visibility
+		w.Providers = map[string]config.Provider{"work": p}
+		w.Client.GetErr = provider.ErrNotFound
+		w.Client.CreateRepo = &provider.Repository{CloneURL: "https://gitlab.com/example-namespace/demo.git"}
+		return w.SaveConfig()
+	})
 	ctx.Step(`^GitHub is configured as "([^"]*)" but returns canonical owner "([^"]*)"$`, func(configured, canonical string) error {
 		w.Git.Real = true
 		p := fixture.WithTokenEnv(fixture.StdProvider("github", configured), fixture.TokenEnv)
@@ -501,6 +510,19 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		}
 		return nil
 	})
+	ctx.Step(`^Colt creates repository "([^\"]*)" with visibility "(private|public)"$`, func(project, visibility string) error {
+		if w.RunErr != nil || !w.Client.Called("Create:"+project) || w.Client.Visibility != visibility {
+			return fmt.Errorf("error=%v calls=%v visibility=%q", w.RunErr, w.Client.Calls, w.Client.Visibility)
+		}
+		return nil
+	})
+	ctx.Step(`^the selected provider default visibility remains "(private|public)"$`, func(visibility string) error {
+		cfg, err := config.Load(w.ConfigPath)
+		if err != nil || cfg.Providers["work"].Visibility != visibility {
+			return fmt.Errorf("visibility=%q: %v", cfg.Providers["work"].Visibility, err)
+		}
+		return nil
+	})
 	ctx.Step(`^it is cloned locally as "([^"]+)"$`, func(relative string) error {
 		destination := filepath.Join(w.Dir, filepath.FromSlash(relative))
 		if info, err := os.Stat(filepath.Join(destination, ".git")); err != nil || !info.IsDir() {
@@ -550,11 +572,27 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return nil
 	})
 	ctx.Step(`^local Git configuration contains "credential\.helper = colt"$`, func() error {
-		got, err := fixture.GitOut(remoteProjectDir(w), "config", "--local", "--get-all", "credential.helper")
-		if err != nil || !strings.Contains(got, "!colt git-credential --provider personal --repository demo") || w.Git.Helpers != 1 {
-			return fmt.Errorf("local credential helpers = %q: %v", got, err)
+		repoDir := remoteProjectDir(w)
+		keys := []string{"credential.helper"}
+		if w.Git.Real && w.Client.CreateRepo != nil && w.Client.CreateRepo.CloneURL != "" {
+			keys = append(keys, "credential."+w.Client.CreateRepo.CloneURL+".helper")
 		}
-		return nil
+		var lastErr error
+		for _, key := range keys {
+			got, err := fixture.GitOut(repoDir, "config", "--local", "--get-all", key)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if strings.Contains(got, "!colt git-credential --provider personal --repository demo") {
+				if w.Git.Helpers != 1 {
+					return fmt.Errorf("expected exactly one helper, got %d", w.Git.Helpers)
+				}
+				return nil
+			}
+			lastErr = fmt.Errorf("key %s missing expected helper: %q", key, got)
+		}
+		return lastErr
 	})
 	ctx.Step(`^"\.git/config" contains no reusable credential value$`, func() error {
 		data, err := os.ReadFile(filepath.Join(remoteProjectDir(w), ".git", "config"))
@@ -671,9 +709,76 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return nil
 	})
 	ctx.Step(`^the result reports local and remote state and a safe recovery action$`, func() error {
-		msg := fmt.Sprint(w.RunErr)
+		msg := w.Out + fmt.Sprint(w.RunErr)
 		if !strings.Contains(msg, "local state") || !strings.Contains(msg, "recovery") {
 			return fmt.Errorf("failure does not report state/recovery: %v", w.RunErr)
+		}
+		return nil
+	})
+	ctx.Step(`^the initialization report has the operation title followed by these successful steps in order:$`, func(table *godog.Table) error {
+		position := strings.Index(w.Out, "Initialize demo")
+		if position < 0 {
+			return fmt.Errorf("operation title missing from %q", w.Out)
+		}
+		for _, row := range table.Rows {
+			want := "✓ " + row.Cells[0].Value + ": succeeded"
+			next := strings.Index(w.Out[position:], want)
+			if next < 0 {
+				return fmt.Errorf("ordered step %q missing from %q", want, w.Out)
+			}
+			position += next + len(want)
+		}
+		return nil
+	})
+	ctx.Step(`^the initialization report contains no remote, clone, helper, or push step$`, func() error {
+		for _, forbidden := range []string{"remote repository", "Clone", "credential helper", "Push"} {
+			if strings.Contains(w.Out, forbidden) {
+				return fmt.Errorf("unexpected %q in %q", forbidden, w.Out)
+			}
+		}
+		return nil
+	})
+	ctx.Step(`^completed initialization steps precede the failed push step$`, func() error {
+		completed := strings.Index(w.Out, "✓ Create initial commit: succeeded")
+		failed := strings.Index(w.Out, "✗ Push initial commit: failed")
+		if completed < 0 || failed <= completed {
+			return fmt.Errorf("unexpected progress order: %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^the result reports the preserved local commit and remote repository$`, func() error {
+		if !strings.Contains(w.Out, "Local state: initial commit") || !strings.Contains(w.Out, "Remote state: created") {
+			return fmt.Errorf("preserved state missing: %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^the result gives a bounded cause and a safe push recovery command$`, func() error {
+		if !strings.Contains(w.Out, "Cause:") || !strings.Contains(w.Out, "git push --set-upstream origin HEAD") || len(w.Out) > 4096 {
+			return fmt.Errorf("unsafe or missing recovery: %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^no reusable credential or authorization header appears in the report$`, func() error {
+		for _, secret := range w.Secrets {
+			if strings.Contains(w.Out, secret) {
+				return fmt.Errorf("credential leaked: %q", w.Out)
+			}
+		}
+		if strings.Contains(strings.ToLower(w.Out), "authorization:") {
+			return fmt.Errorf("credential detail leaked: %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^command output is not a terminal$`, func() error { return nil })
+	ctx.Step(`^initialization status text and symbols are meaningful without color$`, func() error {
+		if !strings.Contains(w.Out, "✓ Preflight: succeeded") {
+			return fmt.Errorf("plain status missing: %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^the initialization report contains no ANSI color$`, func() error {
+		if strings.Contains(w.Out, "\x1b[") {
+			return fmt.Errorf("ANSI in non-terminal output: %q", w.Out)
 		}
 		return nil
 	})
@@ -683,7 +788,7 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		if w.RunErr != nil {
 			return fmt.Errorf("command failed: %v", w.RunErr)
 		}
-		if !strings.Contains(w.Out, "with provider "+alias) {
+		if !strings.Contains(w.Out, "Provider: "+alias) {
 			return fmt.Errorf("provider %q not selected in %q", alias, w.Out)
 		}
 		return nil

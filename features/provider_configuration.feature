@@ -1,30 +1,70 @@
 Feature: Provider configuration and authentication
-  Provider API authentication, Git transport, and Git identity stay separate. Manual tokens use native secure storage first; plaintext persistence requires explicit consent.
+  Provider API authentication, Git transport, and Git identity stay separate. GitHub Device Flow and manual tokens use native secure storage first; plaintext persistence requires explicit consent.
 
-  @unimplemented @CORE-PROVIDER-006 @CORE-PROVIDER-002 @CORE-CREDENTIAL-002
-  Scenario: Interactive GitHub authentication succeeds
+  @CORE-PROVIDER-006 @CORE-PROVIDER-002 @CORE-CREDENTIAL-002 @CORE-CREDENTIAL-005 @CORE-CREDENTIAL-008
+  Scenario Outline: Stored GitHub login automatically uses Device Flow independently of Git transport
     Given no persisted credential exists for provider "personal"
+    And no GitHub token environment variable resolves
+    And standard input is an interactive terminal
     And the provider authorization flow reports approval for account "octocat"
-    When I run `colt auth login github personal`
-    Then Colt displays the authorization URL and user code
+    When I run `colt auth login github personal --credential stored --transport <transport> --namespace octocat --git-name Test --git-email test@example.com`
+    Then Colt automatically starts GitHub OAuth Device Flow
+    And Colt displays the authorization URL and user code
     And Colt identifies the authenticated account as "octocat"
-    And the command succeeds with "personal · GitHub · octocat"
+    And the resulting API token is authenticated before persistence
+    And the token is persisted in the available secure-store double
+    And the command succeeds
     And no reusable credential value appears in output
+    And the configured Git transport remains "<transport>"
 
-  @unimplemented @CORE-PROVIDER-006
+    Examples:
+      | transport |
+      | ssh       |
+      | https     |
+
+  @CORE-PROVIDER-006
   Scenario: Interactive authorization is rejected
-    Given the provider authorization flow reports rejection by the user
-    When I run `colt auth login github personal`
+    Given no persisted credential or GitHub token environment variable resolves
+    And standard input is an interactive terminal
+    And the provider authorization flow reports rejection by the user
+    When I run `colt auth login github personal --credential stored --namespace octocat --git-name Test --git-email test@example.com`
     Then the command fails with an authorization error
     And no credential is persisted
     And no provider configuration is changed
 
-  @unimplemented @CORE-PROVIDER-006
+  @CORE-PROVIDER-006
   Scenario: Interactive authorization expires or times out
-    Given the provider authorization flow reports expiry before approval
-    When I run `colt auth login github personal`
+    Given no persisted credential or GitHub token environment variable resolves
+    And standard input is an interactive terminal
+    And the provider authorization flow reports expiry before approval
+    When I run `colt auth login github personal --credential stored --namespace octocat --git-name Test --git-email test@example.com`
     Then the command fails with an authorization error
     And no credential is persisted
+
+  @CORE-PROVIDER-006 @CORE-CREDENTIAL-008
+  Scenario: GitHub Device Flow does not require client ID configuration
+    Given no persisted credential or GitHub token environment variable resolves
+    And standard input is an interactive terminal
+    And no legacy GitHub client ID environment variable is configured
+    And the provider authorization flow reports approval for account "octocat"
+    When I run `colt auth login github personal --credential stored --namespace octocat --git-name Test --git-email test@example.com`
+    Then Colt automatically starts GitHub OAuth Device Flow
+    And the command succeeds
+
+  @CORE-CLI-002 @CORE-PROVIDER-006 @CORE-CREDENTIAL-008
+  Scenario Outline: Noninteractive stored GitHub login never starts Device Flow
+    Given no persisted credential or GitHub token environment variable resolves
+    And <mode>
+    When I run `colt auth login github personal --credential stored --namespace octocat --git-name Test --git-email test@example.com`
+    Then Colt does not start GitHub OAuth Device Flow
+    And the command fails with an actionable missing-credential error
+    And no credential is persisted
+    And no provider configuration is changed
+
+    Examples:
+      | mode                                    |
+      | I pass the root flag `--noninteractive` |
+      | standard input is not a terminal        |
 
   @CORE-PROVIDER-002
   Scenario: Authenticated provider account is identified
@@ -133,9 +173,11 @@ Feature: Provider configuration and authentication
 
   @unimplemented @CORE-CREDENTIAL-005
   Scenario: Secure credential storage is unavailable
-    Given the secure credential backend is unavailable
+    Given no persisted credential or GitHub token environment variable resolves
+    And standard input is an interactive terminal
+    And the secure credential backend is unavailable
     And the provider authorization flow reports approval
-    When I run `colt auth login github personal`
+    When I run `colt auth login github personal --credential stored`
     Then Colt offers plaintext file persistence, environment-variable usage, or cancel
     And the command is not reported as persistently successful until a choice is persisted
 
@@ -235,6 +277,68 @@ Feature: Provider configuration and authentication
       | state        |
       | unset        |
       | an empty value |
+
+  @CORE-CREDENTIAL-008 @CORE-CREDENTIAL-004
+  Scenario: --credential stored reads token from environment and persists it
+    Given provider "personal" has no persisted credential
+    And "GITHUB_TOKEN" contains "stored-env-token"
+    When I run `colt auth login github personal --credential stored --replace --namespace octocat --git-name Test --git-email test@example.com`
+    Then the command succeeds
+    And config.yaml contains "source: stored"
+    And config.yaml contains "credential_id: github.com/personal"
+    And no reusable credential value appears in output or config
+
+  @CORE-CREDENTIAL-008 @CORE-CREDENTIAL-004
+  Scenario: --credential stored reuses an existing stored credential without prompt
+    Given provider "personal" has auth source "stored" with credential_id "github.com/personal"
+    And an injected credential store holds "github.com/personal" with secret "existing-secret"
+    And "GITHUB_TOKEN" contains "env-token"
+    When I run `colt auth login github personal --credential stored --replace --namespace octocat --git-name Test --git-email test@example.com`
+    Then the command succeeds
+    And the injected stored credential for "github.com/personal" still has secret "existing-secret"
+    And config.yaml contains "source: stored"
+
+  @CORE-PROVIDER-006 @CORE-PROVIDER-002 @CORE-CREDENTIAL-008
+  Scenario: Replacement inherits stored authentication and falls back to Device Flow
+    Given provider "personal" has auth source "stored" with credential_id "github.com/personal"
+    And no persisted credential or GitHub token environment variable resolves
+    And standard input is an interactive terminal
+    And the provider authorization flow reports approval for account "octocat"
+    When I run `colt auth login github personal --replace --namespace octocat --git-name Test --git-email test@example.com`
+    Then Colt automatically starts GitHub OAuth Device Flow
+    And the resulting API token is authenticated before persistence
+    And the command succeeds
+    And config.yaml contains "source: stored"
+
+  @CORE-PROVIDER-006 @CORE-CREDENTIAL-008
+  Scenario: --credential stored with --token-env declared but unset uses GitHub Device Flow
+    Given provider "personal" has no persisted credential
+    And "GITHUB_TOKEN" is unset
+    And the login command does not carry the provider token environment variable
+    And standard input is an interactive terminal
+    And the provider authorization flow reports approval for account "octocat"
+    When I run `colt auth login github personal --credential stored --replace --token-env MISSING_TOKEN --namespace octocat --git-name Test --git-email test@example.com`
+    Then Colt automatically starts GitHub OAuth Device Flow
+    And the resulting API token is authenticated before persistence
+    And the command succeeds
+    And config.yaml contains "credential_id: github.com/personal"
+
+  @CORE-CREDENTIAL-008
+  Scenario: --credential stored with an invalid token value in environment is rejected
+    Given provider "personal" has no persisted credential
+    And "GITHUB_TOKEN" contains "bad\ntoken"
+    And the login command does not carry the provider token environment variable
+    When I run `colt auth login github personal --credential stored --replace --namespace octocat --git-name Test --git-email test@example.com`
+    Then the command fails with a token validation error
+    And no credential is persisted
+
+  @CORE-CREDENTIAL-008
+  Scenario: --credential invalid value is rejected
+    Given provider "personal" has no persisted credential
+    When I run `colt auth login github personal --credential invalid --namespace octocat --git-name Test --git-email test@example.com`
+    Then the command fails with an error mentioning "env or stored"
+    And no credential is persisted
+    And no provider configuration is changed
 
   @CORE-PROVIDER-005
   Scenario: Show provider status with live connection check by default
@@ -365,21 +469,129 @@ Feature: Provider configuration and authentication
     Then status shows "credential storage failure" and not "credentials missing"
     And no provider client is constructed
 
-  @unimplemented @CORE-PROVIDER-005
-  Scenario: Git SSH access succeeds independently of provider API credential
-    Given native Git SSH access to a repository works
-    And the provider API credential is missing
-    When repository access is checked
-    Then Git transport success does not imply provider API authentication
-    And provider status still reports "credentials missing"
+  @CORE-PROVIDER-005 @CORE-GIT-011 @CORE-CREDENTIAL-002
+  Scenario: Live status validates HTTPS repository access with the resolved token
+    Given provider "personal" has a valid API credential
+    And provider "personal" is configured for HTTPS transport
+    And the current repository origin is "https://github.com/example-user/demo.git"
+    When I run `colt auth status`
+    Then status reports the provider API connection as "connected"
+    And Colt runs bounded noninteractive `git ls-remote` against the current origin
+    And the HTTPS transport probe uses the transient Colt credential helper
+    And status reports Git authentication/connectivity and read access for clone, fetch, and pull
+    And status does not claim push or write permission was validated
+    And no reusable credential value appears in output, process arguments, the origin, or Git configuration
 
-  @unimplemented @CORE-PROVIDER-005
-  Scenario: Provider API authentication succeeds while Git SSH access fails
+  @CORE-PROVIDER-005 @CORE-GIT-010 @CORE-GIT-011
+  Scenario: Live status validates SSH repository access with the user's SSH setup
+    Given provider "personal" has a valid API credential
+    And provider "personal" is configured for SSH transport
+    And the current repository origin is "git@github.com:example-user/demo.git"
+    When I run `colt auth status`
+    Then status reports the provider API connection as "connected"
+    And Colt runs bounded noninteractive `git ls-remote` against the current origin
+    And native Git uses the user's SSH configuration and keys without a provider token
+    And status reports Git authentication/connectivity and read access for clone, fetch, and pull
+    And status does not claim push or write permission was validated
+    And Colt does not modify SSH configuration, keys, agents, or host verification
+
+  @CORE-PROVIDER-005 @CORE-PROVIDER-010 @CORE-PROVIDER-011 @CORE-GIT-011 @CORE-CREDENTIAL-002
+  Scenario Outline: Explicit repository status validates authoritative transport metadata for every provider
+    Given provider "work" is a configured <type> provider at "<host>" for namespace "<namespace>" using "<transport>"
+    And provider API authentication succeeds for provider "work"
+    And repository "demo" metadata supplies HTTPS URL "<https_url>" and SSH URL "<ssh_url>"
+    When I run `colt auth status work --repository demo`
+    Then status reports the provider API connection as "connected"
+    And the provider client looks up repository "demo"
+    And Colt runs bounded noninteractive `git ls-remote` against "<selected_url>"
+    And status reports Git authentication/connectivity and read access for clone, fetch, and pull
+    And status does not claim push or write permission was validated
+    And no reusable credential value appears in output, process arguments, the origin, or Git configuration
+
+    Examples:
+      | type    | host                  | namespace      | transport | https_url                                                | ssh_url                                             | selected_url                                        |
+      | github  | github.com            | example-user   | https     | https://github.com/example-user/demo.git                 | git@github.com:example-user/demo.git                 | https://github.com/example-user/demo.git             |
+      | gitlab  | gitlab.example.test   | platform/tools | ssh       | https://gitlab.example.test/platform/tools/demo.git      | git@gitlab.example.test:platform/tools/demo.git      | git@gitlab.example.test:platform/tools/demo.git      |
+      | gitea   | code.example.test     | example-user   | https     | https://code.example.test/example-user/demo.git          | git@code.example.test:example-user/demo.git          | https://code.example.test/example-user/demo.git      |
+      | forgejo | forge.example.test    | engineering    | ssh       | https://forge.example.test/engineering/demo.git          | git@forge.example.test:engineering/demo.git          | git@forge.example.test:engineering/demo.git          |
+
+  @CORE-PROVIDER-005 @CORE-GIT-011
+  Scenario: Explicit repository metadata failure does not guess a clone URL
+    Given provider "work" is a configured gitea provider at "code.example.test" for namespace "team" using "https"
+    And provider API authentication succeeds for provider "work"
+    And repository "demo" metadata cannot be obtained
+    When I run `colt auth status work --repository demo`
+    Then status reports the provider API connection as "connected"
+    And status reports the transport as "not checked" with a safe metadata reason
+    And no Git or SSH transport command is invoked
+
+  @CORE-PROVIDER-005 @CORE-GIT-011
+  Scenario: Explicit repository transport remains separate when API authentication fails
+    Given provider "work" is a configured gitlab provider at "gitlab.example.test" for namespace "team" using "ssh"
+    And the provider rejects authentication
+    When I run `colt auth status work --repository demo`
+    Then status reports the provider API connection as "authentication failed"
+    And repository metadata lookup is not attempted
+    And status reports the transport as "not checked"
+    And no Git or SSH transport command is invoked
+
+  @CORE-PROVIDER-004 @CORE-PROVIDER-005 @CORE-GIT-011 @CORE-CREDENTIAL-002
+  Scenario: Explicit repository rejects provider metadata for another authority or project
+    Given provider "work" is a configured forgejo provider at "forge.example.test" for namespace "team" using "https"
+    And provider API authentication succeeds for provider "work"
+    And repository "demo" metadata supplies HTTPS URL "https://evil.example/other/wrong.git" and SSH URL "git@evil.example:other/wrong.git"
+    When I run `colt auth status work --repository demo`
+    Then status reports the provider API connection as "connected"
+    And status reports the transport as "not checked" with a safe metadata reason
+    And no Git or SSH transport command is invoked
+    And no reusable credential value appears in output, process arguments, the origin, or Git configuration
+
+  @CORE-PROVIDER-005 @CORE-GIT-011
+  Scenario Outline: Contradictory repository status arguments fail before reads
+    Given provider "work" is a configured github provider at "github.com" for namespace "example-user" using "https"
+    When I run `<command>`
+    Then the command fails with an actionable error mentioning "<reason>"
+    And no credential, provider, Git, or SSH read is attempted
+
+    Examples:
+      | command                                           | reason                    |
+      | colt auth status --repository demo                | requires a provider alias |
+      | colt auth status work --repository demo --offline | cannot be used together   |
+
+  @CORE-PROVIDER-005 @CORE-GIT-011
+  Scenario: Provider API success and Git transport failure are reported independently
     Given provider API authentication succeeds for provider "personal"
-    And native Git SSH access fails
-    When repository access is checked
-    Then provider status still reports "connected"
-    And the Git failure is reported separately from provider authentication
+    And the current repository has a matching origin that rejects the configured transport
+    When I run `colt auth status`
+    Then status reports the provider API connection as "connected"
+    And status reports the Git transport failure separately with a safe actionable reason
+    And status does not report the transport as reachable
+
+  @CORE-PROVIDER-005 @CORE-GIT-011
+  Scenario: Git transport success does not imply provider API authentication
+    Given the provider API credential is missing
+    And the current repository has a matching origin reachable through the configured transport
+    When I run `colt auth status`
+    Then status reports "credentials missing" for the provider API connection
+    And status reports the Git transport as reachable separately
+
+  @CORE-PROVIDER-005 @CORE-GIT-011
+  Scenario: Transport is not checked without a matching current origin
+    Given provider API authentication succeeds for provider "personal"
+    And the current directory has no origin matching provider "personal"
+    When I run `colt auth status`
+    Then status reports the provider API connection as "connected"
+    And status reports the transport as "not checked"
+    And no Git or SSH transport command is invoked
+
+  @CORE-PROVIDER-005 @CORE-GIT-011
+  Scenario: Offline status skips API and transport checks
+    Given provider "personal" is configured for SSH transport
+    And the current repository has a matching origin
+    When I run `colt auth status --offline`
+    Then status reports the provider API connection as "not checked"
+    And status reports the transport as "not checked"
+    And no provider, Git, or SSH command is invoked
 
   @CORE-PROVIDER-008 @CORE-CREDENTIAL-007
   Scenario: Logout removes only the selected credential ID
@@ -579,6 +791,16 @@ Feature: Provider configuration and authentication
     Given a managed SSH repository
     Then the Colt credential subsystem holds no SSH private-key material
     And Colt never invokes key generation or agent management
+
+  @unimplemented @CORE-PROVIDER-006 @CORE-GIT-010
+  Scenario: SSH keys do not authenticate GitHub API calls
+    Given the configured Git transport is SSH
+    And native Git SSH access to a repository works
+    And no persisted credential or GitHub token environment variable resolves
+    And standard input is an interactive terminal
+    When I run `colt auth login github personal --credential stored`
+    Then Colt automatically starts GitHub OAuth Device Flow
+    And the SSH key is not used for provider API authentication
 
   @unimplemented @CORE-GIT-010 @CORE-PROVIDER-005
   Scenario: Missing SSH access produces a Git transport failure distinct from provider API authentication

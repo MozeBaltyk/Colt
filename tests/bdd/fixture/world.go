@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -28,25 +29,33 @@ const (
 
 // World is reset for every scenario by the Before hook.
 type World struct {
-	Dir                 string
-	ConfigPath          string
-	App                 *app.App
-	Git                 *FakeGit
-	Client              *FakeClient
-	Credentials         credential.Store
-	FallbackCredentials *credential.FileStore
-	ReadToken           func() (string, error)
-	ConfirmPlaintext    func() (bool, error)
-	NewClient           func(config.Provider, string) (provider.Client, error)
-	Out                 string
-	RunErr              error
-	GlobalGit           string
-	Providers           map[string]config.Provider
+	Dir                   string
+	ConfigPath            string
+	App                   *app.App
+	Git                   *FakeGit
+	Client                *FakeClient
+	Credentials           credential.Store
+	FallbackCredentials   *credential.FileStore
+	ReadToken             func() (string, error)
+	ConfirmPlaintext      func() (bool, error)
+	Interactive           bool
+	Noninteractive        bool
+	Input                 string
+	AuthorizeGitHubDevice func(context.Context, io.Writer) (string, error)
+	NewClient             func(config.Provider, string) (provider.Client, error)
+	Out                   string
+	RunErr                error
+	GlobalGit             string
+	Providers             map[string]config.Provider
 	// Login context for `colt auth login` steps.
-	LoginAlias  string
-	LoginType   string
-	PendingHost string
-	PendingBase string
+	LoginAlias      string
+	LoginType       string
+	PendingHost     string
+	PendingBase     string
+	LoginCredential string
+	LoginNoTokenEnv bool
+	DeviceFlowCalls int
+	Events          []string
 	// Recorded construction calls: proves which credential reached the client.
 	NewClientCalls      []NewClientCall
 	ConfigBefore        []byte
@@ -74,7 +83,7 @@ type RedirectTrap struct {
 	SawAuth bool
 }
 
-var CredentialEnvVars = []string{TokenEnv, "GITHUB_TOKEN", "GITLAB_TOKEN", "COMPANY_GL_TOKEN"}
+var CredentialEnvVars = []string{TokenEnv, "GITHUB_TOKEN", "GITLAB_TOKEN", "COMPANY_GL_TOKEN", "MISSING_TOKEN", "COLT_GITHUB_CLIENT_ID"}
 
 var SandboxEnvVars = []string{
 	"SSH_AUTH_SOCK",
@@ -113,16 +122,24 @@ func (w *World) Reset(t *testing.T) {
 	w.App = nil
 	w.Git = &FakeGit{Real: true}
 	w.Client = &FakeClient{Account: "example-user"}
-	w.Credentials = nil
+	w.Credentials = credential.NewMemoryStore()
 	w.FallbackCredentials = nil
 	w.ReadToken = nil
 	w.ConfirmPlaintext = nil
+	w.Interactive = false
+	w.Noninteractive = false
+	w.Input = ""
+	w.AuthorizeGitHubDevice = nil
 	w.Out = ""
 	w.RunErr = nil
 	w.GlobalGit = ""
 	w.Providers = map[string]config.Provider{}
 	w.LoginAlias, w.LoginType = "work", "gitlab"
 	w.PendingHost, w.PendingBase = "", ""
+	w.LoginCredential = ""
+	w.LoginNoTokenEnv = false
+	w.DeviceFlowCalls = 0
+	w.Events = nil
 	w.NewClientCalls = nil
 	w.ConfigBefore = nil
 	w.Secrets = nil
@@ -138,6 +155,7 @@ func (w *World) Reset(t *testing.T) {
 		w.NewClientCalls = append(w.NewClientCalls, NewClientCall{Provider: p, Token: token})
 		return w.Client, nil
 	}
+	w.Client.Events = &w.Events
 
 	SetEnv(t, "HOME", home)
 	SetEnv(t, "GIT_CONFIG_GLOBAL", os.DevNull)
@@ -162,14 +180,16 @@ func SetEnv(t *testing.T, name, value string) {
 
 func (w *World) BuildApp() {
 	w.App = &app.App{
-		ConfigPath:          w.ConfigPath,
-		WorkDir:             w.Dir,
-		Git:                 w.Git,
-		NewClient:           w.NewClient,
-		Credentials:         w.Credentials,
-		FallbackCredentials: w.FallbackCredentials,
-		ReadToken:           w.ReadToken,
-		ConfirmPlaintext:    w.ConfirmPlaintext,
+		ConfigPath:            w.ConfigPath,
+		WorkDir:               w.Dir,
+		Git:                   w.Git,
+		NewClient:             w.NewClient,
+		Credentials:           w.Credentials,
+		FallbackCredentials:   w.FallbackCredentials,
+		ReadToken:             w.ReadToken,
+		ConfirmPlaintext:      w.ConfirmPlaintext,
+		IsTerminal:            func() bool { return w.Interactive },
+		AuthorizeGitHubDevice: w.AuthorizeGitHubDevice,
 	}
 }
 
@@ -195,8 +215,12 @@ func (w *World) RunArgs(args []string) {
 	w.BuildApp()
 	cmd := w.App.Root()
 	var buf bytes.Buffer
+	cmd.SetIn(strings.NewReader(w.Input))
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
+	if w.Noninteractive {
+		args = append([]string{"--noninteractive"}, args...)
+	}
 	cmd.SetArgs(args)
 	ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
 	defer cancel()
@@ -215,10 +239,15 @@ func (w *World) LoginArgs(extra ...string) []string {
 	if w.PendingHost != "" {
 		args = append(args, "--host", w.PendingHost, "--base-url", w.PendingBase)
 	}
+	if w.LoginCredential != "" {
+		args = append(args, "--credential", w.LoginCredential)
+	}
 	// ponytail: login builds its candidate from flags, not saved config,
-	// so carry the configured token_env over explicitly.
-	if p, ok := w.Providers[w.LoginAlias]; ok && p.Auth.TokenEnv != "" {
-		args = append(args, "--token-env", p.Auth.TokenEnv)
+	// so carry the configured token_env over explicitly unless overridden.
+	if !w.LoginNoTokenEnv {
+		if p, ok := w.Providers[w.LoginAlias]; ok && p.Auth.TokenEnv != "" {
+			args = append(args, "--token-env", p.Auth.TokenEnv)
+		}
 	}
 	return append(args, extra...)
 }

@@ -2,14 +2,17 @@ package steps
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/MozeBaltyk/Colt/internal/config"
@@ -20,6 +23,20 @@ import (
 )
 
 func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
+	configureStatusProvider := func(transport string, stored bool) error {
+		p := fixture.StdProvider("github", "example-user")
+		p.Default, p.Transport = true, transport
+		if stored {
+			p.Auth = config.Auth{Source: "stored", CredentialID: "github.com/personal"}
+			w.Store = fixture.NewFakeCredentialStore()
+			w.Credentials = w.Store
+		} else {
+			p = fixture.WithTokenEnv(p, fixture.TokenEnv)
+		}
+		w.Providers = map[string]config.Provider{"personal": p}
+		w.Git.Real = false
+		return w.SaveConfig()
+	}
 	// --- fixtures ---
 	ctx.Step(`^provider "([^"]*)" has auth source "env" with token_env "([^"]*)"$`, func(alias, tokenEnv string) error {
 		pType := "gitlab"
@@ -86,6 +103,7 @@ func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	})
 	ctx.Step(`^an empty injected credential store is supplied$`, func() error {
 		w.Store = fixture.NewFakeCredentialStore()
+		w.Store.Events = &w.Events
 		w.Credentials = w.Store
 		return nil
 	})
@@ -103,20 +121,266 @@ func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return nil
 	})
 	ctx.Step(`^the user accepts plaintext credential persistence$`, func() error {
+		w.Interactive = true
 		w.ConfirmPlaintext = func() (bool, error) { return true, nil }
 		return nil
 	})
 	ctx.Step(`^the user has not consented to plaintext storage$`, func() error { return nil })
 	ctx.Step(`^the user rejects plaintext credential persistence$`, func() error {
+		w.Interactive = true
 		w.ConfirmPlaintext = func() (bool, error) { return false, nil }
 		return nil
 	})
 	ctx.Step(`^no provider token environment variable resolves$`, func() error {
 		return fixture.UnsetCredentialEnv()
 	})
+	ctx.Step(`^no GitHub token environment variable resolves$`, func() error {
+		return os.Unsetenv("GITHUB_TOKEN")
+	})
+	ctx.Step(`^no persisted credential exists for provider "([^"]*)"$`, func(alias string) error {
+		w.LoginAlias, w.LoginType = alias, "github"
+		w.Store = fixture.NewFakeCredentialStore()
+		w.Credentials = w.Store
+		return nil
+	})
+	ctx.Step(`^no persisted credential or GitHub token environment variable resolves$`, func() error {
+		w.Store = fixture.NewFakeCredentialStore()
+		w.Credentials = w.Store
+		return fixture.UnsetCredentialEnv()
+	})
+	ctx.Step(`^standard input is an interactive terminal$`, func() error {
+		w.Interactive = true
+		w.Input = "example-ns\nExample User\nuser@example.invalid\n"
+		return nil
+	})
+	ctx.Step(`^no legacy GitHub client ID environment variable is configured$`, func() error {
+		return os.Unsetenv("COLT_GITHUB_CLIENT_ID")
+	})
+	ctx.Step(`^the provider authorization flow reports approval for account "([^"]*)"$`, func(account string) error {
+		secret := "bdd-device-secret"
+		w.Secrets = append(w.Secrets, secret)
+		w.Client.Account = account
+		w.Store = fixture.NewFakeCredentialStore()
+		w.Store.Events = &w.Events
+		w.Credentials = w.Store
+		w.AuthorizeGitHubDevice = func(_ context.Context, out io.Writer) (string, error) {
+			w.DeviceFlowCalls++
+			fmt.Fprint(out, "Open: https://github.com/login/device\nCode: BDD-CODE\n")
+			return secret, nil
+		}
+		return nil
+	})
+	ctx.Step(`^the provider authorization flow reports rejection by the user$`, func() error {
+		w.AuthorizeGitHubDevice = func(context.Context, io.Writer) (string, error) {
+			w.DeviceFlowCalls++
+			return "", errors.New("GitHub device authorization was rejected")
+		}
+		return nil
+	})
+	ctx.Step(`^the provider authorization flow reports expiry before approval$`, func() error {
+		w.AuthorizeGitHubDevice = func(context.Context, io.Writer) (string, error) {
+			w.DeviceFlowCalls++
+			return "", errors.New("GitHub device authorization expired")
+		}
+		return nil
+	})
+	ctx.Step("^I pass the root flag `--noninteractive`$", func() error {
+		w.Noninteractive = true
+		if w.Store == nil {
+			w.Store = fixture.NewFakeCredentialStore()
+			w.Credentials = w.Store
+		}
+		return nil
+	})
+	ctx.Step(`^standard input is not a terminal$`, func() error {
+		w.Interactive = false
+		if w.Store == nil {
+			w.Store = fixture.NewFakeCredentialStore()
+			w.Credentials = w.Store
+		}
+		return nil
+	})
+	ctx.Step(`^interactive terminal input supplies "([^"]*)"$`, func(input string) error {
+		w.Interactive = true
+		w.Input = input + "\n"
+		return nil
+	})
 	ctx.Step(`^manual token entry supplies "([^"]*)"$`, func(secret string) error {
+		w.Interactive = true
 		w.Secrets = append(w.Secrets, secret)
 		w.ReadToken = func() (string, error) { return secret, nil }
+		return nil
+	})
+	ctx.Step(`^the command fails with an error mentioning "([^"]*)"$`, func(want string) error {
+		if w.RunErr == nil || !strings.Contains(w.RunErr.Error(), want) {
+			return fmt.Errorf("expected error containing %q, got %v", want, w.RunErr)
+		}
+		return nil
+	})
+	ctx.Step(`^the login command does not carry the provider token environment variable$`, func() error {
+		w.LoginNoTokenEnv = true
+		return nil
+	})
+	ctx.Step(`^the command fails with a token validation error$`, func() error {
+		if w.RunErr == nil || !strings.Contains(strings.ToLower(w.RunErr.Error()), "invalid") {
+			return fmt.Errorf("expected token validation error, got %v", w.RunErr)
+		}
+		return nil
+	})
+	ctx.Step(`^Colt automatically starts GitHub OAuth Device Flow$`, func() error {
+		if w.DeviceFlowCalls != 1 {
+			return fmt.Errorf("device flow calls = %d", w.DeviceFlowCalls)
+		}
+		return nil
+	})
+	ctx.Step(`^Colt does not start GitHub OAuth Device Flow$`, func() error {
+		if w.DeviceFlowCalls != 0 {
+			return fmt.Errorf("device flow calls = %d", w.DeviceFlowCalls)
+		}
+		return nil
+	})
+	ctx.Step(`^Colt displays the authorization URL and user code$`, func() error {
+		if !strings.Contains(w.Out, "https://github.com/login/device") || !strings.Contains(w.Out, "BDD-CODE") {
+			return fmt.Errorf("device instructions missing from %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^Colt identifies the authenticated account as "([^"]*)"$`, func(account string) error {
+		if !strings.Contains(w.Out, "authenticated as "+account) {
+			return fmt.Errorf("account %q missing from %q", account, w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^the resulting API token is authenticated before persistence$`, func() error {
+		if len(w.Events) < 2 || w.Events[0] != "authenticate" || w.Events[1] != "persist" {
+			return fmt.Errorf("authentication/persistence order = %v", w.Events)
+		}
+		return nil
+	})
+	ctx.Step(`^no credential is persisted$`, func() error {
+		if w.FallbackCredentials != nil {
+			if _, getErr := w.FallbackCredentials.Get("github.com/personal"); getErr == nil {
+				return fmt.Errorf("credential was persisted in fallback file")
+			}
+		}
+		if w.Store != nil {
+			if _, getErr := w.Store.Get("github.com/personal"); getErr == nil {
+				return fmt.Errorf("credential was persisted in store")
+			}
+		}
+		return nil
+	})
+	ctx.Step(`^the token is persisted in the available secure-store double$`, func() error {
+		if w.Store == nil || w.Store.Puts != 1 || w.FallbackCredentials != nil {
+			return fmt.Errorf("unexpected persistence: store=%#v fallback=%v", w.Store, w.FallbackCredentials != nil)
+		}
+		got, ok := w.Store.Credentials["github.com/personal"]
+		token, called := w.LastToken()
+		if !ok || !called || got.Secret != token {
+			return fmt.Errorf("persisted credential does not match the authenticated token")
+		}
+		return nil
+	})
+	ctx.Step(`^the configured Git transport remains "(ssh|https)"$`, func(transport string) error {
+		cfg, err := config.Load(w.ConfigPath)
+		if err != nil || cfg.Providers["personal"].Transport != transport {
+			return fmt.Errorf("transport=%q: %v", cfg.Providers["personal"].Transport, err)
+		}
+		return nil
+	})
+	ctx.Step(`^the command fails with an actionable missing-credential error$`, func() error {
+		if w.RunErr == nil || !strings.Contains(w.RunErr.Error(), "no stored credential") || !strings.Contains(w.RunErr.Error(), "--token-env") {
+			return fmt.Errorf("expected actionable missing-credential error, got %v", w.RunErr)
+		}
+		return nil
+	})
+	ctx.Step(`^no reusable credential value appears in output$`, func() error {
+		if secret := w.Leaked(w.Out); secret != "" {
+			return fmt.Errorf("output contains registered credential %q", secret)
+		}
+		return nil
+	})
+	ctx.Step(`^login prompts are exactly "([^"]*)" in that order$`, func(prompts string) error {
+		if !strings.HasPrefix(w.Out, prompts) {
+			return fmt.Errorf("output %q does not start with prompts %q", w.Out, prompts)
+		}
+		return nil
+	})
+	ctx.Step(`^the supplied login values are saved$`, func() error {
+		cfg, err := config.Load(w.ConfigPath)
+		p := cfg.Providers["personal"]
+		if err != nil || p.Namespace != "example-ns" || p.GitName != "Example User" || p.GitEmail != "user@example.invalid" {
+			return fmt.Errorf("provider=%+v: %v", p, err)
+		}
+		return nil
+	})
+	ctx.Step(`^optional visibility and transport defaults are unchanged$`, func() error {
+		cfg, err := config.Load(w.ConfigPath)
+		p := cfg.Providers["personal"]
+		if err != nil || p.Visibility != "private" || p.Transport != "" {
+			return fmt.Errorf("provider defaults=%+v: %v", p, err)
+		}
+		return nil
+	})
+	ctx.Step(`^the prompt is exactly "([^"]*)"$`, func(prompt string) error {
+		if !strings.HasPrefix(w.Out, prompt) {
+			return fmt.Errorf("output %q does not start with prompt %q", w.Out, prompt)
+		}
+		return nil
+	})
+	ctx.Step(`^the output starts with the exact prompt "([^"]*)"$`, func(prompt string) error {
+		if !strings.HasPrefix(w.Out, prompt) {
+			return fmt.Errorf("output %q does not start with prompt %q", w.Out, prompt)
+		}
+		return nil
+	})
+	ctx.Step(`^the missing-input error lists "([^"]*)" in that order$`, func(list string) error {
+		if w.RunErr == nil {
+			return errors.New("expected missing-input error")
+		}
+		position := 0
+		for _, name := range strings.Split(list, ", ") {
+			next := strings.Index(w.RunErr.Error()[position:], name)
+			if next < 0 {
+				return fmt.Errorf("%q missing or out of order in %q", name, w.RunErr)
+			}
+			position += next + len(name)
+		}
+		return nil
+	})
+	ctx.Step(`^no prompt or interactive authorization flow starts$`, func() error {
+		if w.Out != "" || w.DeviceFlowCalls != 0 {
+			return fmt.Errorf("output=%q device flow calls=%d", w.Out, w.DeviceFlowCalls)
+		}
+		return nil
+	})
+	ctx.Step(`^no config, credential, provider, or Git mutation occurs$`, func() error {
+		data, err := os.ReadFile(w.ConfigPath)
+		if errors.Is(err, os.ErrNotExist) {
+			data, err = nil, nil
+		}
+		if err != nil || string(data) != string(w.ConfigBefore) || len(w.NewClientCalls) != 0 || len(w.Git.Operations) != 0 || (w.Store != nil && (w.Store.Puts != 0 || w.Store.Deletes != 0)) {
+			return fmt.Errorf("config error=%v clients=%d git=%v store=%#v", err, len(w.NewClientCalls), w.Git.Operations, w.Store)
+		}
+		return nil
+	})
+	ctx.Step(`^the command fails with an invalid-input error, not a missing-input error$`, func() error {
+		if w.RunErr == nil || !strings.Contains(strings.ToLower(w.RunErr.Error()), "invalid") || strings.Contains(w.RunErr.Error(), "missing required input") {
+			return fmt.Errorf("expected invalid-input error, got %v", w.RunErr)
+		}
+		return nil
+	})
+	ctx.Step(`^the injected stored credential for "([^"]*)" still has secret "([^"]*)"$`, func(id, secret string) error {
+		if w.Store == nil {
+			return fmt.Errorf("no injected store configured")
+		}
+		got, err := w.Store.Get(id)
+		if err != nil {
+			return fmt.Errorf("credential missing: %v", err)
+		}
+		if got.Secret != secret {
+			return fmt.Errorf("credential secret changed to %q", got.Secret)
+		}
 		return nil
 	})
 	ctx.Step(`^the injected credential store also holds "([^"]*)" with secret "([^"]*)"$`, func(id, secret string) error {
@@ -213,6 +477,11 @@ func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return nil
 	})
 	ctx.Step(`^"([^"]*)" contains "([^"]*)"$`, func(name, value string) error {
+		// Interpret common escape sequences so feature files can express
+		// values that contain newlines, tabs, or literal backslashes.
+		value = strings.ReplaceAll(value, `\n`, "\n")
+		value = strings.ReplaceAll(value, `\t`, "\t")
+		value = strings.ReplaceAll(value, `\\`, "\\")
 		w.SetSecret(name, value)
 		return nil
 	})
@@ -243,14 +512,40 @@ func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		}
 		return nil
 	})
+	ctx.Step(`^the command fails with an authorization error$`, func() error {
+		if w.RunErr == nil || !strings.Contains(strings.ToLower(w.RunErr.Error()), "authorization") {
+			return fmt.Errorf("expected authorization error, got %v", w.RunErr)
+		}
+		return nil
+	})
 	ctx.Step(`^provider "work" is configured with a valid credential$`, func() error {
 		w.Providers = map[string]config.Provider{"work": fixture.WithTokenEnv(fixture.StdProvider("gitlab", "example-ns"), fixture.TokenEnv)}
 		w.LoginAlias, w.LoginType = "work", "gitlab"
 		return w.SaveConfig()
 	})
 	ctx.Step(`^provider API authentication succeeds for provider "work"$`, func() error {
-		w.Providers = map[string]config.Provider{"work": fixture.WithTokenEnv(fixture.StdProvider("gitlab", "example-ns"), fixture.TokenEnv)}
+		if _, ok := w.Providers["work"]; !ok {
+			w.Providers = map[string]config.Provider{"work": fixture.WithTokenEnv(fixture.StdProvider("gitlab", "example-ns"), fixture.TokenEnv)}
+		}
 		return w.SaveConfig()
+	})
+	ctx.Step(`^provider "work" is a configured (github|gitlab|gitea|forgejo) provider at "([^"]*)" for namespace "([^"]*)" using "(https|ssh)"$`, func(providerType, host, namespace, transport string) error {
+		p := fixture.WithTokenEnv(fixture.StdProvider(providerType, namespace), fixture.TokenEnv)
+		p.Host, p.BaseURL, p.Transport = host, "https://"+host, transport
+		if providerType == "github" {
+			p.BaseURL = "https://api.github.com"
+		}
+		w.Providers = map[string]config.Provider{"work": p}
+		w.Git.Real = false
+		return w.SaveConfig()
+	})
+	ctx.Step(`^repository "([^"]*)" metadata supplies HTTPS URL "([^"]*)" and SSH URL "([^"]*)"$`, func(_ /* project */, httpsURL, sshURL string) error {
+		w.Client.GetRepo = &provider.Repository{CloneURL: httpsURL, SSHURL: sshURL}
+		return nil
+	})
+	ctx.Step(`^repository "([^"]*)" metadata cannot be obtained$`, func(_ string) error {
+		w.Client.GetErr = errors.New("provider metadata unavailable")
+		return nil
 	})
 	ctx.Step(`^provider "work" has no environment credential and no persisted credential$`, func() error {
 		w.Providers = map[string]config.Provider{"work": fixture.StdProvider("gitlab", "example-ns")}
@@ -333,6 +628,7 @@ func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	ctx.Step(`^interactive authentication succeeds$`, func() error {
 		secret := "plaintext-consented-secret"
 		w.Secrets = append(w.Secrets, secret)
+		w.Interactive = true
 		w.ReadToken = func() (string, error) { return secret, nil }
 		w.RunArgs(w.LoginArgs())
 		return nil
@@ -437,6 +733,241 @@ func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		}
 		if secret := w.Leaked(string(data)); secret != "" {
 			return fmt.Errorf("config leaks a credential value")
+		}
+		return nil
+	})
+	ctx.Step(`^no reusable credential value appears in output or config$`, func() error {
+		if err := checkOfflineClean(w); err != nil {
+			return err
+		}
+		data, err := os.ReadFile(w.ConfigPath)
+		if err != nil {
+			return err
+		}
+		if secret := w.Leaked(string(data)); secret != "" {
+			return fmt.Errorf("config leaks a credential value")
+		}
+		return nil
+	})
+	ctx.Step(`^provider "personal" has a valid API credential$`, func() error {
+		return configureStatusProvider("https", false)
+	})
+	ctx.Step(`^provider API authentication succeeds for provider "personal"$`, func() error {
+		return configureStatusProvider("https", false)
+	})
+	ctx.Step(`^provider "personal" is configured for (HTTPS|SSH) transport$`, func(transport string) error {
+		p := w.Providers["personal"]
+		if p.Type == "" {
+			p = fixture.WithTokenEnv(fixture.StdProvider("github", "example-user"), fixture.TokenEnv)
+			p.Default = true
+		}
+		p.Transport = strings.ToLower(transport)
+		w.Providers["personal"] = p
+		if transport == "SSH" {
+			sshDir := filepath.Join(os.Getenv("HOME"), ".ssh")
+			if err := os.MkdirAll(sshDir, 0o700); err != nil {
+				return err
+			}
+			w.SSHState = map[string][]byte{filepath.Join(sshDir, "config"): []byte("Host github.com\n"), filepath.Join(sshDir, "id_test"): []byte("test-key")}
+			for path, data := range w.SSHState {
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					return err
+				}
+			}
+			w.SSHAgent = filepath.Join(w.Dir, "agent.sock")
+			if err := os.Setenv("SSH_AUTH_SOCK", w.SSHAgent); err != nil {
+				return err
+			}
+		}
+		return w.SaveConfig()
+	})
+	ctx.Step(`^the current repository origin is "([^"]*)"$`, func(origin string) error {
+		w.Git.Real, w.Git.OriginURL = false, origin
+		return nil
+	})
+	ctx.Step(`^the current repository has a matching origin that rejects the configured transport$`, func() error {
+		w.Git.Real = false
+		w.Git.OriginURL = "https://github.com/example-user/demo.git"
+		w.Git.LsRemoteErr = errors.New("access denied")
+		return nil
+	})
+	ctx.Step(`^the current repository has a matching origin reachable through the configured transport$`, func() error {
+		w.Git.Real = false
+		w.Git.OriginURL = "git@github.com:example-user/demo.git"
+		return nil
+	})
+	ctx.Step(`^the current directory has no origin matching provider "personal"$`, func() error {
+		w.Git.Real = false
+		w.Git.OriginURL = "https://example.org/example-user/demo.git"
+		return nil
+	})
+	ctx.Step(`^the current repository has a matching origin$`, func() error {
+		p := w.Providers["personal"]
+		if p.Transport == "ssh" {
+			w.Git.OriginURL = "git@github.com:example-user/demo.git"
+		} else {
+			w.Git.OriginURL = "https://github.com/example-user/demo.git"
+		}
+		w.Git.Real = false
+		return nil
+	})
+	ctx.Step(`^the provider API credential is missing$`, func() error {
+		return configureStatusProvider("ssh", true)
+	})
+	ctx.Step(`^status reports the provider API connection as "([^"]*)"$`, func(state string) error {
+		want := state
+		if state == "connected" {
+			want = "✓ connected"
+		} else if state != "not checked" {
+			want = "✗ " + state
+		}
+		if !strings.Contains(w.Out, "Connection:  "+want) {
+			return fmt.Errorf("connection state %q missing from %q", state, w.Out)
+		}
+		return nil
+	})
+	ctx.Step("^Colt runs bounded noninteractive `git ls-remote` against the current origin$", func() error {
+		if !w.Git.ProbeBounded || len(w.Git.Operations) == 0 || !strings.HasPrefix(w.Git.Operations[len(w.Git.Operations)-1], "ls-remote:"+w.Git.OriginURL) {
+			return fmt.Errorf("transport probe was not bounded or exact: operations=%v bounded=%v", w.Git.Operations, w.Git.ProbeBounded)
+		}
+		return nil
+	})
+	ctx.Step(`^Colt runs bounded noninteractive `+"`git ls-remote`"+` against "([^"]*)"$`, func(target string) error {
+		if !w.Git.ProbeBounded || !slices.Contains(w.Git.Operations, "ls-remote:"+target) {
+			return fmt.Errorf("transport probe was not bounded or exact: operations=%v bounded=%v", w.Git.Operations, w.Git.ProbeBounded)
+		}
+		return nil
+	})
+	ctx.Step(`^the provider client looks up repository "([^"]*)"$`, func(project string) error {
+		if !w.Client.Called("Get:" + project) {
+			return fmt.Errorf("repository lookup missing: %v", w.Client.Calls)
+		}
+		return nil
+	})
+	ctx.Step(`^repository metadata lookup is not attempted$`, func() error {
+		if w.Client.Called("Get") {
+			return fmt.Errorf("unexpected repository lookup: %v", w.Client.Calls)
+		}
+		return nil
+	})
+	ctx.Step(`^status reports Git authentication/connectivity and read access for clone, fetch, and pull$`, func() error {
+		if !strings.Contains(w.Out, "Git authentication/connectivity and read access confirmed (clone/fetch/pull)") {
+			return fmt.Errorf("Git read-access result missing from %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^status does not claim push or write permission was validated$`, func() error {
+		if !strings.Contains(w.Out, "push/write not checked") || strings.Contains(w.Out, "push/write confirmed") || strings.Contains(w.Out, "write access confirmed") {
+			return fmt.Errorf("unsafe write-access claim in %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^the HTTPS transport probe uses the transient Colt credential helper$`, func() error {
+		if w.Git.ProbeAlias != "personal" || w.Git.ProbeProject != "demo" {
+			return fmt.Errorf("probe scope=%s/%s", w.Git.ProbeAlias, w.Git.ProbeProject)
+		}
+		return nil
+	})
+	ctx.Step(`^native Git uses the user's SSH configuration and keys without a provider token$`, func() error {
+		if w.Git.ProbeAlias != "personal" || w.Git.ProbeProject != "demo" {
+			return fmt.Errorf("SSH probe scope=%s/%s", w.Git.ProbeAlias, w.Git.ProbeProject)
+		}
+		return nil
+	})
+	ctx.Step(`^status reports the transport as "([^"]*)"$`, func(state string) error {
+		if !strings.Contains(w.Out, "Transport:   "+state) {
+			return fmt.Errorf("transport state %q missing from %q", state, w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^status reports the transport as "not checked" with a safe metadata reason$`, func() error {
+		if !strings.Contains(w.Out, "Transport:   not checked") || (!strings.Contains(w.Out, "metadata unavailable") && !strings.Contains(w.Out, "unexpected clone target")) {
+			return fmt.Errorf("safe metadata result missing from %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^status reports the Git transport failure separately with a safe actionable reason$`, func() error {
+		if !strings.Contains(w.Out, "Transport:   HTTPS · origin unreachable; check repository access and connectivity") {
+			return fmt.Errorf("safe transport failure missing from %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^status does not report the transport as reachable$`, func() error {
+		if strings.Contains(w.Out, "read access confirmed") {
+			return fmt.Errorf("transport incorrectly reachable: %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^status reports "credentials missing" for the provider API connection$`, func() error {
+		if !strings.Contains(w.Out, "Connection:  ✗ credentials missing") {
+			return fmt.Errorf("missing credential state absent: %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^status reports the Git transport as reachable separately$`, func() error {
+		if !strings.Contains(w.Out, "Transport:   SSH · ✓ Git authentication/connectivity and read access confirmed") {
+			return fmt.Errorf("independent transport result absent: %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^no Git or SSH transport command is invoked$`, func() error {
+		for _, operation := range w.Git.Operations {
+			if strings.HasPrefix(operation, "ls-remote:") {
+				return fmt.Errorf("transport command invoked: %v", w.Git.Operations)
+			}
+		}
+		return nil
+	})
+	ctx.Step(`^no provider, Git, or SSH command is invoked$`, func() error {
+		if len(w.NewClientCalls) != 0 || len(w.Git.Operations) != 0 {
+			return fmt.Errorf("offline access occurred: clients=%d git=%v", len(w.NewClientCalls), w.Git.Operations)
+		}
+		return nil
+	})
+	ctx.Step(`^the command fails with an actionable error mentioning "([^"]*)"$`, func(want string) error {
+		if w.RunErr == nil || !strings.Contains(w.RunErr.Error(), want) {
+			return fmt.Errorf("expected error containing %q, got %v", want, w.RunErr)
+		}
+		return nil
+	})
+	ctx.Step(`^no credential, provider, Git, or SSH read is attempted$`, func() error {
+		gets := 0
+		if w.Store != nil {
+			gets = w.Store.Gets
+		}
+		if gets != 0 || len(w.NewClientCalls) != 0 || len(w.Client.Calls) != 0 || len(w.Git.Operations) != 0 {
+			return fmt.Errorf("unexpected read: credentials=%d clients=%d provider=%v git=%v", gets, len(w.NewClientCalls), w.Client.Calls, w.Git.Operations)
+		}
+		return nil
+	})
+	ctx.Step(`^no reusable credential value appears in output, process arguments, the origin, or Git configuration$`, func() error {
+		if secret := w.Leaked(w.Out + w.Git.OriginURL + strings.Join(w.Git.Operations, " ")); secret != "" {
+			return fmt.Errorf("transport probe leaked a credential")
+		}
+		return nil
+	})
+	ctx.Step(`^Colt does not modify SSH configuration, keys, agents, or host verification$`, func() error {
+		if len(w.SSHState) == 0 || os.Getenv("SSH_AUTH_SOCK") != w.SSHAgent {
+			return errors.New("SSH state was not preserved")
+		}
+		for path, before := range w.SSHState {
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) {
+				return fmt.Errorf("SSH file changed: %s", path)
+			}
+		}
+		return nil
+	})
+	ctx.Step(`^no provider configuration is changed$`, func() error {
+		data, err := os.ReadFile(w.ConfigPath)
+		if errors.Is(err, os.ErrNotExist) && len(w.ConfigBefore) == 0 {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if string(data) != string(w.ConfigBefore) {
+			return fmt.Errorf("provider configuration was changed")
 		}
 		return nil
 	})
@@ -772,7 +1303,7 @@ func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return nil
 	})
 	ctx.Step(`^"connected" means only the provider API check passed$`, func() error {
-		if !strings.Contains(w.Out, "connected") || !w.Client.Called("Authenticate") || len(w.Git.Operations) != 0 {
+		if !strings.Contains(w.Out, "connected") || !w.Client.Called("Authenticate") || slices.ContainsFunc(w.Git.Operations, func(op string) bool { return strings.HasPrefix(op, "ls-remote:") }) {
 			return fmt.Errorf("status was not API-only: provider=%v git=%v output=%q", w.Client.Calls, w.Git.Operations, w.Out)
 		}
 		return nil

@@ -132,6 +132,49 @@ func TestCORE_PROVIDER_003GitLabConfiguredBaseAndSafeNamespace(t *testing.T) {
 	}
 }
 
+func TestCreateVisibilityOverridePayloadForEveryProvider(t *testing.T) {
+	for _, kind := range []string{"github", "gitlab", "gitea", "forgejo"} {
+		t.Run(kind, func(t *testing.T) {
+			var server *httptest.Server
+			server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/user", "/api/v1/user":
+					fmt.Fprint(w, `{"login":"team"}`)
+				case "/api/v4/namespaces/team":
+					fmt.Fprint(w, `{"id":42,"full_path":"team"}`)
+				case "/user/repos", "/api/v4/projects", "/api/v1/user/repos":
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Errorf("decode create body: %v", err)
+						return
+					}
+					if kind == "gitlab" {
+						if body["visibility"] != "public" {
+							t.Errorf("visibility override body = %#v", body)
+						}
+					} else if body["private"] != false {
+						t.Errorf("visibility override body = %#v", body)
+					}
+					fmt.Fprintf(w, `{"clone_url":%q,"http_url_to_repo":%q}`, server.URL+"/team/demo.git", server.URL+"/team/demo.git")
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			settings := testSettings(kind, server.URL)
+			settings.Namespace, settings.Visibility = "team", "private"
+			client, err := New(settings, "token", server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Create(context.Background(), "demo", "public"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestCORE_PROVIDER_004CrossHostRedirectNeverReceivesCredentials(t *testing.T) {
 	for _, kind := range []string{"github", "gitlab"} {
 		t.Run(kind, func(t *testing.T) {

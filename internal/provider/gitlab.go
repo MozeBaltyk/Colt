@@ -26,7 +26,7 @@ func (gitlabAdapter) get(ctx context.Context, c *client, project string) (*Repos
 	return c.get(ctx, "/api/v4/projects/"+url.PathEscape(c.settings.Namespace+"/"+project))
 }
 
-func (gitlabAdapter) create(ctx context.Context, c *client, project string) (*Repository, error) {
+func (gitlabAdapter) create(ctx context.Context, c *client, project, visibility string) (*Repository, error) {
 	var namespace struct {
 		ID       int64  `json:"id"`
 		FullPath string `json:"full_path"`
@@ -37,5 +37,9 @@ func (gitlabAdapter) create(ctx context.Context, c *client, project string) (*Re
 	if namespace.ID <= 0 || namespace.FullPath != c.settings.Namespace {
 		return nil, fmt.Errorf("resolve namespace %q: provider returned a different namespace", c.settings.Namespace)
 	}
-	return c.create(ctx, "/api/v4/projects", map[string]any{"name": project, "namespace_id": namespace.ID, "visibility": c.settings.Visibility})
+	return c.create(ctx, "/api/v4/projects", map[string]any{"name": project, "namespace_id": namespace.ID, "visibility": visibility})
+}
+
+func (gitlabAdapter) revoke(context.Context, *client, RevocationOptions) error {
+	return ErrRevocationUnsupported
 }

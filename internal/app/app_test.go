@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,6 +40,143 @@ func execute(t *testing.T, a *App, args ...string) (string, error) {
 	cmd.SetArgs(args)
 	err := cmd.ExecuteContext(context.Background())
 	return output.String(), err
+}
+
+func executeInput(t *testing.T, a *App, input string, args ...string) (string, error) {
+	t.Helper()
+	cmd := a.Root()
+	var output bytes.Buffer
+	cmd.SetIn(strings.NewReader(input))
+	cmd.SetOut(&output)
+	cmd.SetErr(&output)
+	cmd.SetArgs(args)
+	err := cmd.ExecuteContext(context.Background())
+	return output.String(), err
+}
+
+func TestInteractiveRequiredInputsAndNoninteractiveErrors(t *testing.T) {
+	t.Run("login prompt order and defaults", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		t.Setenv("GITHUB_TOKEN", "prompt-test-token")
+		a := &App{ConfigPath: path, IsTerminal: func() bool { return true }, NewClient: func(p config.Provider, token string) (provider.Client, error) {
+			if p.Visibility != "private" || p.Transport != "" || token != "prompt-test-token" {
+				t.Fatalf("provider=%+v token=%q", p, token)
+			}
+			return &fakeClient{account: "octocat"}, nil
+		}}
+		output, err := executeInput(t, a, "github\npersonal\noctocat\nTest User\ntest@example.com\n", "auth", "login")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "provider: alias: namespace: git-name: git-email: "
+		if !strings.HasPrefix(output, want) || strings.Contains(output, "visibility:") || strings.Contains(output, "transport:") {
+			t.Fatalf("output=%q", output)
+		}
+	})
+
+	t.Run("noninteractive lists all missing input and does not mutate", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		store := &recordingStore{credentials: map[string]credential.Credential{}}
+		clientCalls := 0
+		a := &App{ConfigPath: path, Credentials: store, IsTerminal: func() bool { return true }, NewClient: func(config.Provider, string) (provider.Client, error) {
+			clientCalls++
+			return &fakeClient{}, nil
+		}}
+		output, err := executeInput(t, a, "ignored\n", "--noninteractive", "auth", "login")
+		for _, want := range []string{"provider", "alias", "--namespace", "--git-name", "--git-email"} {
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("error=%v missing %q", err, want)
+			}
+		}
+		if output != "" || clientCalls != 0 || store.gets != 0 || store.puts != 0 {
+			t.Fatalf("output=%q clients=%d store=%#v", output, clientCalls, store)
+		}
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("config mutated: %v", statErr)
+		}
+	})
+
+	t.Run("init and logout prompt for positional values", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "config.yaml")
+		p := appProvider()
+		p.Default = true
+		writeAppConfig(t, path, p)
+		runner := &fakeGit{}
+		a := &App{ConfigPath: path, WorkDir: root, Git: runner, IsTerminal: func() bool { return true }}
+		output, err := executeInput(t, a, "demo\n", "init", "--local")
+		if err != nil || !strings.HasPrefix(output, "project: ") || len(runner.calls) == 0 {
+			t.Fatalf("error=%v output=%q calls=%v", err, output, runner.calls)
+		}
+		output, err = executeInput(t, a, "work\n", "auth", "logout")
+		if err != nil || !strings.HasPrefix(output, "alias: ") {
+			t.Fatalf("error=%v output=%q", err, output)
+		}
+	})
+
+	t.Run("explicit invalid project is not prompted", func(t *testing.T) {
+		a := &App{IsTerminal: func() bool { return true }}
+		output, err := executeInput(t, a, "replacement\n", "init", "")
+		if err == nil || !strings.Contains(err.Error(), "invalid project") || !strings.Contains(output, "Preflight: failed") {
+			t.Fatalf("error=%v output=%q", err, output)
+		}
+	})
+
+	t.Run("non-TTY init and logout fail before mutation", func(t *testing.T) {
+		runner := &fakeGit{}
+		store := &recordingStore{credentials: map[string]credential.Credential{}}
+		a := &App{ConfigPath: filepath.Join(t.TempDir(), "config.yaml"), Git: runner, Credentials: store}
+		for _, args := range [][]string{{"init", "--local"}, {"auth", "logout"}} {
+			output, err := executeInput(t, a, "ignored\n", args...)
+			if err == nil || !strings.Contains(err.Error(), "missing required input") || output != "" || len(runner.calls) != 0 || store.gets != 0 || store.puts != 0 {
+				t.Fatalf("args=%v error=%v output=%q git=%v store=%#v", args, err, output, runner.calls, store)
+			}
+		}
+	})
+}
+
+func TestInvalidExplicitLoginInputPrecedesPromptsAndMissingInput(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"provider", []string{"auth", "login", "bitbucket"}},
+		{"empty provider", []string{"auth", "login", ""}},
+		{"empty alias", []string{"auth", "login", "github", ""}},
+		{"visibility", []string{"auth", "login", "github", "personal", "--visibility", "internal"}},
+		{"transport", []string{"auth", "login", "github", "personal", "--transport", "ftp"}},
+		{"credential", []string{"auth", "login", "github", "personal", "--credential", "file"}},
+		{"token environment", []string{"auth", "login", "github", "personal", "--token-env", "BAD-NAME"}},
+		{"namespace", []string{"auth", "login", "github", "personal", "--namespace", "../bad"}},
+		{"host", []string{"auth", "login", "github", "personal", "--host", "https://github.com"}},
+		{"base URL", []string{"auth", "login", "github", "personal", "--base-url", "http://api.github.com"}},
+		{"git email", []string{"auth", "login", "github", "personal", "--git-email", "not-an-email"}},
+	}
+	for _, tc := range tests {
+		for _, noninteractive := range []bool{false, true} {
+			name := map[bool]string{false: "interactive", true: "noninteractive"}[noninteractive]
+			t.Run(tc.name+"/"+name, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "config.yaml")
+				store := &recordingStore{credentials: map[string]credential.Credential{}}
+				clients := 0
+				a := &App{ConfigPath: path, Credentials: store, IsTerminal: func() bool { return true }, NewClient: func(config.Provider, string) (provider.Client, error) {
+					clients++
+					return &fakeClient{}, nil
+				}}
+				args := append([]string(nil), tc.args...)
+				if noninteractive {
+					args = append([]string{"--noninteractive"}, args...)
+				}
+				output, err := executeInput(t, a, "replacement\nvalues\n", args...)
+				if err == nil || strings.Contains(err.Error(), "missing required input") || output != "" || clients != 0 || store.gets != 0 || store.puts != 0 {
+					t.Fatalf("error=%v output=%q clients=%d store=%#v", err, output, clients, store)
+				}
+				if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("config mutated: %v", statErr)
+				}
+			})
+		}
+	}
 }
 
 func TestAuthHelpUsesLoginLogoutAndStatus(t *testing.T) {
@@ -589,6 +728,14 @@ func TestINIT_006_007RemoteWorkflow(t *testing.T) {
 	if !strings.Contains(output, filepath.Join("team", "demo")) {
 		t.Fatalf("output does not preserve namespace/project path: %q", output)
 	}
+	position := 0
+	for _, step := range []string{"Preflight", "Resolve provider API credential", "Look up remote repository", "Create remote repository", "Clone remote repository", "Set repository-local identity", "Create initial commit", "Configure HTTPS credential helper", "Push initial commit"} {
+		next := strings.Index(output[position:], "✓ "+step+": succeeded")
+		if next < 0 {
+			t.Fatalf("ordered step %q missing from %q", step, output)
+		}
+		position += next + len(step)
+	}
 }
 
 func TestRemoteInitDefaultsToHomeAndSupportsExplicitDestination(t *testing.T) {
@@ -785,7 +932,7 @@ func TestCORE_GIT_003RejectsUnexpectedProviderRepository(t *testing.T) {
 	runner := &fakeGit{}
 	client := &fakeClient{getErr: provider.ErrNotFound, created: &provider.Repository{CloneURL: "https://gitlab.com/other/demo.git"}}
 	_, err := execute(t, testApp(configPath, root, runner, client), "init", "demo")
-	if err == nil || !strings.Contains(err.Error(), "different authority or repository") || strings.Contains(strings.Join(runner.calls, ","), "origin") {
+	if err == nil || !strings.Contains(err.Error(), "partial failure at validate remote repository") || strings.Contains(strings.Join(runner.calls, ","), "origin") {
 		t.Fatalf("error=%v calls=%v", err, runner.calls)
 	}
 }
@@ -950,7 +1097,7 @@ func TestCloneCredentialHelperDisambiguatesSharedHostAndNamespace(t *testing.T) 
 }
 
 func TestPutCredentialConcurrentCreateAndRollbackOwnership(t *testing.T) {
-	store := credential.NewMemoryStore()
+	store := &recordingStore{credentials: map[string]credential.Credential{}}
 	type result struct {
 		rollback func() error
 		err      error
@@ -1067,21 +1214,114 @@ func TestINIT_009CORE_FAILURE_001PushFailurePreservesAndReportsState(t *testing.
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.yaml")
 	writeAppConfig(t, configPath, appProvider())
-	runner := &fakeGit{pushErr: errors.New("push denied")}
+	secret := "ghp_do-not-print"
+	runner := &fakeGit{pushErr: errors.New("remote hung up; Authorization: Bearer " + secret)}
 	client := &fakeClient{getErr: provider.ErrNotFound, created: &provider.Repository{CloneURL: "https://gitlab.com/team/demo.git"}}
 	a := testApp(configPath, root, runner, client)
-	_, err := execute(t, a, "init", "demo")
+	output, err := execute(t, a, "init", "demo")
 	if err == nil {
 		t.Fatal("push failure succeeded")
 	}
-	message := err.Error()
-	for _, want := range []string{"partial failure at push", "local state preserved", "remote state: created", "git push --set-upstream origin HEAD", "push denied"} {
-		if !strings.Contains(message, want) {
-			t.Fatalf("error %q missing %q", message, want)
+	if !ErrorReported(err) {
+		t.Fatalf("failure was not marked as already reported: %v", err)
+	}
+	for _, want := range []string{"✓ Create initial commit: succeeded", "✓ Configure HTTPS credential helper: succeeded", "✗ Push initial commit: failed", "initial commit deadbeef preserved", "Remote state: created", "Cause: connectivity failure", "git push --set-upstream origin HEAD"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output %q missing %q", output, want)
 		}
 	}
-	if strings.Contains(message, "test-secret-token") || !strings.Contains(strings.Join(runner.calls, ","), "clone:") {
-		t.Fatalf("unsafe or incomplete partial state: %v calls=%v", err, runner.calls)
+	if strings.Contains(output, secret) || strings.Contains(output, "Authorization") || strings.Contains(err.Error(), secret) || !strings.Contains(strings.Join(runner.calls, ","), "clone:") {
+		t.Fatalf("unsafe or incomplete partial state: %v output=%q calls=%v", err, output, runner.calls)
+	}
+}
+
+func TestINIT_011ReportColorAndOrderedApplicableSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name, noColor  string
+		terminal, ansi bool
+	}{
+		{name: "TTY", terminal: true, ansi: true},
+		{name: "TTY NO_COLOR", terminal: true, noColor: "1"},
+		{name: "non-TTY"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "config.yaml")
+			writeAppConfig(t, path, appProvider())
+			t.Setenv("NO_COLOR", tc.noColor)
+			if tc.name != "TTY NO_COLOR" {
+				os.Unsetenv("NO_COLOR")
+			}
+			a := testApp(path, root, &fakeGit{}, &fakeClient{})
+			a.IsOutputTerminal = func(io.Writer) bool { return tc.terminal }
+			output, err := execute(t, a, "init", "demo", "--local")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(output, "\x1b[") != tc.ansi {
+				t.Fatalf("ANSI=%t output=%q", tc.ansi, output)
+			}
+			plain := strings.NewReplacer("\x1b[32m", "", "\x1b[0m", "").Replace(output)
+			want := "Initialize demo\n" +
+				"  ✓ Preflight: succeeded\n" +
+				"  ✓ Initialize local repository: succeeded\n" +
+				"  ✓ Set repository-local identity: succeeded\n" +
+				"  ✓ Create initial commit: succeeded\n" +
+				"  Provider: work · namespace team\n" +
+				"  Local state: initial commit deadbeef preserved at " + filepath.Join(root, "demo") + "\n" +
+				"  Remote state: not applicable\n"
+			if plain != want || strings.Contains(plain, "Clone") || strings.Contains(plain, "Push") {
+				t.Fatalf("output=%q want=%q", plain, want)
+			}
+		})
+	}
+}
+
+func TestINIT_011CauseClassification(t *testing.T) {
+	for _, tc := range []struct{ evidence, cause, advice, transport, step string }{
+		{"git-credential-colt: not found", "Git credential helper unavailable", "Colt executable", "https", "Configure HTTPS credential helper"},
+		{"Permission denied (publickey)", "SSH public-key authentication denied", "SSH key", "ssh", "Push initial commit"},
+		{"Host key verification failed", "SSH host-key verification failed", "known_hosts", "ssh", "Push initial commit"},
+		{"HTTP 401: Bad credentials", "provider authentication rejected", "re-authenticate", "https", "Authenticate provider API"},
+		{"fatal: unable to access: Could not resolve host", "connectivity failure", "connectivity", "https", "Push initial commit"},
+		{"push rejected for an unspecified reason", "unknown failure", "preserved state", "", "Push initial commit"},
+	} {
+		cause, advice := initCause(errors.New(tc.evidence), tc.transport, tc.step)
+		if cause != tc.cause || !strings.Contains(advice, tc.advice) {
+			t.Fatalf("evidence=%q cause=%q advice=%q", tc.evidence, cause, advice)
+		}
+	}
+	cause, advice := initCause(errors.New("absolute transient helper returned exit 1"), "https", "Push initial commit")
+	if cause != "unknown failure" || strings.Contains(strings.ToLower(advice), "path") {
+		t.Fatalf("unsupported PATH claim: cause=%q advice=%q", cause, advice)
+	}
+}
+
+func TestINIT_011CloneFailureMarksLaterStepsSkipped(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	writeAppConfig(t, path, appProvider())
+	secret := "secret-clone-evidence"
+	runner := &fakeGit{cloneErr: errors.New("Permission denied (publickey); Authorization: " + secret)}
+	client := &fakeClient{getErr: provider.ErrNotFound, created: &provider.Repository{CloneURL: "https://gitlab.com/team/demo.git"}}
+	output, err := execute(t, testApp(path, root, runner, client), "init", "demo")
+	if err == nil {
+		t.Fatal("clone failure succeeded")
+	}
+	for _, want := range []string{
+		"✗ Clone remote repository: failed",
+		"! Set repository-local identity: skipped",
+		"! Create initial commit: skipped",
+		"! Configure HTTPS credential helper: skipped",
+		"! Push initial commit: skipped",
+		"Cause: SSH public-key authentication denied",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output %q missing %q", output, want)
+		}
+	}
+	if strings.Contains(output, secret) || strings.Contains(output, "Authorization") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("secret leaked: error=%v output=%q", err, output)
 	}
 }
 
@@ -1168,6 +1408,7 @@ func TestManualLoginAuthenticatesBeforeSecurePersistence(t *testing.T) {
 	a := &App{
 		ConfigPath:  path,
 		Credentials: store,
+		IsTerminal:  func() bool { return true },
 		ReadToken:   func() (string, error) { return "manual-secret", nil },
 		NewClient: func(p config.Provider, token string) (provider.Client, error) {
 			if p.Auth.Source != "stored" || token != "manual-secret" || store.puts != 0 {
@@ -1193,7 +1434,7 @@ func TestManualLoginFailureAndNonTTYDoNotPersist(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.yaml")
 		t.Setenv("GITHUB_TOKEN", "")
 		store := &recordingStore{credentials: map[string]credential.Credential{}}
-		a := &App{ConfigPath: path, Credentials: store, ReadToken: func() (string, error) { return "manual-secret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
+		a := &App{ConfigPath: path, Credentials: store, IsTerminal: func() bool { return true }, ReadToken: func() (string, error) { return "manual-secret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
 			return &fakeClient{authErr: errors.New("authentication failed")}, nil
 		}}
 		if _, err := execute(t, a, args...); err == nil || store.puts != 0 {
@@ -1220,7 +1461,7 @@ func TestManualLoginFailureAndNonTTYDoNotPersist(t *testing.T) {
 		t.Setenv("GITHUB_TOKEN", "")
 		clientCalls := 0
 		store := &recordingStore{credentials: map[string]credential.Credential{}}
-		a := &App{ConfigPath: path, Credentials: store, ReadToken: func() (string, error) { return "bad\nsecret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
+		a := &App{ConfigPath: path, Credentials: store, IsTerminal: func() bool { return true }, ReadToken: func() (string, error) { return "bad\nsecret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
 			clientCalls++
 			return &fakeClient{}, nil
 		}}
@@ -1248,11 +1489,50 @@ func TestExplicitTokenEnvMissingNeverPromptsInteractively(t *testing.T) {
 }
 
 func TestManualLoginRefusesCredentialOverwriteAndUnsafeReplacement(t *testing.T) {
+	t.Run("explicit environment replacement never inherits stored auth", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": storedProvider("personal")}}); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GITHUB_TOKEN", "environment-secret")
+		store := &recordingStore{credentials: map[string]credential.Credential{"github.com/personal": {Kind: "bearer_token", Secret: "stored-secret"}}}
+		a := &App{ConfigPath: path, Credentials: store, NewClient: func(p config.Provider, token string) (provider.Client, error) {
+			if p.Auth != (config.Auth{Source: "env"}) || token != "environment-secret" {
+				t.Fatalf("provider=%+v token=%q", p, token)
+			}
+			return &fakeClient{account: "octocat"}, nil
+		}}
+		_, err := execute(t, a, "auth", "login", "github", "personal", "--replace", "--credential", "env", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+		cfg, loadErr := config.Load(path)
+		if err != nil || loadErr != nil || cfg.Providers["personal"].Auth != (config.Auth{Source: "env"}) || store.gets != 0 || store.puts != 0 || store.credentials["github.com/personal"].Secret != "stored-secret" {
+			t.Fatalf("error=%v load=%v config=%+v store=%#v", err, loadErr, cfg, store)
+		}
+	})
+
+	t.Run("missing explicit environment replacement does not fall back to stored", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": storedProvider("personal")}}); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GITHUB_TOKEN", "")
+		store := &recordingStore{credentials: map[string]credential.Credential{"github.com/personal": {Kind: "bearer_token", Secret: "stored-secret"}}}
+		clients := 0
+		a := &App{ConfigPath: path, Credentials: store, NewClient: func(config.Provider, string) (provider.Client, error) {
+			clients++
+			return &fakeClient{}, nil
+		}}
+		_, err := execute(t, a, "auth", "login", "github", "personal", "--replace", "--credential", "env", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+		cfg, loadErr := config.Load(path)
+		if err == nil || loadErr != nil || cfg.Providers["personal"].Auth.Source != "stored" || clients != 0 || store.gets != 0 || store.puts != 0 {
+			t.Fatalf("error=%v load=%v config=%+v clients=%d store=%#v", err, loadErr, cfg, clients, store)
+		}
+	})
+
 	t.Run("pre-existing target", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.yaml")
 		t.Setenv("GITHUB_TOKEN", "")
 		store := &recordingStore{credentials: map[string]credential.Credential{"github.com/personal": {Kind: "bearer_token", Secret: "keep"}}}
-		a := &App{ConfigPath: path, Credentials: store, ReadToken: func() (string, error) { return "new-secret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
+		a := &App{ConfigPath: path, Credentials: store, IsTerminal: func() bool { return true }, ReadToken: func() (string, error) { return "new-secret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
 			return &fakeClient{account: "octocat"}, nil
 		}}
 		_, err := execute(t, a, "auth", "login", "github", "personal", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
@@ -1273,7 +1553,7 @@ func TestManualLoginRefusesCredentialOverwriteAndUnsafeReplacement(t *testing.T)
 			t.Fatal(err)
 		}
 		t.Setenv("GITHUB_TOKEN", "")
-		a := &App{ConfigPath: path, Credentials: secure, FallbackCredentials: fallback, ReadToken: func() (string, error) { return "new-secret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
+		a := &App{ConfigPath: path, Credentials: secure, FallbackCredentials: fallback, IsTerminal: func() bool { return true }, ReadToken: func() (string, error) { return "new-secret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
 			return &fakeClient{account: "octocat"}, nil
 		}}
 		_, err := execute(t, a, "auth", "login", "github", "personal", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
@@ -1346,7 +1626,8 @@ func TestManualLoginPlaintextRequiresConsentAndRollsBackOnConfigFailure(t *testi
 			fallback := credential.NewFileStore(credential.DefaultFilePath(path))
 			t.Setenv("GITHUB_TOKEN", "")
 			a := &App{ConfigPath: path, Credentials: credential.DisabledStore{}, FallbackCredentials: fallback,
-				ReadToken: func() (string, error) { return "manual-secret", nil }, ConfirmPlaintext: func() (bool, error) { return accepted, nil },
+				IsTerminal: func() bool { return true },
+				ReadToken:  func() (string, error) { return "manual-secret", nil }, ConfirmPlaintext: func() (bool, error) { return accepted, nil },
 				NewClient: func(config.Provider, string) (provider.Client, error) { return &fakeClient{account: "octocat"}, nil }}
 			output, err := execute(t, a, "auth", "login", "github", "personal", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
 			if accepted {
@@ -1370,7 +1651,7 @@ func TestManualLoginPlaintextRequiresConsentAndRollsBackOnConfigFailure(t *testi
 		path := filepath.Join(root, "config.yaml")
 		t.Setenv("GITHUB_TOKEN", "")
 		store := &recordingStore{credentials: map[string]credential.Credential{}}
-		a := &App{ConfigPath: path, Credentials: store, ReadToken: func() (string, error) { return "manual-secret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
+		a := &App{ConfigPath: path, Credentials: store, IsTerminal: func() bool { return true }, ReadToken: func() (string, error) { return "manual-secret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
 			if err := os.Mkdir(path, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -1408,7 +1689,7 @@ func TestManualLoginReportsUncertainPersistenceWithoutConfigMutation(t *testing.
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	t.Setenv("GITHUB_TOKEN", "")
 	store := &recordingStore{credentials: map[string]credential.Credential{}, putErr: credential.ErrPersistenceUncertain, deleteErr: errors.New("delete uncertain")}
-	a := &App{ConfigPath: path, Credentials: store, ReadToken: func() (string, error) { return "manual-secret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
+	a := &App{ConfigPath: path, Credentials: store, IsTerminal: func() bool { return true }, ReadToken: func() (string, error) { return "manual-secret", nil }, NewClient: func(config.Provider, string) (provider.Client, error) {
 		return &fakeClient{account: "octocat"}, nil
 	}}
 	_, err := execute(t, a, "auth", "login", "github", "personal", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
@@ -1481,7 +1762,7 @@ func TestCORE_PROVIDER_005CORE_CREDENTIAL_002ProviderStatusOfflineAndUnchanged(t
 	}}
 	output, err := execute(t, a, "auth", "status", "--offline")
 	after, _ := os.ReadFile(path)
-	want := "personal (default)\n  GitHub · github.com\n  Namespace:   octocat\n  Git name:    Private Name\n  Git email:   private@example.com\n  Connection:  not checked\nwork\n  GitLab · gitlab.example\n  Namespace:   platform/team\n  Git name:    Work Secret\n  Git email:   work-secret@example.com\n  Connection:  not checked\n"
+	want := "personal (default)\n  GitHub · github.com\n  Namespace:   octocat\n  Auth source: env\n  Git name:    Private Name\n  Git email:   private@example.com\n  Connection:  not checked\n  Transport:   not checked\nwork\n  GitLab · gitlab.example\n  Namespace:   platform/team\n  Auth source: env\n  Git name:    Work Secret\n  Git email:   work-secret@example.com\n  Connection:  not checked\n  Transport:   not checked\n"
 	if err != nil || output != want || len(runner.calls) != 0 || !bytes.Equal(before, after) {
 		t.Fatalf("error=%v output=%q git calls=%v config changed=%t", err, output, runner.calls, !bytes.Equal(before, after))
 	}
@@ -1508,7 +1789,7 @@ func TestCORE_PROVIDER_005AuthStatusOnlineShowsAccountAndConnection(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "work (default)\n  GitLab · gitlab.com\n  Account:     alice\n  Namespace:   team\n  Git name:    Colt Tester\n  Git email:   colt@example.com\n  Connection:  ✓ connected\n"
+	want := "work (default)\n  GitLab · gitlab.com\n  Credential:  environment\n  Account:     alice\n  Namespace:   team\n  Git name:    Colt Tester\n  Git email:   colt@example.com\n  Connection:  ✓ connected\n  Transport:   not checked\n"
 	if output != want {
 		t.Fatalf("output = %q, want %q", output, want)
 	}
@@ -1650,7 +1931,7 @@ func TestCORE_PROVIDER_005AuthStatusCredentialsMissing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "work\n  GitLab · gitlab.com\n  Connection:  ✗ credentials missing\n"
+	want := "work\n  GitLab · gitlab.com\n  Connection:  ✗ credentials missing\n  Transport:   not checked\n"
 	if output != want {
 		t.Fatalf("output = %q, want %q", output, want)
 	}
@@ -1673,6 +1954,185 @@ func TestCORE_PROVIDER_005StatusWithEmptyOrMissingConfig(t *testing.T) {
 	}
 }
 
+func TestCredentialStoredReadsEnvTokenAndPersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	p := config.Provider{Type: "github", Host: "github.com", BaseURL: "https://api.github.com", Namespace: "octocat", Visibility: "private", GitName: "Test", GitEmail: "test@example.com", Auth: config.Auth{Source: "env"}}
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": p}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GITHUB_TOKEN", "stored-env-token")
+	store := credential.NewMemoryStore()
+	a := &App{ConfigPath: path, Credentials: store, NewClient: func(_ config.Provider, token string) (provider.Client, error) {
+		if token != "stored-env-token" {
+			t.Fatalf("token=%q", token)
+		}
+		return &fakeClient{account: "octocat"}, nil
+	}}
+	output, err := execute(t, a, "auth", "login", "github", "personal", "--credential", "stored", "--replace", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+	if err != nil {
+		t.Fatalf("error=%v", err)
+	}
+	cred, getErr := store.Get("github.com/personal")
+	if getErr != nil || cred.Secret != "stored-env-token" {
+		t.Fatalf("credential not persisted: getErr=%v secret=%q", getErr, cred.Secret)
+	}
+	if !strings.Contains(output, "octocat") {
+		t.Fatalf("output=%q", output)
+	}
+}
+
+func TestCredentialStoredUnsetExplicitTokenEnvUsesDeviceFlow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	p := config.Provider{Type: "github", Host: "github.com", BaseURL: "https://api.github.com", Namespace: "octocat", Visibility: "private", GitName: "Test", GitEmail: "test@example.com", Auth: config.Auth{Source: "env"}}
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": p}}); err != nil {
+		t.Fatal(err)
+	}
+	os.Unsetenv("GITHUB_TOKEN")
+	store := &recordingStore{credentials: map[string]credential.Credential{}}
+	a := &App{
+		ConfigPath: path, Credentials: store, IsTerminal: func() bool { return true },
+		AuthorizeGitHubDevice: func(_ context.Context, out io.Writer) (string, error) {
+			fmt.Fprint(out, "Open: https://github.com/login/device\nCode: TEST-CODE\n")
+			return "device-token", nil
+		},
+		NewClient: func(_ config.Provider, token string) (provider.Client, error) {
+			if token != "device-token" || store.puts != 0 {
+				t.Fatalf("token=%q puts=%d", token, store.puts)
+			}
+			return &fakeClient{account: "octocat"}, nil
+		},
+	}
+	output, err := execute(t, a, "auth", "login", "github", "personal", "--credential", "stored", "--replace", "--token-env", "MISSING_TOKEN", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com", "--transport", "ssh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, getErr := store.Get("github.com/personal"); getErr != nil || got.Secret != "device-token" {
+		t.Fatalf("credential=%+v error=%v", got, getErr)
+	}
+	cfg, loadErr := config.Load(path)
+	if loadErr != nil || cfg.Providers["personal"].Transport != "ssh" || !strings.Contains(output, "TEST-CODE") || strings.Contains(output, "device-token") {
+		t.Fatalf("config=%+v load=%v output=%q", cfg, loadErr, output)
+	}
+}
+
+func TestCredentialStoredDeviceFlowFailureDoesNotMutate(t *testing.T) {
+	args := []string{"auth", "login", "github", "personal", "--credential", "stored", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com"}
+	for _, tc := range []struct {
+		name     string
+		terminal bool
+		extra    []string
+		want     string
+	}{
+		{name: "non-TTY", want: "interactive terminal"},
+		{name: "flag", terminal: true, extra: []string{"--noninteractive"}, want: "interactive terminal"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			t.Setenv("GITHUB_TOKEN", "")
+			store := &recordingStore{credentials: map[string]credential.Credential{}}
+			authorizeCalls, clientCalls := 0, 0
+			a := &App{ConfigPath: path, Credentials: store, IsTerminal: func() bool { return tc.terminal }, NewClient: func(config.Provider, string) (provider.Client, error) {
+				clientCalls++
+				return &fakeClient{}, nil
+			}}
+			a.AuthorizeGitHubDevice = func(context.Context, io.Writer) (string, error) {
+				authorizeCalls++
+				return "device-token", nil
+			}
+			_, err := execute(t, a, append(tc.extra, args...)...)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || authorizeCalls != 0 || clientCalls != 0 || store.puts != 0 {
+				t.Fatalf("error=%v authorize=%d clients=%d store=%#v", err, authorizeCalls, clientCalls, store)
+			}
+			if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("config mutated: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestReplaceInheritsStoredAuthAndUsesDeviceFlow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": storedProvider("personal")}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("COLT_GITHUB_CLIENT_ID", "ignored")
+	store := &recordingStore{credentials: map[string]credential.Credential{}}
+	authorizeCalls := 0
+	a := &App{
+		ConfigPath: path, Credentials: store, IsTerminal: func() bool { return true },
+		AuthorizeGitHubDevice: func(context.Context, io.Writer) (string, error) {
+			authorizeCalls++
+			return "device-token", nil
+		},
+		NewClient: func(p config.Provider, token string) (provider.Client, error) {
+			if p.Auth.Source != "stored" || token != "device-token" || store.puts != 0 {
+				t.Fatalf("provider=%+v token=%q puts=%d", p, token, store.puts)
+			}
+			return &fakeClient{account: "octocat"}, nil
+		},
+	}
+	_, err := execute(t, a, "auth", "login", "github", "personal", "--replace", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+	got, getErr := store.Get("github.com/personal")
+	if err != nil || getErr != nil || got.Secret != "device-token" || authorizeCalls != 1 {
+		t.Fatalf("error=%v credential=%+v get=%v authorize=%d", err, got, getErr, authorizeCalls)
+	}
+}
+
+func TestCredentialStoredInvalidEnvTokenRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	p := config.Provider{Type: "github", Host: "github.com", BaseURL: "https://api.github.com", Namespace: "octocat", Visibility: "private", GitName: "Test", GitEmail: "test@example.com", Auth: config.Auth{Source: "env"}}
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": p}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GITHUB_TOKEN", "bad\ntoken")
+	store := credential.NewMemoryStore()
+	a := &App{ConfigPath: path, Credentials: store, NewClient: func(_ config.Provider, _ string) (provider.Client, error) {
+		t.Fatal("client should not be called")
+		return nil, nil
+	}}
+	_, err := execute(t, a, "auth", "login", "github", "personal", "--credential", "stored", "--replace", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "invalid") {
+		t.Fatalf("error=%v", err)
+	}
+	if _, getErr := store.Get("github.com/personal"); !errors.Is(getErr, credential.ErrNotFound) {
+		t.Fatalf("credential was persisted: %v", getErr)
+	}
+}
+
+func TestCredentialInvalidValueRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	p := config.Provider{Type: "github", Host: "github.com", BaseURL: "https://api.github.com", Namespace: "octocat", Visibility: "private", GitName: "Test", GitEmail: "test@example.com", Auth: config.Auth{Source: "env"}}
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": p}}); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{ConfigPath: path, NewClient: func(_ config.Provider, _ string) (provider.Client, error) {
+		t.Fatal("client should not be called")
+		return nil, nil
+	}}
+	_, err := execute(t, a, "auth", "login", "github", "personal", "--credential", "invalid", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+	if err == nil || !strings.Contains(err.Error(), "env or stored") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestCredentialEnvNeverPromptsOrPersists(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	store := &recordingStore{credentials: map[string]credential.Credential{}}
+	prompts, clients := 0, 0
+	a := &App{ConfigPath: filepath.Join(t.TempDir(), "config.yaml"), Credentials: store, IsTerminal: func() bool { return true }, ReadToken: func() (string, error) {
+		prompts++
+		return "manual-token", nil
+	}, NewClient: func(config.Provider, string) (provider.Client, error) {
+		clients++
+		return &fakeClient{}, nil
+	}}
+	_, err := execute(t, a, "auth", "login", "github", "personal", "--credential", "env", "--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+	if err == nil || prompts != 0 || clients != 0 || store.puts != 0 {
+		t.Fatalf("error=%v prompts=%d clients=%d store=%#v", err, prompts, clients, store)
+	}
+}
+
 func TestCORE_PROVIDER_005StatusRespectsPathError(t *testing.T) {
 	want := errors.New("config path unavailable")
 	_, err := execute(t, &App{pathErr: want}, "auth", "status")
@@ -1681,17 +2141,257 @@ func TestCORE_PROVIDER_005StatusRespectsPathError(t *testing.T) {
 	}
 }
 
-type fakeGit struct {
-	calls        []string
-	availableErr error
-	pushErr      error
+func TestINIT_010VisibilityOverrideIsRequestLocal(t *testing.T) {
+	for _, tc := range []struct{ configured, override string }{{"private", "public"}, {"public", "private"}, {"public", ""}} {
+		t.Run(tc.configured+"/"+tc.override, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "config.yaml")
+			p := appProvider()
+			p.Default, p.Visibility = true, tc.configured
+			writeAppConfig(t, path, p)
+			before, _ := os.ReadFile(path)
+			client := &fakeClient{getErr: provider.ErrNotFound, created: &provider.Repository{CloneURL: "https://gitlab.com/team/demo.git"}}
+			args := []string{"init", "demo"}
+			if tc.override != "" {
+				args = append(args, "--visibility", tc.override)
+			}
+			_, err := execute(t, testApp(path, root, &fakeGit{}, client), args...)
+			after, _ := os.ReadFile(path)
+			want := tc.override
+			if want == "" {
+				want = tc.configured
+			}
+			if err != nil || client.visibility != want || string(after) != string(before) {
+				t.Fatalf("error=%v visibility=%q config changed=%v", err, client.visibility, string(after) != string(before))
+			}
+		})
+	}
 }
 
-func (g *fakeGit) Available() error                   { g.calls = append(g.calls, "available"); return g.availableErr }
+func TestINIT_010InvalidVisibilityFailsBeforeAccessOrMutation(t *testing.T) {
+	for _, args := range [][]string{{"init", "demo", "--visibility", "internal"}, {"init", "demo", "--local", "--visibility", "public"}} {
+		runner := &fakeGit{}
+		store := &recordingStore{credentials: map[string]credential.Credential{}}
+		clients := 0
+		a := &App{ConfigPath: filepath.Join(t.TempDir(), "missing.yaml"), Git: runner, Credentials: store, NewClient: func(config.Provider, string) (provider.Client, error) {
+			clients++
+			return &fakeClient{}, nil
+		}}
+		if _, err := execute(t, a, args...); err == nil || len(runner.calls) != 0 || store.gets != 0 || clients != 0 {
+			t.Fatalf("args=%v error=%v git=%v store gets=%d clients=%d", args, err, runner.calls, store.gets, clients)
+		}
+	}
+}
+
+func TestCORE_GIT_011StatusTransportIsIndependentAndAuthorityMatched(t *testing.T) {
+	for _, tc := range []struct {
+		name, origin, transport       string
+		authErr                       error
+		probeErr                      error
+		missingCredential             bool
+		wantConnection, wantTransport string
+		wantProbe                     bool
+	}{
+		{"https success", "https://github.com/octocat/demo.git", "https", nil, nil, false, "✓ connected", "HTTPS · ✓ Git authentication/connectivity and read access confirmed", true},
+		{"ssh despite API failure", "git@github.com:octocat/demo.git", "ssh", errors.New("authentication failed"), nil, false, "✗ authentication failed", "SSH · ✓ Git authentication/connectivity and read access confirmed", true},
+		{"ssh despite missing API credential", "git@github.com:octocat/demo.git", "ssh", nil, nil, true, "✗ credentials missing", "SSH · ✓ Git authentication/connectivity and read access confirmed", true},
+		{"probe failure independent", "https://github.com/octocat/demo.git", "https", nil, errors.New("denied"), false, "✓ connected", "HTTPS · origin unreachable", true},
+		{"wrong authority", "https://example.org/octocat/demo.git", "https", nil, nil, false, "✓ connected", "not checked", false},
+		{"wrong namespace", "https://github.com/other/demo.git", "https", nil, nil, false, "✓ connected", "not checked", false},
+		{"origin with userinfo", "https://attacker@github.com/octocat/demo.git", "https", nil, nil, false, "✓ connected", "not checked", false},
+		{"wrong configured transport", "git@github.com:octocat/demo.git", "https", nil, nil, false, "✓ connected", "not checked", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "config.yaml")
+			p := storedProvider("personal")
+			p.Transport = tc.transport
+			if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": p}}); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := os.ReadFile(path)
+			store := &recordingStore{credentials: map[string]credential.Credential{"github.com/personal": {Kind: "bearer_token", Secret: "transport-test-secret"}}}
+			if tc.missingCredential {
+				store.credentials = map[string]credential.Credential{}
+			}
+			runner := &fakeGit{origin: tc.origin, lsRemoteErr: tc.probeErr}
+			a := &App{ConfigPath: path, WorkDir: root, Credentials: store, Git: runner, NewClient: func(config.Provider, string) (provider.Client, error) {
+				return &fakeClient{account: "octocat", authErr: tc.authErr}, nil
+			}}
+			output, err := execute(t, a, "auth", "status")
+			after, _ := os.ReadFile(path)
+			probed := strings.Contains(strings.Join(runner.calls, "\n"), "ls-remote:")
+			if err != nil || !strings.Contains(output, tc.wantConnection) || !strings.Contains(output, tc.wantTransport) || probed != tc.wantProbe || strings.Contains(output, "transport-test-secret") || string(after) != string(before) {
+				t.Fatalf("error=%v output=%q calls=%v config changed=%v", err, output, runner.calls, string(after) != string(before))
+			}
+		})
+	}
+}
+
+func TestCORE_GIT_011ExplicitRepositoryUsesAuthoritativeMetadataForEveryProvider(t *testing.T) {
+	for _, tc := range []struct {
+		providerType, host, namespace, transport, httpsURL, sshURL, want string
+	}{
+		{"github", "github.com", "octocat", "https", "https://github.com/octocat/demo.git", "git@github.com:octocat/demo.git", "https://github.com/octocat/demo.git"},
+		{"gitlab", "gitlab.example", "platform/tools", "ssh", "https://gitlab.example/platform/tools/demo.git", "git@gitlab.example:platform/tools/demo.git", "git@gitlab.example:platform/tools/demo.git"},
+		{"gitea", "code.example", "octocat", "https", "https://code.example/octocat/demo.git", "git@code.example:octocat/demo.git", "https://code.example/octocat/demo.git"},
+		{"forgejo", "forge.example", "team", "ssh", "https://forge.example/team/demo.git", "git@forge.example:team/demo.git", "git@forge.example:team/demo.git"},
+	} {
+		t.Run(tc.providerType, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "config.yaml")
+			baseURL := "https://" + tc.host
+			if tc.providerType == "github" {
+				baseURL = "https://api.github.com"
+			}
+			p := config.Provider{Type: tc.providerType, Host: tc.host, BaseURL: baseURL, Namespace: tc.namespace, Visibility: "private", Transport: tc.transport, GitName: "Test", GitEmail: "test@example.com", Auth: config.Auth{Source: "env", TokenEnv: "STATUS_TOKEN"}}
+			if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"work": p}}); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("STATUS_TOKEN", "explicit-status-secret")
+			runner := &fakeGit{}
+			client := &fakeClient{account: "user", found: &provider.Repository{CloneURL: tc.httpsURL, SSHURL: tc.sshURL}}
+			output, err := execute(t, testApp(path, root, runner, client), "auth", "status", "work", "--repository", "demo")
+			calls := strings.Join(runner.calls, ",")
+			if err != nil || client.gets != 1 || calls != "ls-remote:"+tc.want+":work:demo" || !strings.Contains(output, "Connection:  ✓ connected") || !strings.Contains(output, "read access confirmed (clone/fetch/pull); push/write not checked") || strings.Contains(output, "explicit-status-secret") {
+				t.Fatalf("error=%v gets=%d git=%q output=%q", err, client.gets, calls, output)
+			}
+		})
+	}
+}
+
+func TestCORE_GIT_011ExplicitRepositoryFailuresAreSafeAndIndependent(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		client  *fakeClient
+		want    string
+		apiFail bool
+	}{
+		{"metadata unavailable", &fakeClient{account: "octocat", getErr: errors.New("response included secret-status-value")}, "metadata unavailable", false},
+		{"wrong authority", &fakeClient{account: "octocat", found: &provider.Repository{CloneURL: "https://evil.example/other/wrong.git"}}, "unexpected clone target", false},
+		{"API failure skips metadata", &fakeClient{authErr: errors.New("authentication failed")}, "authentication failed", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "config.yaml")
+			p := storedProvider("personal")
+			if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": p}}); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GITHUB_TOKEN", "secret-status-value")
+			runner := &fakeGit{}
+			output, err := execute(t, testApp(path, root, runner, tc.client), "auth", "status", "personal", "--repository", "demo")
+			if err != nil || !strings.Contains(output, tc.want) || strings.Contains(output, "secret-status-value") || len(runner.calls) != 0 || tc.apiFail && tc.client.gets != 0 || !tc.apiFail && !strings.Contains(output, "Connection:  ✓ connected") {
+				t.Fatalf("error=%v gets=%d git=%v output=%q", err, tc.client.gets, runner.calls, output)
+			}
+		})
+	}
+}
+
+func TestCORE_GIT_011RepositoryOptionValidationPrecedesReads(t *testing.T) {
+	for _, args := range [][]string{
+		{"auth", "status", "--repository", "demo"},
+		{"auth", "status", "work", "--repository", "demo", "--offline"},
+		{"auth", "status", "work", "--repository", "../demo"},
+	} {
+		store := &countingStore{}
+		runner := &fakeGit{}
+		clients := 0
+		_, err := execute(t, &App{ConfigPath: filepath.Join(t.TempDir(), "missing.yaml"), Credentials: store, Git: runner, NewClient: func(config.Provider, string) (provider.Client, error) {
+			clients++
+			return &fakeClient{}, nil
+		}}, args...)
+		if err == nil || store.gets != 0 || len(runner.calls) != 0 || clients != 0 {
+			t.Fatalf("args=%v error=%v store=%d git=%v clients=%d", args, err, store.gets, runner.calls, clients)
+		}
+	}
+}
+
+func TestCORE_GIT_011AliasWithoutRepositoryUsesMatchingCurrentOrigin(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	p := storedProvider("personal")
+	p.Auth = config.Auth{Source: "env", TokenEnv: "ALIAS_STATUS_TOKEN"}
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": p, "duplicate": p}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ALIAS_STATUS_TOKEN", "alias-status-secret")
+	runner := &fakeGit{origin: "https://github.com/octocat/demo.git"}
+	output, err := execute(t, testApp(path, root, runner, &fakeClient{account: "octocat"}), "auth", "status", "personal")
+	if err != nil || !strings.Contains(strings.Join(runner.calls, ","), "ls-remote:https://github.com/octocat/demo.git:personal:demo") || strings.Contains(output, "duplicate") || strings.Contains(output, "alias-status-secret") {
+		t.Fatalf("error=%v calls=%v output=%q", err, runner.calls, output)
+	}
+}
+
+func TestStatusPassesConfiguredTokenEnvironmentNamesToSSHProbe(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	personal := storedProvider("personal")
+	personal.Transport = "ssh"
+	personal.Auth = config.Auth{Source: "env", TokenEnv: "CUSTOM_PROVIDER_TOKEN"}
+	forge := config.Provider{Type: "forgejo", Host: "forge.example", BaseURL: "https://forge.example", Namespace: "team", Visibility: "private", GitName: "Test", GitEmail: "test@example.com", Auth: config.Auth{Source: "env"}}
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": personal, "forge": forge}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CUSTOM_PROVIDER_TOKEN", "secret")
+	runner := &fakeGit{origin: "git@github.com:octocat/demo.git"}
+	if _, err := execute(t, testApp(path, root, runner, &fakeClient{account: "octocat"}), "auth", "status", "personal"); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, name := range runner.lsRemoteTokenEnvNames {
+		got[name] = true
+	}
+	for _, want := range []string{"CUSTOM_PROVIDER_TOKEN", "GITHUB_TOKEN", "FORGEJO_TOKEN"} {
+		if !got[want] {
+			t.Fatalf("token environment names = %v, missing %s", runner.lsRemoteTokenEnvNames, want)
+		}
+	}
+}
+
+func TestCORE_GIT_011OfflineSkipsAllCredentialProviderAndGitAccess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	p := storedProvider("personal")
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": p}}); err != nil {
+		t.Fatal(err)
+	}
+	store := &recordingStore{credentials: map[string]credential.Credential{"github.com/personal": {Secret: "offline-secret"}}}
+	runner := &fakeGit{origin: "https://github.com/octocat/demo.git"}
+	clients := 0
+	output, err := execute(t, &App{ConfigPath: path, Credentials: store, Git: runner, NewClient: func(config.Provider, string) (provider.Client, error) {
+		clients++
+		return nil, nil
+	}}, "auth", "status", "--offline")
+	if err != nil || store.gets != 0 || clients != 0 || len(runner.calls) != 0 || strings.Count(output, "not checked") != 2 || strings.Contains(output, "offline-secret") {
+		t.Fatalf("error=%v gets=%d clients=%d git=%v output=%q", err, store.gets, clients, runner.calls, output)
+	}
+}
+
+type fakeGit struct {
+	calls                 []string
+	availableErr          error
+	cloneErr              error
+	pushErr               error
+	origin                string
+	originErr             error
+	lsRemoteErr           error
+	lsRemoteTokenEnvNames []string
+}
+
+func (g *fakeGit) Available() error { g.calls = append(g.calls, "available"); return g.availableErr }
+func (g *fakeGit) Origin(context.Context, string) (string, error) {
+	g.calls = append(g.calls, "origin")
+	return g.origin, g.originErr
+}
+func (g *fakeGit) LsRemote(_ context.Context, _, origin, alias, project string, tokenEnvNames []string) error {
+	g.calls = append(g.calls, "ls-remote:"+origin+":"+alias+":"+project)
+	g.lsRemoteTokenEnvNames = append([]string(nil), tokenEnvNames...)
+	return g.lsRemoteErr
+}
 func (g *fakeGit) Init(context.Context, string) error { g.calls = append(g.calls, "init"); return nil }
 func (g *fakeGit) Clone(_ context.Context, url, destination, _, _, _ string) error {
 	g.calls = append(g.calls, "clone:"+url+":"+destination)
-	return nil
+	return g.cloneErr
 }
 func (g *fakeGit) SetIdentity(context.Context, string, string, string) error {
 	g.calls = append(g.calls, "identity")
@@ -1709,7 +2409,7 @@ func (g *fakeGit) ConfigureCredentialHelper(context.Context, string, string, str
 	g.calls = append(g.calls, "helper")
 	return nil
 }
-func (g *fakeGit) Push(_ context.Context, _, url string) error {
+func (g *fakeGit) Push(_ context.Context, _, url, _, _ string) error {
 	g.calls = append(g.calls, "push:"+url)
 	return g.pushErr
 }
@@ -1720,6 +2420,7 @@ type fakeClient struct {
 	createErr       error
 	found, created  *provider.Repository
 	gets, creates   int
+	visibility      string
 }
 
 func (f *fakeClient) Authenticate(context.Context) (string, error) { return f.account, f.authErr }
@@ -1727,10 +2428,14 @@ func (f *fakeClient) Get(context.Context, string) (*provider.Repository, error) 
 	f.gets++
 	return f.found, f.getErr
 }
-func (f *fakeClient) Create(context.Context, string) (*provider.Repository, error) {
+func (f *fakeClient) Create(_ context.Context, _ string, visibility ...string) (*provider.Repository, error) {
 	f.creates++
+	if len(visibility) > 0 {
+		f.visibility = visibility[0]
+	}
 	return f.created, f.createErr
 }
+func (f *fakeClient) Revoke(context.Context, provider.RevocationOptions) error { return nil }
 
 func testApp(path, workDir string, runner *fakeGit, client *fakeClient) *App {
 	return &App{ConfigPath: path, WorkDir: workDir, Git: runner, NewClient: func(config.Provider, string) (provider.Client, error) { return client, nil }}

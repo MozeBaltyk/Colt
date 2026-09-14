@@ -2,6 +2,7 @@ package app
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/MozeBaltyk/Colt/internal/config"
 	"github.com/MozeBaltyk/Colt/internal/credential"
@@ -21,16 +23,19 @@ import (
 )
 
 type App struct {
-	ConfigPath          string
-	WorkDir             string
-	Git                 gitnative.Runner
-	NewClient           func(config.Provider, string) (provider.Client, error)
-	Credentials         credential.Store
-	FallbackCredentials *credential.FileStore
-	ReadToken           func() (string, error)
-	ConfirmPlaintext    func() (bool, error)
-	SaveConfig          func(string, config.Config) error
-	pathErr             error
+	ConfigPath            string
+	WorkDir               string
+	Git                   gitnative.Runner
+	NewClient             func(config.Provider, string) (provider.Client, error)
+	Credentials           credential.Store
+	FallbackCredentials   *credential.FileStore
+	ReadToken             func() (string, error)
+	ConfirmPlaintext      func() (bool, error)
+	IsTerminal            func() bool
+	IsOutputTerminal      func(io.Writer) bool
+	AuthorizeGitHubDevice func(context.Context, io.Writer) (string, error)
+	SaveConfig            func(string, config.Config) error
+	pathErr               error
 }
 
 func New() *App {
@@ -43,6 +48,9 @@ func New() *App {
 		FallbackCredentials: credential.NewFileStore(credential.DefaultFilePath(path)),
 		NewClient: func(p config.Provider, token string) (provider.Client, error) {
 			return provider.New(p, token, httpClient)
+		},
+		AuthorizeGitHubDevice: func(ctx context.Context, out io.Writer) (string, error) {
+			return provider.AuthorizeGitHubDevice(ctx, nil, out)
 		},
 		pathErr: err,
 	}
@@ -66,8 +74,61 @@ func (a *App) Root() *cobra.Command {
 		SilenceErrors:     true,
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 	}
+	root.PersistentFlags().Bool("noninteractive", false, "disable interactive prompts and authorization flows")
 	root.AddCommand(a.authCommand(), a.initCommand(), a.gitCredentialCommand())
 	return root
+}
+
+type requiredInput struct {
+	name, supply string
+	value        *string
+}
+
+func (a *App) interactive(cmd *cobra.Command) bool {
+	disabled, _ := cmd.Root().PersistentFlags().GetBool("noninteractive")
+	if disabled {
+		return false
+	}
+	if a.IsTerminal != nil {
+		return a.IsTerminal()
+	}
+	f, ok := cmd.InOrStdin().(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
+}
+
+func (a *App) requireInputs(cmd *cobra.Command, reader **bufio.Reader, inputs ...requiredInput) error {
+	missing := make([]requiredInput, 0, len(inputs))
+	for _, input := range inputs {
+		if *input.value == "" {
+			missing = append(missing, input)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	if !a.interactive(cmd) {
+		parts := make([]string, len(missing))
+		for i, input := range missing {
+			parts[i] = input.name + " (supply " + input.supply + ")"
+		}
+		return errors.New("missing required input: " + strings.Join(parts, ", ") + "; use an interactive terminal without --noninteractive to be prompted")
+	}
+	if *reader == nil {
+		*reader = bufio.NewReader(cmd.InOrStdin())
+	}
+	for _, input := range missing {
+		fmt.Fprintf(cmd.ErrOrStderr(), "%s: ", input.name)
+		value, err := (*reader).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return fmt.Errorf("read %s: %w", input.name, err)
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return fmt.Errorf("%s is required; supply %s", input.name, input.supply)
+		}
+		*input.value = value
+	}
+	return nil
 }
 
 func (a *App) gitCredentialCommand() *cobra.Command {
@@ -202,8 +263,8 @@ func namespaceMatches(actual, configured []string, providerType string) bool {
 }
 
 type authOptions struct {
-	host, baseURL, namespace, visibility, gitName, gitEmail, tokenEnv, transport string
-	replace, makeDefault                                                         bool
+	host, baseURL, namespace, visibility, gitName, gitEmail, tokenEnv, transport, credential string
+	replace, makeDefault                                                                     bool
 }
 
 func (a *App) authCommand() *cobra.Command {
@@ -223,28 +284,92 @@ func (a *App) authCommand() *cobra.Command {
 	login := &cobra.Command{
 		Use:   "login <github|gitlab|gitea|forgejo> <alias>",
 		Short: "Log in to a provider",
-		Args:  cobra.ExactArgs(2),
+		Args:  cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.loginProvider(cmd, args[0], args[1], opts)
+			providerType, alias := "", ""
+			if len(args) > 0 {
+				providerType = args[0]
+			}
+			if len(args) > 1 {
+				alias = args[1]
+			}
+			if len(args) > 0 && providerType == "" {
+				return errors.New("invalid provider type: value must not be empty")
+			}
+			if len(args) > 1 && alias == "" {
+				return errors.New("invalid provider alias: value must not be empty")
+			}
+			positional := make([]requiredInput, 0, 2)
+			if len(args) == 0 {
+				positional = append(positional, requiredInput{"provider", "the first positional argument", &providerType})
+			}
+			if len(args) < 2 {
+				positional = append(positional, requiredInput{"alias", "the second positional argument", &alias})
+			}
+			if err := validateExplicitLogin(cmd, providerType, alias, opts); err != nil {
+				return err
+			}
+			var reader *bufio.Reader
+			if !a.interactive(cmd) {
+				if err := a.requireInputs(cmd, &reader, append(positional, loginRequiredInputs(cmd, providerType, &opts)...)...); err != nil {
+					return err
+				}
+			} else {
+				if err := a.requireInputs(cmd, &reader, positional...); err != nil {
+					return err
+				}
+				if err := validateExplicitLogin(cmd, providerType, alias, opts); err != nil {
+					return err
+				}
+				if err := a.requireInputs(cmd, &reader, loginRequiredInputs(cmd, providerType, &opts)...); err != nil {
+					return err
+				}
+			}
+			return a.loginProvider(cmd, providerType, alias, opts)
 		},
 	}
+	repository := ""
 	status := &cobra.Command{
-		Use:   "status",
+		Use:   "status [alias]",
 		Short: "Show configured providers",
-		Args:  cobra.NoArgs,
-		RunE:  a.providerStatus,
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if repository != "" && len(args) == 0 {
+				return errors.New("--repository requires a provider alias; use: colt auth status <alias> --repository <project>")
+			}
+			if repository != "" {
+				offline, _ := cmd.Flags().GetBool("offline")
+				if offline {
+					return errors.New("--offline and --repository cannot be used together; omit one")
+				}
+				if !config.ValidProjectName(repository) {
+					return errors.New("invalid --repository; use 1-100 letters, digits, '.', '_' or '-' and no path separators")
+				}
+			}
+			return a.providerStatus(cmd, args, repository)
+		},
 	}
 	status.Flags().Bool("offline", false, "inspect configuration only, do not call provider APIs")
+	status.Flags().StringVar(&repository, "repository", "", "repository to validate using the selected provider's configured Git transport")
 	revoke := false
 	logout := &cobra.Command{
 		Use:   "logout <alias>",
 		Short: "Remove a locally stored provider credential",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			alias := ""
+			if len(args) == 1 {
+				alias = args[0]
+			} else {
+				var reader *bufio.Reader
+				if err := a.requireInputs(cmd, &reader, requiredInput{"alias", "the positional argument", &alias}); err != nil {
+					return err
+				}
+			}
 			if revoke {
 				return errors.New("--revoke is not supported; no local or remote credential was changed")
 			}
-			return a.logoutProvider(cmd, args[0])
+			return a.logoutProvider(cmd, alias)
 		},
 	}
 	logout.Flags().BoolVar(&revoke, "revoke", false, "unsupported: provider-side revocation is not implemented")
@@ -257,10 +382,75 @@ func (a *App) authCommand() *cobra.Command {
 	f.StringVar(&opts.gitEmail, "git-email", "", "repository-local Git author email (required)")
 	f.StringVar(&opts.tokenEnv, "token-env", "", "token environment variable (provider default when omitted)")
 	f.StringVar(&opts.transport, "transport", "", "Git transport: https or ssh (default https)")
+	f.StringVar(&opts.credential, "credential", "", "credential source: env or stored")
 	f.BoolVar(&opts.makeDefault, "default", false, "select this provider by default")
 	f.BoolVar(&opts.replace, "replace", false, "replace an existing alias after validation")
 	auth.AddCommand(login, logout, status)
 	return auth
+}
+
+func validateExplicitLogin(cmd *cobra.Command, providerType, alias string, opts authOptions) error {
+	if providerType != "" && providerType != "github" && providerType != "gitlab" && providerType != "gitea" && providerType != "forgejo" {
+		return fmt.Errorf("invalid provider type %q; must be github, gitlab, gitea or forgejo", providerType)
+	}
+	for _, input := range []struct{ flag, value string }{
+		{"host", opts.host}, {"base-url", opts.baseURL}, {"namespace", opts.namespace},
+		{"visibility", opts.visibility}, {"git-name", opts.gitName}, {"git-email", opts.gitEmail},
+		{"token-env", opts.tokenEnv}, {"transport", opts.transport}, {"credential", opts.credential},
+	} {
+		if cmd.Flags().Changed(input.flag) && input.value == "" {
+			return fmt.Errorf("invalid --%s: value must not be empty", input.flag)
+		}
+	}
+	if opts.credential != "" && opts.credential != "env" && opts.credential != "stored" {
+		return fmt.Errorf("invalid --credential %q; must be env or stored", opts.credential)
+	}
+	if opts.transport != "" && opts.transport != "https" && opts.transport != "ssh" {
+		return fmt.Errorf("invalid --transport %q; must be https or ssh", opts.transport)
+	}
+	if opts.visibility != "private" && opts.visibility != "public" && opts.visibility != "internal" {
+		return fmt.Errorf("invalid --visibility %q; must be private, public, or internal for GitLab", opts.visibility)
+	}
+	if providerType == "" {
+		return nil
+	}
+	validated := opts
+	if validated.namespace == "" {
+		validated.namespace = "placeholder"
+	}
+	if validated.gitName == "" {
+		validated.gitName = "Placeholder"
+	}
+	if validated.gitEmail == "" {
+		validated.gitEmail = "placeholder@example.com"
+	}
+	if (providerType == "gitea" || providerType == "forgejo") && validated.host == "" {
+		validated.host = "placeholder.example.com"
+	}
+	if alias == "" {
+		alias = "placeholder"
+	}
+	if err := config.ValidateProvider(alias, providerForLogin(providerType, validated)); err != nil {
+		return fmt.Errorf("invalid login input: %w", err)
+	}
+	return nil
+}
+
+func loginRequiredInputs(cmd *cobra.Command, providerType string, opts *authOptions) []requiredInput {
+	required := make([]requiredInput, 0, 4)
+	if (providerType == "gitea" || providerType == "forgejo") && !cmd.Flags().Changed("host") {
+		required = append(required, requiredInput{"host", "--host", &opts.host})
+	}
+	if !cmd.Flags().Changed("namespace") {
+		required = append(required, requiredInput{"namespace", "--namespace", &opts.namespace})
+	}
+	if !cmd.Flags().Changed("git-name") {
+		required = append(required, requiredInput{"git-name", "--git-name", &opts.gitName})
+	}
+	if !cmd.Flags().Changed("git-email") {
+		required = append(required, requiredInput{"git-email", "--git-email", &opts.gitEmail})
+	}
+	return required
 }
 
 func (a *App) logoutProvider(cmd *cobra.Command, alias string) error {
@@ -301,7 +491,7 @@ func (a *App) logoutProvider(cmd *cobra.Command, alias string) error {
 	return nil
 }
 
-func (a *App) providerStatus(cmd *cobra.Command, _ []string) error {
+func (a *App) providerStatus(cmd *cobra.Command, args []string, repository string) error {
 	if a.pathErr != nil {
 		return a.pathErr
 	}
@@ -311,13 +501,48 @@ func (a *App) providerStatus(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	aliases := make([]string, 0, len(cfg.Providers))
-	for alias := range cfg.Providers {
-		aliases = append(aliases, alias)
+	if len(args) == 1 {
+		if _, ok := cfg.Providers[args[0]]; !ok {
+			return fmt.Errorf("unknown provider alias %q; configure it or choose an existing alias", args[0])
+		}
+		aliases = append(aliases, args[0])
+	} else {
+		for alias := range cfg.Providers {
+			aliases = append(aliases, alias)
+		}
 	}
 	sort.Strings(aliases)
 	if len(aliases) == 0 {
 		fmt.Fprintln(cmd.OutOrStdout(), "no providers configured")
 		return nil
+	}
+	transportAlias, transportName, transportState := "", "", "not checked"
+	if !offline && repository == "" && a.Git != nil {
+		probeConfig := cfg
+		if len(args) == 1 {
+			probeConfig.Providers = map[string]config.Provider{args[0]: cfg.Providers[args[0]]}
+		}
+		dir := a.WorkDir
+		if dir == "" {
+			dir, _ = os.Getwd()
+		}
+		ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
+		origin, originErr := a.Git.Origin(ctx, dir)
+		cancel()
+		if originErr == nil && origin != "" {
+			var project string
+			transportAlias, transportName, project = matchingOrigin(probeConfig, origin)
+			if transportAlias != "" {
+				ctx, cancel = context.WithTimeout(cmd.Context(), 15*time.Second)
+				err := a.Git.LsRemote(ctx, dir, origin, transportAlias, project, providerTokenEnvNames(cfg))
+				cancel()
+				if err == nil {
+					transportState = "✓ Git authentication/connectivity and read access confirmed (clone/fetch/pull); push/write not checked"
+				} else {
+					transportState = "origin unreachable; check repository access and connectivity"
+				}
+			}
+		}
 	}
 	for _, alias := range aliases {
 		p := cfg.Providers[alias]
@@ -329,6 +554,10 @@ func (a *App) providerStatus(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s · %s\n", providerTypeName(p.Type), p.Host)
 		if offline {
 			fmt.Fprintf(cmd.OutOrStdout(), "  Namespace:   %s\n", p.Namespace)
+			fmt.Fprintf(cmd.OutOrStdout(), "  Auth source: %s\n", p.Auth.Source)
+			if p.Auth.CredentialID != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "  Credential ID: %s\n", p.Auth.CredentialID)
+			}
 			if p.GitName == "" || p.GitEmail == "" {
 				fmt.Fprintln(cmd.OutOrStdout(), "  Git identity: not configured")
 			} else {
@@ -336,7 +565,9 @@ func (a *App) providerStatus(cmd *cobra.Command, _ []string) error {
 				fmt.Fprintf(cmd.OutOrStdout(), "  Git email:   %s\n", p.GitEmail)
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "  Connection:  not checked")
+			fmt.Fprintln(cmd.OutOrStdout(), "  Transport:   not checked")
 		} else {
+			explicitTransport, explicitState := "", ""
 			token, _, tokenErr := config.Token(p, a.credentialStore())
 			if tokenErr != nil {
 				if errors.Is(tokenErr, credential.ErrMissing) {
@@ -344,33 +575,130 @@ func (a *App) providerStatus(cmd *cobra.Command, _ []string) error {
 				} else {
 					fmt.Fprintln(cmd.OutOrStdout(), "  Connection:  ✗ credential storage failure")
 				}
-				continue
-			}
-			client, clientErr := a.NewClient(p, token)
-			if clientErr != nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "  Connection:  ✗ unreachable\n    %s\n", safeExplanation(clientErr.Error()))
-				continue
-			}
-			account, authErr := client.Authenticate(cmd.Context())
-			if authErr != nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "  Connection:  ✗ %s\n", authState(authErr))
-				if exp := safeExplanation(authErr.Error()); exp != "" {
-					fmt.Fprintf(cmd.OutOrStdout(), "    %s\n", exp)
-				}
-				continue
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "  Account:     %s\n", account)
-			fmt.Fprintf(cmd.OutOrStdout(), "  Namespace:   %s\n", p.Namespace)
-			if p.GitName == "" || p.GitEmail == "" {
-				fmt.Fprintln(cmd.OutOrStdout(), "  Git identity: not configured")
 			} else {
-				fmt.Fprintf(cmd.OutOrStdout(), "  Git name:    %s\n", p.GitName)
-				fmt.Fprintf(cmd.OutOrStdout(), "  Git email:   %s\n", p.GitEmail)
+				fmt.Fprintf(cmd.OutOrStdout(), "  Credential:  %s\n", resolvedCredentialSource(p))
+				client, clientErr := a.NewClient(p, token)
+				if clientErr != nil {
+					fmt.Fprintf(cmd.OutOrStdout(), "  Connection:  ✗ unreachable\n    %s\n", safeExplanation(clientErr.Error()))
+				} else {
+					account, authErr := client.Authenticate(cmd.Context())
+					if authErr != nil {
+						fmt.Fprintf(cmd.OutOrStdout(), "  Connection:  ✗ %s\n", authState(authErr))
+						if exp := safeExplanation(authErr.Error()); exp != "" {
+							fmt.Fprintf(cmd.OutOrStdout(), "    %s\n", exp)
+						}
+					} else {
+						fmt.Fprintf(cmd.OutOrStdout(), "  Account:     %s\n", account)
+						fmt.Fprintf(cmd.OutOrStdout(), "  Namespace:   %s\n", p.Namespace)
+						if p.GitName == "" || p.GitEmail == "" {
+							fmt.Fprintln(cmd.OutOrStdout(), "  Git identity: not configured")
+						} else {
+							fmt.Fprintf(cmd.OutOrStdout(), "  Git name:    %s\n", p.GitName)
+							fmt.Fprintf(cmd.OutOrStdout(), "  Git email:   %s\n", p.GitEmail)
+						}
+						fmt.Fprintln(cmd.OutOrStdout(), "  Connection:  ✓ connected")
+						if repository != "" {
+							explicitTransport, explicitState = a.repositoryTransportStatus(cmd, client, p, alias, repository, providerTokenEnvNames(cfg))
+						}
+					}
+				}
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "  Connection:  ✓ connected")
+			if explicitState != "" {
+				if explicitTransport == "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "  Transport:   not checked · %s\n", explicitState)
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "  Transport:   %s · %s\n", strings.ToUpper(explicitTransport), explicitState)
+				}
+			} else if alias == transportAlias {
+				fmt.Fprintf(cmd.OutOrStdout(), "  Transport:   %s · %s\n", strings.ToUpper(transportName), transportState)
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "  Transport:   not checked")
+			}
 		}
 	}
 	return nil
+}
+
+func (a *App) repositoryTransportStatus(cmd *cobra.Command, client provider.Client, p config.Provider, alias, project string, tokenEnvNames []string) (string, string) {
+	transport, err := initTransport(p)
+	if err != nil {
+		return "", "configured transport is invalid"
+	}
+	repo, err := client.Get(cmd.Context(), project)
+	if err != nil || repo == nil {
+		return "", "repository metadata unavailable; no clone URL was guessed"
+	}
+	target := repo.CloneURL
+	valid := cleanHTTPSRepository
+	if transport == "ssh" {
+		target, valid = repo.SSHURL, cleanSSHRepository
+	}
+	if actual, ok := valid(target, p); !ok || actual != project {
+		return "", "provider returned an unexpected clone target"
+	}
+	if a.Git == nil {
+		return "", "native Git is unavailable"
+	}
+	dir := a.WorkDir
+	if dir == "" {
+		dir, _ = os.Getwd()
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
+	err = a.Git.LsRemote(ctx, dir, target, alias, project, tokenEnvNames)
+	cancel()
+	if err != nil {
+		return transport, "origin unreachable; check repository access and connectivity"
+	}
+	return transport, "✓ Git authentication/connectivity and read access confirmed (clone/fetch/pull); push/write not checked"
+}
+
+func providerTokenEnvNames(cfg config.Config) []string {
+	names := make([]string, 0, len(cfg.Providers)*2)
+	seen := map[string]bool{}
+	for _, p := range cfg.Providers {
+		for _, name := range []string{p.Auth.TokenEnv, credential.ConventionalVar(p.Type)} {
+			if name != "" && !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+		}
+	}
+	return names
+}
+
+func resolvedCredentialSource(p config.Provider) string {
+	name := p.Auth.TokenEnv
+	if name == "" {
+		name = credential.ConventionalVar(p.Type)
+	}
+	if name != "" && os.Getenv(name) != "" {
+		return "environment"
+	}
+	return "stored"
+}
+
+func matchingOrigin(cfg config.Config, origin string) (alias, transport, project string) {
+	for candidate, p := range cfg.Providers {
+		selected, err := initTransport(p)
+		if err != nil {
+			continue
+		}
+		var actual string
+		var ok bool
+		if selected == "https" {
+			actual, ok = cleanHTTPSRepository(origin, p)
+		} else {
+			actual, ok = cleanSSHRepository(origin, p)
+		}
+		if !ok {
+			continue
+		}
+		if alias != "" {
+			return "", "", ""
+		}
+		alias, transport, project = candidate, selected, actual
+	}
+	return
 }
 
 func providerTypeName(t string) string {
@@ -409,12 +737,8 @@ func safeExplanation(msg string) string {
 	return msg
 }
 
-func (a *App) loginProvider(cmd *cobra.Command, providerType, alias string, opts authOptions) error {
-	if a.pathErr != nil {
-		return a.pathErr
-	}
-	host := opts.host
-	baseURL := opts.baseURL
+func providerForLogin(providerType string, opts authOptions) config.Provider {
+	host, baseURL := opts.host, opts.baseURL
 	if providerType == "github" {
 		if host == "" {
 			host = "github.com"
@@ -429,15 +753,24 @@ func (a *App) loginProvider(cmd *cobra.Command, providerType, alias string, opts
 		if baseURL == "" {
 			baseURL = "https://" + host
 		}
-	} else if providerType == "gitea" && host != "" && baseURL == "" {
-		baseURL = "https://" + host
-	} else if providerType == "forgejo" && host != "" && baseURL == "" {
+	} else if (providerType == "gitea" || providerType == "forgejo") && host != "" && baseURL == "" {
 		baseURL = "https://" + host
 	}
-	p := config.Provider{
+	return config.Provider{
 		Type: providerType, Host: host, BaseURL: strings.TrimRight(baseURL, "/"), Namespace: opts.namespace,
 		Visibility: opts.visibility, GitName: opts.gitName, GitEmail: opts.gitEmail,
 		Transport: opts.transport, Auth: config.Auth{Source: "env", TokenEnv: opts.tokenEnv}, Default: opts.makeDefault,
+	}
+}
+
+func (a *App) loginProvider(cmd *cobra.Command, providerType, alias string, opts authOptions) error {
+	if a.pathErr != nil {
+		return a.pathErr
+	}
+	p := providerForLogin(providerType, opts)
+	host := p.Host
+	if opts.credential != "" && opts.credential != "env" && opts.credential != "stored" {
+		return fmt.Errorf("invalid --credential %q; must be env or stored", opts.credential)
 	}
 	if err := config.ValidateProvider(alias, p); err != nil {
 		return fmt.Errorf("invalid provider %q: %w", alias, err)
@@ -450,11 +783,14 @@ func (a *App) loginProvider(cmd *cobra.Command, providerType, alias string, opts
 	if exists && !opts.replace {
 		return fmt.Errorf("provider alias %q already exists; use --replace to replace it", alias)
 	}
-	if exists && opts.replace && existing.Auth.Source == "stored" {
+	if exists && opts.replace && opts.credential != "env" && existing.Auth.Source == "stored" {
 		if opts.tokenEnv != "" || existing.Host != host {
 			return fmt.Errorf("provider alias %q has stored credential %s; replacement would orphan it", alias, existing.Auth.CredentialID)
 		}
 		p.Auth = existing.Auth
+	}
+	if opts.credential == "stored" {
+		p.Auth = config.Auth{Source: "stored", CredentialID: host + "/" + alias}
 	}
 	candidate := config.Config{Providers: make(map[string]config.Provider, len(cfg.Providers)+1)}
 	for key, value := range cfg.Providers {
@@ -467,27 +803,86 @@ func (a *App) loginProvider(cmd *cobra.Command, providerType, alias string, opts
 	if err := candidate.Validate(); err != nil {
 		return err
 	}
-	token, _, err := config.Token(p, a.credentialStore())
+	var token string
 	manual := false
-	if errors.Is(err, credential.ErrMissing) {
-		if opts.tokenEnv != "" {
-			return err
+	if p.Auth.Source == "stored" {
+		credentialID := p.Auth.CredentialID
+		if cred, getErr := a.credentialStore().Get(credentialID); getErr == nil {
+			if credential.ValidateBearerToken(cred.Secret) != nil {
+				return errors.New("stored credential is invalid; provider configuration was not changed")
+			}
+			token = cred.Secret
+		} else if !errors.Is(getErr, credential.ErrNotFound) && !errors.Is(getErr, credential.ErrStoreUnavailable) {
+			return errors.New("credential storage failure; provider configuration was not changed")
+		} else {
+			tokenEnv := opts.tokenEnv
+			if tokenEnv == "" {
+				tokenEnv = credential.ConventionalVar(providerType)
+			}
+			if tokenEnv != "" {
+				token = os.Getenv(tokenEnv)
+			}
+			if token != "" && credential.ValidateBearerToken(token) != nil {
+				return fmt.Errorf("token from %s is invalid", tokenEnv)
+			} else if token == "" && providerType == "github" {
+				if !a.interactive(cmd) {
+					return errors.New("no stored credential or GitHub environment token resolved; use an interactive terminal without --noninteractive for GitHub Device Flow, or set --token-env")
+				}
+				authorize := a.AuthorizeGitHubDevice
+				if authorize == nil {
+					authorize = func(ctx context.Context, out io.Writer) (string, error) {
+						return provider.AuthorizeGitHubDevice(ctx, nil, out)
+					}
+				}
+				manual = true
+				var tokenErr error
+				token, tokenErr = authorize(cmd.Context(), cmd.ErrOrStderr())
+				if tokenErr != nil {
+					return tokenErr
+				}
+			} else if token == "" && opts.tokenEnv != "" {
+				return fmt.Errorf("token environment variable %q is not set", opts.tokenEnv)
+			} else if token == "" {
+				manual = true
+				var tokenErr error
+				token, tokenErr = a.readToken(cmd)
+				if tokenErr != nil {
+					return tokenErr
+				}
+			} else {
+				manual = true
+			}
 		}
-		if exists && opts.replace {
-			return fmt.Errorf("manual stored credential enrollment is not allowed with --replace for provider alias %q", alias)
-		}
-		manual = true
-		token, err = a.readToken(cmd)
-		if err != nil {
-			return err
-		}
-		p.Auth = config.Auth{Source: "stored", CredentialID: host + "/" + alias}
+		p.Auth = config.Auth{Source: "stored", CredentialID: credentialID}
 		candidate.Providers[alias] = p
 		if err := candidate.Validate(); err != nil {
 			return err
 		}
-	} else if err != nil {
-		return err
+	} else {
+		token, _, err = config.Token(p, a.credentialStore())
+		if errors.Is(err, credential.ErrMissing) {
+			if opts.credential == "env" {
+				return err
+			}
+			if opts.tokenEnv != "" {
+				return err
+			}
+			if exists && opts.replace {
+				return fmt.Errorf("manual stored credential enrollment is not allowed with --replace for provider alias %q", alias)
+			}
+			manual = true
+			token, err = a.readToken(cmd)
+			if err != nil {
+				return err
+			}
+			p.Auth = config.Auth{Source: "stored", CredentialID: host + "/" + alias}
+			candidate.Providers[alias] = p
+			if err := candidate.Validate(); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		}
 	}
 	client, err := a.NewClient(p, token)
 	if err != nil {
@@ -550,6 +945,9 @@ func (a *App) loginProvider(cmd *cobra.Command, providerType, alias string, opts
 }
 
 func (a *App) readToken(cmd *cobra.Command) (string, error) {
+	if !a.interactive(cmd) {
+		return "", errors.New("no environment token resolved; manual token entry requires an interactive terminal without --noninteractive")
+	}
 	if a.ReadToken != nil {
 		value, err := a.ReadToken()
 		if err != nil {
@@ -577,6 +975,9 @@ func (a *App) readToken(cmd *cobra.Command) (string, error) {
 }
 
 func (a *App) confirmPlaintext(cmd *cobra.Command) (bool, error) {
+	if !a.interactive(cmd) {
+		return false, errors.New("secure credential storage is unavailable; plaintext fallback requires explicit consent in an interactive terminal without --noninteractive")
+	}
 	if a.ConfirmPlaintext != nil {
 		return a.ConfirmPlaintext()
 	}
@@ -612,6 +1013,7 @@ type initOptions struct {
 	local       bool
 	provider    string
 	destination string
+	visibility  string
 }
 
 func (a *App) initCommand() *cobra.Command {
@@ -619,18 +1021,41 @@ func (a *App) initCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init <project>",
 		Short: "Initialize a blank project",
-		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.initialize(cmd, args[0], opts)
+			if len(args) > 1 {
+				return fmt.Errorf("accepts at most 1 arg(s), received %d", len(args))
+			}
+			project := ""
+			if len(args) == 1 {
+				project = args[0]
+			} else {
+				var reader *bufio.Reader
+				if err := a.requireInputs(cmd, &reader, requiredInput{"project", "the positional argument", &project}); err != nil {
+					return err
+				}
+			}
+			return a.initialize(cmd, project, opts)
 		},
 	}
 	cmd.Flags().BoolVar(&opts.local, "local", false, "create only the local repository")
 	cmd.Flags().StringVarP(&opts.provider, "provider", "p", "", "provider alias")
 	cmd.Flags().StringVarP(&opts.destination, "destination", "d", "", "remote clone destination (relative to the current directory or absolute)")
+	cmd.Flags().StringVar(&opts.visibility, "visibility", "", "repository visibility (private or public)")
 	return cmd
 }
 
-func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) error {
+func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) (retErr error) {
+	report := newInitReport(project, opts.local)
+	report.begin("Preflight")
+	out := cmd.OutOrStdout()
+	_, noColor := os.LookupEnv("NO_COLOR")
+	report.color = !noColor && ((a.IsOutputTerminal != nil && a.IsOutputTerminal(out)) || (a.IsOutputTerminal == nil && outputIsTerminal(out)))
+	defer func() {
+		if retErr != nil {
+			retErr = report.fail(retErr)
+		}
+		report.write(out)
+	}()
 	if a.pathErr != nil {
 		return a.pathErr
 	}
@@ -640,6 +1065,12 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) e
 	if opts.local && opts.destination != "" {
 		return errors.New("--destination applies only to remote initialization; omit it with --local")
 	}
+	if opts.visibility != "" && opts.visibility != "private" && opts.visibility != "public" {
+		return errors.New("invalid --visibility; use private or public")
+	}
+	if opts.local && opts.visibility != "" {
+		return errors.New("--visibility applies only to remote initialization; omit it with --local")
+	}
 	cfg, err := config.Load(a.ConfigPath)
 	if err != nil {
 		return err
@@ -648,9 +1079,15 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) e
 	if err != nil {
 		return err
 	}
+	report.provider = alias + " · namespace " + selected.Namespace
 	transport, err := initTransport(selected)
 	if err != nil {
 		return err
+	}
+	report.transport = transport
+	if !opts.local {
+		report.remoteSteps(transport == "https", selected.Type == "gitea" || selected.Type == "forgejo")
+		report.begin("Preflight")
 	}
 	if err := a.Git.Available(); err != nil {
 		return err
@@ -663,12 +1100,20 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) e
 	if err != nil {
 		return err
 	}
+	if exists {
+		report.local = "destination preserved at " + destination
+	} else {
+		report.local = "not created"
+	}
+	report.succeeded()
 	token := ""
 	if !opts.local {
+		report.begin("Resolve provider API credential")
 		token, _, err = config.Token(selected, a.credentialStore())
 		if err != nil {
 			return err
 		}
+		report.succeeded()
 	}
 	var client provider.Client
 	gitUsername := ""
@@ -678,11 +1123,14 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) e
 			return err
 		}
 		if selected.Type == "gitea" || selected.Type == "forgejo" {
+			report.begin("Authenticate provider API")
 			gitUsername, err = client.Authenticate(cmd.Context())
 			if err != nil {
 				return err
 			}
+			report.succeeded()
 		}
+		report.begin("Look up remote repository")
 		repo, getErr := client.Get(cmd.Context(), project)
 		if getErr == nil && repo != nil {
 			return fmt.Errorf("remote repository %s/%s already exists; choose another project name", selected.Namespace, project)
@@ -690,27 +1138,40 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) e
 		if getErr != nil && !errors.Is(getErr, provider.ErrNotFound) {
 			return getErr
 		}
+		report.succeeded()
 	}
 	if opts.local {
+		report.begin("Initialize local repository")
 		if !exists {
 			if err := os.Mkdir(destination, 0o755); err != nil {
 				return fmt.Errorf("create destination: %w", err)
 			}
+			report.local = "destination preserved at " + destination
 		}
 		if err := a.Git.Init(cmd.Context(), destination); err != nil {
 			return partial("initialize git", destination, "not created", "inspect the destination and retry after correcting git", err)
 		}
+		report.succeeded()
+		report.begin("Set repository-local identity")
 		if err := a.Git.SetIdentity(cmd.Context(), destination, selected.GitName, selected.GitEmail); err != nil {
 			return partial("set repository-local identity", destination, "not created", "set local user.name and user.email, then create the initial commit", err)
 		}
+		report.succeeded()
+		report.begin("Create initial commit")
 		commit, err := a.Git.Commit(cmd.Context(), destination)
 		if err != nil {
 			return partial("create initial commit", destination, "not created", "fix the reported git error and create the initial commit", err)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "initialized %s with provider %s identity at %s; initial commit %s (local only)\n", project, alias, destination, commit)
+		report.succeeded()
+		report.local = "initial commit " + commit + " preserved at " + destination
 		return nil
 	}
-	repo, err := client.Create(cmd.Context(), project)
+	visibility := selected.Visibility
+	if opts.visibility != "" {
+		visibility = opts.visibility
+	}
+	report.begin("Create remote repository")
+	repo, err := client.Create(cmd.Context(), project, visibility)
 	if err != nil {
 		remoteState := "creation outcome unknown; no rollback attempted"
 		recovery := "check the configured namespace, then create or attach the remote manually as appropriate"
@@ -723,6 +1184,8 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) e
 	if repo == nil {
 		return partial("validate remote repository", destination, "creation reported success but omitted the repository target", "inspect the provider repository and configure origin manually only after verifying its authority", errors.New("provider omitted the created repository"))
 	}
+	report.succeeded()
+	report.begin("Clone remote repository")
 	cloneURL := repo.CloneURL
 	valid := cleanHTTPSRepository
 	if transport == "ssh" {
@@ -731,6 +1194,7 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) e
 	if actual, ok := valid(cloneURL, selected); !ok || actual != project {
 		return partial("validate remote repository", destination, "created but provider returned an unexpected clone target", "inspect the provider repository and configure origin manually only after verifying its authority", errors.New("provider returned a clone URL for a different authority or repository"))
 	}
+	report.remote = "created at " + cloneURL
 	if !customDestination {
 		err = createNamespaceDir(workDir, selected.Namespace)
 	}
@@ -745,22 +1209,32 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) e
 	if err := a.Git.Clone(cmd.Context(), cloneURL, destination, gitUsername, alias, project); err != nil {
 		return partial("clone remote repository", destination, "created at "+cloneURL, "inspect the destination and retry the clone after fixing authentication or connectivity", err)
 	}
+	report.succeeded()
+	report.local = "clone preserved at " + destination
+	report.begin("Set repository-local identity")
 	if err := a.Git.SetIdentity(cmd.Context(), destination, selected.GitName, selected.GitEmail); err != nil {
 		return partial("set repository-local identity", destination, "created at "+cloneURL, "set local user.name and user.email, then create the initial commit", err)
 	}
+	report.succeeded()
+	report.begin("Create initial commit")
 	commit, err := a.Git.Commit(cmd.Context(), destination)
 	if err != nil {
 		return partial("create initial commit", destination, "created at "+cloneURL, "fix the reported git error and create the initial commit", err)
 	}
+	report.succeeded()
+	report.local = "initial commit " + commit + " preserved at " + destination
 	if transport == "https" {
+		report.begin("Configure HTTPS credential helper")
 		if err := a.Git.ConfigureCredentialHelper(cmd.Context(), destination, cloneURL, gitUsername, alias, project); err != nil {
 			return partial("configure credential helper", destination, "created at "+cloneURL, "configure the Colt helper locally, then push HEAD", err)
 		}
+		report.succeeded()
 	}
-	if err := a.Git.Push(cmd.Context(), destination, cloneURL); err != nil {
-		return partial("push initial commit", destination, "created at "+cloneURL, "run 'git push --set-upstream origin HEAD' after fixing authentication or connectivity", err)
+	report.begin("Push initial commit")
+	if err := a.Git.Push(cmd.Context(), destination, cloneURL, alias, project); err != nil {
+		return partial("push initial commit", destination, "created at "+cloneURL, "from the preserved local repository run: git push --set-upstream origin HEAD", err)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "initialized %s via %s in namespace %s at %s; initial commit %s; remote %s\n", project, alias, selected.Namespace, destination, commit, cloneURL)
+	report.succeeded()
 	return nil
 }
 
@@ -911,5 +1385,5 @@ func validateDestination(path string) (bool, error) {
 }
 
 func partial(step, local, remote, recovery string, cause error) error {
-	return fmt.Errorf("partial failure at %s: local state preserved at %s; remote state: %s; recovery: %s: %w", step, local, remote, recovery, cause)
+	return &partialError{step: step, local: local, remote: remote, recovery: recovery, cause: cause}
 }

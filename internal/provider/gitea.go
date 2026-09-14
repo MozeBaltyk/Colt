@@ -25,7 +25,7 @@ func (giteaAdapter) get(ctx context.Context, c *client, project string) (*Reposi
 	return c.get(ctx, "/api/v1/repos/"+url.PathEscape(c.settings.Namespace)+"/"+url.PathEscape(project))
 }
 
-func (giteaAdapter) create(ctx context.Context, c *client, project string) (*Repository, error) {
+func (giteaAdapter) create(ctx context.Context, c *client, project, visibility string) (*Repository, error) {
 	account, err := c.Authenticate(ctx)
 	if err != nil {
 		return nil, err
@@ -34,5 +34,9 @@ func (giteaAdapter) create(ctx context.Context, c *client, project string) (*Rep
 	if !strings.EqualFold(account, c.settings.Namespace) {
 		path = "/api/v1/orgs/" + url.PathEscape(c.settings.Namespace) + "/repos"
 	}
-	return c.create(ctx, path, map[string]any{"name": project, "private": c.settings.Visibility == "private"})
+	return c.create(ctx, path, map[string]any{"name": project, "private": visibility == "private"})
+}
+
+func (giteaAdapter) revoke(context.Context, *client, RevocationOptions) error {
+	return ErrRevocationUnsupported
 }

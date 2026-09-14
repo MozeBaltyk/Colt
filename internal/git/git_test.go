@@ -21,14 +21,39 @@ func TestGitEnvStripsGitVariablesCaseInsensitively(t *testing.T) {
 	}
 }
 
+func TestTransientHelperUsesCurrentExecutableWhilePersistentHelperUsesPATH(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transient, err := transientCredentialHelper("work", "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistent, err := credentialHelper("work", "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(executable) || transient != "!'"+executable+"' git-credential --provider work --repository demo" || strings.Contains(transient, "!colt ") {
+		t.Fatalf("transient helper %q does not use current executable %q", transient, executable)
+	}
+	if persistent != "!colt git-credential --provider work --repository demo" {
+		t.Fatalf("persistent helper = %q", persistent)
+	}
+}
+
 func TestCloneUsesCredentialHelperWithoutReceivingASecret(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-backed fake git is Unix-only")
 	}
 	bin := t.TempDir()
 	script := filepath.Join(bin, "git")
+	helper, err := transientCredentialHelper("work", "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
 	contents := `#!/bin/sh
-test "$*" = "-c credential.https://example.test/team/demo.git.username=alice -c http.sslCAInfo=/tmp/test-ca.pem -c http.followRedirects=false -c credential.helper=!colt git-credential --provider work --repository demo -c credential.useHttpPath=true clone -- https://example.test/team/demo.git destination" || exit 2
+test "$*" = "$WANT_ARGS" || exit 2
 test -z "$GIT_CONFIG_COUNT$GIT_CONFIG_KEY_0$GIT_CONFIG_VALUE_0" || exit 3
 `
 	if err := os.WriteFile(script, []byte(contents), 0o700); err != nil {
@@ -36,6 +61,7 @@ test -z "$GIT_CONFIG_COUNT$GIT_CONFIG_KEY_0$GIT_CONFIG_VALUE_0" || exit 3
 	}
 	t.Setenv("PATH", bin)
 	t.Setenv("SSL_CERT_FILE", "/tmp/test-ca.pem")
+	t.Setenv("WANT_ARGS", "-c credential.https://example.test/team/demo.git.username=alice -c http.sslCAInfo=/tmp/test-ca.pem -c http.followRedirects=false -c credential.helper="+helper+" -c credential.useHttpPath=true clone -- https://example.test/team/demo.git destination")
 	if err := (Native{}).Clone(context.Background(), "https://example.test/team/demo.git", "destination", "alice", "work", "demo"); err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +96,7 @@ func TestCORE_CREDENTIAL_002InheritedGitExecPathCannotStealPushCredential(t *tes
 	}
 	t.Setenv("GIT_EXEC_PATH", helperDir)
 	t.Setenv("STEAL_PATH", stolen)
-	if err := native.Push(ctx, dir, remote); err == nil {
+	if err := native.Push(ctx, dir, remote, "work", "demo"); err == nil {
 		t.Fatal("push unexpectedly succeeded")
 	}
 	if _, err := os.Stat(stolen); !os.IsNotExist(err) {
@@ -171,7 +197,74 @@ case "$(set)" in *must-not-be-injected*) exit 13;; esac
 	t.Setenv("GIT_CONFIG_KEY_0", "core.sshCommand")
 	t.Setenv("GIT_CONFIG_VALUE_0", "ssh inherited")
 	t.Setenv("SSH_AUTH_SOCK", "/agent/socket")
-	if err := (Native{}).Push(context.Background(), t.TempDir(), "git@example.test:team/demo.git"); err != nil {
+	if err := (Native{}).Push(context.Background(), t.TempDir(), "git@example.test:team/demo.git", "work", "demo"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCORE_GIT_011LsRemoteUsesBoundedNoninteractiveTransientAuthentication(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-backed fake git is Unix-only")
+	}
+	for _, tc := range []struct {
+		name, origin, wantSSH string
+	}{
+		{"https", "https://example.test/team/demo.git", ""},
+		{"ssh", "git@example.test:team/demo.git", "ssh -oBatchMode=yes -oStrictHostKeyChecking=yes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			script := filepath.Join(bin, "git")
+			wantArgs := "ls-remote -- " + tc.origin
+			if tc.name == "https" {
+				helper, err := transientCredentialHelper("work", "demo")
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantArgs = "-c http.followRedirects=false -c credential.helper= -c credential.helper=" + helper + " -c credential.useHttpPath=true " + wantArgs
+			}
+			contents := "#!/bin/sh\n" +
+				"test \"$*\" = \"$WANT_ARGS\" || exit 2\n" +
+				"test \"$GIT_TERMINAL_PROMPT\" = 0 || exit 3\n" +
+				"test \"$GIT_SSH_COMMAND\" = \"" + tc.wantSSH + "\" || exit 4\n" +
+				"case \"$* $GIT_SSH_COMMAND\" in *transport-test-secret*) exit 5;; esac\n"
+			if tc.name == "https" {
+				contents += "test \"$TRANSPORT_TOKEN\" = transport-test-secret || exit 6\n"
+			}
+			if err := os.WriteFile(script, []byte(contents), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin)
+			t.Setenv("WANT_ARGS", wantArgs)
+			t.Setenv("TRANSPORT_TOKEN", "transport-test-secret")
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := (Native{}).LsRemote(ctx, t.TempDir(), tc.origin, "work", "demo", []string{"TRANSPORT_TOKEN"}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestSSHProbeExcludesProviderTokensAndPreservesAgent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-backed fake git is Unix-only")
+	}
+	bin := t.TempDir()
+	script := filepath.Join(bin, "git")
+	contents := `#!/bin/sh
+test -z "$CUSTOM_PROVIDER_TOKEN" || exit 2
+test -z "$GITHUB_TOKEN" || exit 3
+test "$SSH_AUTH_SOCK" = /agent/socket || exit 4
+`
+	if err := os.WriteFile(script, []byte(contents), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("CUSTOM_PROVIDER_TOKEN", "custom-secret")
+	t.Setenv("GITHUB_TOKEN", "conventional-secret")
+	t.Setenv("SSH_AUTH_SOCK", "/agent/socket")
+	if err := (Native{}).LsRemote(context.Background(), t.TempDir(), "git@example.test:team/demo.git", "work", "demo", []string{"CUSTOM_PROVIDER_TOKEN", "GITHUB_TOKEN"}); err != nil {
 		t.Fatal(err)
 	}
 }
