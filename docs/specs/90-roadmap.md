@@ -2,12 +2,13 @@
 
 Milestone 1 is normative but only partially implemented; its absent behavior is explicitly tagged `@unimplemented`. Milestones 2 through 6 are planned and their `@planned` scenarios do not claim current command or release availability.
 
-1.  **M1, authentication and blank initialization:** configure and authenticate the currently supported providers (GitHub, GitLab, Gitea, Forgejo) with environment or manually entered credentials, automatic GitHub OAuth Device Flow for stored login when no reusable credential or token resolves, native secure persistence, explicit-consent plaintext fallback, local stored-credential logout, `auth.source`/`credential_id` references, concise live/offline status, deterministic credential resolution, and local and remote `colt init <project>` behavior from [shared core](00-core.md) and [project initialization](01-project-init.md). GitHub Device Flow uses Colt's embedded public OAuth app client ID and is independent of SSH or HTTPS Git transport. Gitea and Forgejo have real container-backed vertical tests. Production native-backend persistence acceptance and provider-side revocation remain `@unimplemented`.
-2.  **M2, project lifecycle:** add provider-aware list, clone, and minimum release primitives from [project lifecycle](02-project-lifecycle.md).
-3.  **M3, parameterized templates:** add named, versioned, data-only template initialization from [template initialization](03-template-init.md).
-4.  **M4, declarative workspace:** reconcile provider/namespace repository selections through top-level `colt status` and `colt sync [--dry-run]` as specified in [workspace reconciliation](04-workspace.md).
-5.  **M5, project health:** add deterministic diagnostic policy checks from [project health](05-project-health.md).
-6.  **M6, analyzer:** retain bounded future intent in [analyzer](06-analyzer.md).
+1. **M1, authentication and blank initialization:** configure and authenticate the currently supported providers (GitHub, GitLab, Gitea, Forgejo) with environment or manually entered credentials, automatic GitHub OAuth Device Flow for stored login when no reusable credential or token resolves, native secure persistence, explicit-consent plaintext fallback, local stored-credential logout, `auth.source`/`credential_id` references, concise live/offline status, deterministic credential resolution, and local and remote `colt init <project>` behavior from [shared core](00-core.md) and [project initialization](01-project-init.md). GitHub Device Flow uses Colt's embedded public OAuth app client ID and is independent of SSH or HTTPS Git transport. Gitea and Forgejo have real container-backed vertical tests. Production native-backend persistence acceptance and provider-side revocation remain `@unimplemented`.
+2. **M2, project lifecycle:** provider-aware list, clone, and minimum release primitives from [project lifecycle](02-project-lifecycle.md). List and clone implemented; release wired (was defined but not registered).
+3. **M3, parameterized templates:** add named, versioned, data-only template initialization from [template initialization](03-template-init.md).
+4. **M7, run/deploy:** provision permanent self-hosted Gitea/Forgejo via systemd + podman (`colt run [gitea|forgejo]`, `colt run status/stop/start/rm`) from [run/deploy spec](07-run-deploy.md). Prerequisite for M4 local-provider sync.
+5. **M4, declarative workspace:** reconcile provider/namespace repository selections through top-level `colt status` and `colt sync [--dry-run]` as specified in [workspace reconciliation](04-workspace.md). Requires M7 for local provider sync.
+6. **M5, project health:** add deterministic diagnostic policy checks from [project health](05-project-health.md).
+7. **M6, analyzer:** retain bounded future intent in [analyzer](06-analyzer.md).
 
 ## Deferred And Future
 

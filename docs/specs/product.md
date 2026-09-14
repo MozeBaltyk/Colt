@@ -34,9 +34,10 @@ Code and released behavior do not become available merely because they are speci
 
 | Order | Capability                                       | Detail                    |
 |:------|:-------------------------------------------------|:--------------------------|
-| M1    | Environment provider authentication (GitHub, GitLab, Gitea, Forgejo) and blank initialization | Partially implemented; Gitea and Forgejo have real container-backed vertical tests; absent behavior is tagged `@unimplemented` |
-| M2    | Project lifecycle                                | Planned                   |
-| M3    | Parameterized template initialization            | Planned                   |
-| M4    | Declarative workspace reconciliation             | Planned                   |
-| M5    | Project health                                   | Planned                   |
-| M6    | Analyzer                                         | Bounded future intent     |
+| M1 | Environment provider authentication (GitHub, GitLab, Gitea, Forgejo) and blank initialization | Partially implemented; Gitea/Forgejo have real container-backed vertical tests; absent behavior is tagged `@unimplemented` |
+| M2 | Project lifecycle | Partially implemented — list, clone done; release wired (was defined but not registered) |
+| M3 | Parameterized template initialization | Planned |
+| M7 | Run/deploy — self-hosted Gitea/Forgejo via systemd + podman | Planned |
+| M4 | Declarative workspace reconciliation | Planned |
+| M5 | Project health | Planned |
+| M6 | Analyzer | Bounded future intent |

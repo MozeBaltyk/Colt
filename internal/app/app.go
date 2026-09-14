@@ -75,7 +75,7 @@ func (a *App) Root() *cobra.Command {
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 	}
 	root.PersistentFlags().Bool("noninteractive", false, "disable interactive prompts and authorization flows")
-	root.AddCommand(a.authCommand(), a.initCommand(), a.listCommand(), a.cloneCommand(), a.gitCredentialCommand())
+	root.AddCommand(a.authCommand(), a.initCommand(), a.listCommand(), a.cloneCommand(), a.releaseCommand(), a.gitCredentialCommand())
 	return root
 }
 
@@ -1221,8 +1221,21 @@ func (a *App) releaseCommand() *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
+			// Derive project name from the current repository origin
+			workDir := a.WorkDir
+			if workDir == "" {
+				workDir, _ = os.Getwd()
+			}
+			origin, originErr := a.Git.Origin(cmd.Context(), workDir)
+			if originErr != nil || origin == "" {
+				return errors.New("cannot determine repository from current origin; run this inside a Git repository with a matching remote")
+			}
+			_, _, project := matchingOrigin(cfg, origin)
+			if project == "" {
+				return errors.New("current origin does not match any configured provider repository")
+			}
 			// Validate repository exists
-			repo, err := client.Get(cmd.Context(), selected.Namespace)
+			repo, err := client.Get(cmd.Context(), project)
 			if err != nil {
 				return fmt.Errorf("resolve repository: %w", err)
 			}
@@ -1230,10 +1243,6 @@ func (a *App) releaseCommand() *cobra.Command {
 				return errors.New("provider returned no repository")
 			}
 			// Validate tag exists locally
-			workDir := a.WorkDir
-			if workDir == "" {
-				workDir, _ = os.Getwd()
-			}
 			tag := version
 			if err := a.Git.TagExists(cmd.Context(), workDir, tag); err != nil {
 				return fmt.Errorf("validate tag: %w", err)
@@ -1243,7 +1252,7 @@ func (a *App) releaseCommand() *cobra.Command {
 			if transport == "ssh" {
 				pushURL = repo.SSHURL
 			}
-			if err := validatePushTarget(pushURL, selected, transport); err != nil {
+			if err := validatePushTarget(pushURL, selected, transport, project); err != nil {
 				return err
 			}
 			// Create local tag
@@ -1269,13 +1278,13 @@ func (a *App) releaseCommand() *cobra.Command {
 	return cmd
 }
 
-func validatePushTarget(pushURL string, selected config.Provider, transport string) error {
+func validatePushTarget(pushURL string, selected config.Provider, transport, project string) error {
 	if transport == "ssh" {
-		if actual, ok := cleanSSHRepository(pushURL, selected); !ok || actual != selected.Namespace {
+		if actual, ok := cleanSSHRepository(pushURL, selected); !ok || actual != project {
 			return errors.New("push target does not match selected provider repository")
 		}
 	} else {
-		if actual, ok := cleanHTTPSRepository(pushURL, selected); !ok || actual != selected.Namespace {
+		if actual, ok := cleanHTTPSRepository(pushURL, selected); !ok || actual != project {
 			return errors.New("push target does not match selected provider repository")
 		}
 	}
