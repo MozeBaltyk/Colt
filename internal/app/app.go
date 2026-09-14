@@ -75,7 +75,7 @@ func (a *App) Root() *cobra.Command {
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 	}
 	root.PersistentFlags().Bool("noninteractive", false, "disable interactive prompts and authorization flows")
-	root.AddCommand(a.authCommand(), a.initCommand(), a.gitCredentialCommand())
+	root.AddCommand(a.authCommand(), a.initCommand(), a.listCommand(), a.cloneCommand(), a.gitCredentialCommand())
 	return root
 }
 
@@ -1044,6 +1044,262 @@ func (a *App) initCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.visibility, "visibility", "", "repository visibility (private or public)")
 	cmd.Flags().StringVar(&opts.transport, "transport", "", "Git transport: https or ssh (default from config or https)")
 	return cmd
+}
+
+func (a *App) listCommand() *cobra.Command {
+	all := false
+	providerAlias := ""
+	cmd := &cobra.Command{
+		Use:   "list [repository]",
+		Short: "List repositories from a provider",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if a.pathErr != nil {
+				return a.pathErr
+			}
+			cfg, err := config.Load(a.ConfigPath)
+			if err != nil {
+				return err
+			}
+			aliases := make([]string, 0, len(cfg.Providers))
+			if providerAlias != "" {
+				if _, ok := cfg.Providers[providerAlias]; !ok {
+					return fmt.Errorf("unknown provider alias %q; configure it or choose an existing alias", providerAlias)
+				}
+				aliases = append(aliases, providerAlias)
+			} else if all {
+				for alias := range cfg.Providers {
+					aliases = append(aliases, alias)
+				}
+			} else {
+				alias, _, err := cfg.Resolve("")
+				if err != nil {
+					return err
+				}
+				aliases = append(aliases, alias)
+			}
+			sort.Strings(aliases)
+			out := cmd.OutOrStdout()
+			anyOK := false
+			for _, alias := range aliases {
+				p := cfg.Providers[alias]
+				token, _, err := config.Token(p, a.credentialStore())
+				if err != nil {
+					if all {
+						fmt.Fprintf(out, "%s: credential error: %v\n", alias, err)
+						continue
+					}
+					return err
+				}
+				client, err := a.NewClient(p, token)
+				if err != nil {
+					if all {
+						fmt.Fprintf(out, "%s: client error: %v\n", alias, err)
+						continue
+					}
+					return err
+				}
+				repos, err := client.List(cmd.Context())
+				if err != nil {
+					if all {
+						fmt.Fprintf(out, "%s: %v\n", alias, err)
+						continue
+					}
+					return err
+				}
+				sort.Slice(repos, func(i, j int) bool {
+					return repos[i].CloneURL < repos[j].CloneURL
+				})
+				for _, repo := range repos {
+					fmt.Fprintln(out, repo.CloneURL)
+				}
+				anyOK = true
+			}
+			if !anyOK && all {
+				return errors.New("no providers returned results")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&all, "all", false, "list repositories from every configured provider")
+	cmd.Flags().StringVar(&providerAlias, "provider", "", "provider alias")
+	return cmd
+}
+
+func (a *App) cloneCommand() *cobra.Command {
+	providerAlias := ""
+	transport := ""
+	cmd := &cobra.Command{
+		Use:   "clone <repository>",
+		Short: "Clone a provider repository",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if a.pathErr != nil {
+				return a.pathErr
+			}
+			project := args[0]
+			if !config.ValidProjectName(project) {
+				return errors.New("invalid project name; use 1-100 letters, digits, '.', '_' or '-' and no path separators")
+			}
+			cfg, err := config.Load(a.ConfigPath)
+			if err != nil {
+				return err
+			}
+			alias, selected, err := cfg.Resolve(providerAlias)
+			if err != nil {
+				return err
+			}
+			transport, err = InitTransport(selected, transport, a.ConfigPath)
+			if err != nil {
+				return err
+			}
+			if a.Git == nil {
+				return errors.New("native Git is unavailable")
+			}
+			if err := a.Git.Available(); err != nil {
+				return err
+			}
+			token, _, err := config.Token(selected, a.credentialStore())
+			if err != nil {
+				return err
+			}
+			client, err := a.NewClient(selected, token)
+			if err != nil {
+				return err
+			}
+			repo, err := client.Get(cmd.Context(), project)
+			if err != nil {
+				return fmt.Errorf("resolve repository: %w", err)
+			}
+			if repo == nil {
+				return errors.New("provider returned no repository")
+			}
+			cloneURL := repo.CloneURL
+			valid := cleanHTTPSRepository
+			if transport == "ssh" {
+				cloneURL, valid = repo.SSHURL, cleanSSHRepository
+			}
+			if actual, ok := valid(cloneURL, selected); !ok || actual != project {
+				return errors.New("provider returned an unexpected clone target")
+			}
+			out := cmd.OutOrStdout()
+			workDir := a.WorkDir
+			if workDir == "" {
+				workDir, _ = os.Getwd()
+			}
+			destination := filepath.Join(workDir, project)
+			if err := a.Git.Clone(cmd.Context(), cloneURL, destination, "", alias, project); err != nil {
+				return fmt.Errorf("clone failed: %w", err)
+			}
+			fmt.Fprintln(out, "cloned to "+destination)
+			if transport == "https" {
+				if err := a.Git.ConfigureCredentialHelper(cmd.Context(), destination, cloneURL, "", alias, project); err != nil {
+					return fmt.Errorf("configure credential helper: %w", err)
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&providerAlias, "provider", "", "provider alias")
+	cmd.Flags().StringVar(&transport, "transport", "", "Git transport: https or ssh (default from config or https)")
+	return cmd
+}
+
+func (a *App) releaseCommand() *cobra.Command {
+	providerAlias := ""
+	transport := ""
+	cmd := &cobra.Command{
+		Use:   "release <version>",
+		Short: "Create a provider release",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if a.pathErr != nil {
+				return a.pathErr
+			}
+			version := args[0]
+			cfg, err := config.Load(a.ConfigPath)
+			if err != nil {
+				return err
+			}
+			alias, selected, err := cfg.Resolve(providerAlias)
+			if err != nil {
+				return err
+			}
+			transport, err = InitTransport(selected, transport, a.ConfigPath)
+			if err != nil {
+				return err
+			}
+			if a.Git == nil {
+				return errors.New("native Git is unavailable")
+			}
+			token, _, err := config.Token(selected, a.credentialStore())
+			if err != nil {
+				return err
+			}
+			client, err := a.NewClient(selected, token)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			// Validate repository exists
+			repo, err := client.Get(cmd.Context(), selected.Namespace)
+			if err != nil {
+				return fmt.Errorf("resolve repository: %w", err)
+			}
+			if repo == nil {
+				return errors.New("provider returned no repository")
+			}
+			// Validate tag exists locally
+			workDir := a.WorkDir
+			if workDir == "" {
+				workDir, _ = os.Getwd()
+			}
+			tag := version
+			if err := a.Git.TagExists(cmd.Context(), workDir, tag); err != nil {
+				return fmt.Errorf("validate tag: %w", err)
+			}
+			// Validate push target belongs to selected provider/repository
+			pushURL := repo.CloneURL
+			if transport == "ssh" {
+				pushURL = repo.SSHURL
+			}
+			if err := validatePushTarget(pushURL, selected, transport); err != nil {
+				return err
+			}
+			// Create local tag
+			if err := a.Git.CreateTag(cmd.Context(), workDir, tag); err != nil {
+				return fmt.Errorf("create tag: %w", err)
+			}
+			fmt.Fprintln(out, "created tag "+tag)
+			// Push tag
+			if err := a.Git.Push(cmd.Context(), workDir, pushURL, alias, ""); err != nil {
+				return fmt.Errorf("push tag: %w", err)
+			}
+			fmt.Fprintln(out, "pushed tag "+tag)
+			// Create provider release
+			if err := client.Release(cmd.Context(), version, tag); err != nil {
+				return fmt.Errorf("partial completion: tag pushed, provider release failed: %w", err)
+			}
+			fmt.Fprintln(out, "released "+version)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&providerAlias, "provider", "", "provider alias")
+	cmd.Flags().StringVar(&transport, "transport", "", "Git transport: https or ssh (default from config or https)")
+	return cmd
+}
+
+func validatePushTarget(pushURL string, selected config.Provider, transport string) error {
+	if transport == "ssh" {
+		if actual, ok := cleanSSHRepository(pushURL, selected); !ok || actual != selected.Namespace {
+			return errors.New("push target does not match selected provider repository")
+		}
+	} else {
+		if actual, ok := cleanHTTPSRepository(pushURL, selected); !ok || actual != selected.Namespace {
+			return errors.New("push target does not match selected provider repository")
+		}
+	}
+	return nil
 }
 
 func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) (retErr error) {

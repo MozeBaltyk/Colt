@@ -35,6 +35,22 @@ func (githubAdapter) get(ctx context.Context, c *client, project string) (*Repos
 	return c.get(ctx, "/repos/"+url.PathEscape(c.settings.Namespace)+"/"+url.PathEscape(project))
 }
 
+func (githubAdapter) list(ctx context.Context, c *client) ([]Repository, error) {
+	var results []repositoryResponse
+	if err := c.request(ctx, http.MethodGet, "/user/repos", nil, &results); err != nil {
+		return nil, fmt.Errorf("list repositories: %w", err)
+	}
+	repos := make([]Repository, 0, len(results))
+	for _, r := range results {
+		repo, err := c.repository(r)
+		if err != nil {
+			return nil, err
+		}
+		repos = append(repos, *repo)
+	}
+	return repos, nil
+}
+
 func (githubAdapter) create(ctx context.Context, c *client, project, visibility string) (*Repository, error) {
 	account, err := c.Authenticate(ctx)
 	if err != nil {
@@ -77,6 +93,11 @@ func (githubAdapter) revoke(ctx context.Context, c *client, opts RevocationOptio
 		return fmt.Errorf("GitHub revocation failed: HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func (githubAdapter) release(ctx context.Context, c *client, project, version string) error {
+	path := "/repos/" + url.PathEscape(c.settings.Namespace) + "/" + url.PathEscape(project) + "/releases"
+	return c.request(ctx, http.MethodPost, path, map[string]any{"tag_name": version, "name": version, "body": ""}, nil)
 }
 
 const (

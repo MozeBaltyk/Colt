@@ -26,6 +26,22 @@ func (gitlabAdapter) get(ctx context.Context, c *client, project string) (*Repos
 	return c.get(ctx, "/api/v4/projects/"+url.PathEscape(c.settings.Namespace+"/"+project))
 }
 
+func (gitlabAdapter) list(ctx context.Context, c *client) ([]Repository, error) {
+	var results []repositoryResponse
+	if err := c.request(ctx, http.MethodGet, "/api/v4/projects", nil, &results); err != nil {
+		return nil, fmt.Errorf("list repositories: %w", err)
+	}
+	repos := make([]Repository, 0, len(results))
+	for _, r := range results {
+		repo, err := c.repository(r)
+		if err != nil {
+			return nil, err
+		}
+		repos = append(repos, *repo)
+	}
+	return repos, nil
+}
+
 func (gitlabAdapter) create(ctx context.Context, c *client, project, visibility string) (*Repository, error) {
 	var namespace struct {
 		ID       int64  `json:"id"`
@@ -42,4 +58,9 @@ func (gitlabAdapter) create(ctx context.Context, c *client, project, visibility 
 
 func (gitlabAdapter) revoke(context.Context, *client, RevocationOptions) error {
 	return ErrRevocationUnsupported
+}
+
+func (gitlabAdapter) release(ctx context.Context, c *client, project, version string) error {
+	path := "/api/v4/projects/" + url.PathEscape(c.settings.Namespace+"/"+project) + "/releases"
+	return c.request(ctx, http.MethodPost, path, map[string]any{"tag_name": version, "name": version, "description": ""}, nil)
 }

@@ -33,7 +33,9 @@ type Repository struct {
 type Client interface {
 	Authenticate(context.Context) (string, error)
 	Get(context.Context, string) (*Repository, error)
+	List(context.Context) ([]Repository, error)
 	Create(context.Context, string, ...string) (*Repository, error)
+	Release(context.Context, string, string) error
 	Revoke(context.Context, RevocationOptions) error
 }
 
@@ -42,7 +44,9 @@ type adapter interface {
 	isConflict(int, string) bool
 	authenticate(context.Context, *client) (string, error)
 	get(context.Context, *client, string) (*Repository, error)
+	list(context.Context, *client) ([]Repository, error)
 	create(context.Context, *client, string, string) (*Repository, error)
+	release(context.Context, *client, string, string) error
 	revoke(context.Context, *client, RevocationOptions) error
 }
 
@@ -101,6 +105,14 @@ func (c *client) Authenticate(ctx context.Context) (string, error) {
 
 func (c *client) Get(ctx context.Context, project string) (*Repository, error) {
 	return c.adapter.get(ctx, c, project)
+}
+
+func (c *client) List(ctx context.Context) ([]Repository, error) {
+	return c.adapter.list(ctx, c)
+}
+
+func (c *client) Release(ctx context.Context, version, tag string) error {
+	return c.adapter.release(ctx, c, version, tag)
 }
 
 func (c *client) Create(ctx context.Context, project string, override ...string) (*Repository, error) {

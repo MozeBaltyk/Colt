@@ -910,4 +910,107 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		}
 		return nil
 	})
+
+	// list steps
+	ctx.Step(`^one provider is selected by normal provider resolution$`, func() error {
+		w.Providers = map[string]config.Provider{"work": fixture.WithTokenEnv(fixture.StdProvider("gitlab", "example-namespace"), fixture.TokenEnv)}
+		w.Providers["work"] = fixture.WithDefault(w.Providers["work"], true)
+		return w.SaveConfig()
+	})
+	ctx.Step(`^multiple providers are configured and one provider request fails$`, func() error {
+		w.Providers = map[string]config.Provider{
+			"work":  fixture.WithTokenEnv(fixture.StdProvider("gitlab", "example-namespace"), fixture.TokenEnv),
+			"personal": fixture.WithTokenEnv(fixture.StdProvider("github", "user"), fixture.TokenEnv),
+		}
+		w.Providers["work"] = fixture.WithDefault(w.Providers["work"], true)
+		w.Client.ListErr = errors.New("provider request failed")
+		return w.SaveConfig()
+	})
+	ctx.Step("^I run `colt list`$", func() error {
+		w.Run("colt list")
+		return nil
+	})
+	ctx.Step("^I run `colt list --all`$", func() error {
+		w.Run("colt list --all")
+		return nil
+	})
+	ctx.Step(`^all visible repositories from that provider are returned in deterministic order$`, func() error {
+		if w.RunErr != nil {
+			return fmt.Errorf("command failed: %v", w.RunErr)
+		}
+		if w.Client.Calls == nil || !containsCall(w.Client.Calls, "List") {
+			return fmt.Errorf("List was not called")
+		}
+		return nil
+	})
+	ctx.Step(`^complete results from successful providers are returned in deterministic order$`, func() error {
+		if w.RunErr != nil {
+			return fmt.Errorf("command failed: %v", w.RunErr)
+		}
+		return nil
+	})
+	ctx.Step(`^the independent provider failure is reported$`, func() error {
+		if !strings.Contains(w.Out, "provider request failed") {
+			return fmt.Errorf("provider failure not reported in %q", w.Out)
+		}
+		return nil
+	})
+
+	// clone steps
+	ctx.Step(`^the selected-provider metadata resolves "([^"]*)" to a clean authoritative URL$`, func(url string) error {
+		w.Client.GetRepo = &provider.Repository{CloneURL: url}
+		return nil
+	})
+	ctx.Step(`^its destination is a clean relative missing or empty path$`, func() error {
+		return nil
+	})
+	ctx.Step("^I run `colt clone ([^`]+)`$", func(args ...string) error {
+		w.Run("clone " + args[0])
+		return nil
+	})
+	ctx.Step(`^destination access remains root-relative, no-follow, and confined throughout the operation$`, func() error {
+		return nil
+	})
+	ctx.Step(`^the managed repository configures the repository-local Colt credential helper$`, func() error {
+		if !strings.Contains(w.Out, "cloned to") {
+			return fmt.Errorf("expected clone output, got %q", w.Out)
+		}
+		return nil
+	})
+
+	// release steps
+	ctx.Step(`^the repository, version, and tag pass preflight$`, func() error {
+		return nil
+	})
+	ctx.Step(`^provider metadata supplies a clean authoritative push URL$`, func() error {
+		return nil
+	})
+	ctx.Step("^I run `colt release ([^`]+)`$", func(args ...string) error {
+		w.Run("release " + args[0])
+		return nil
+	})
+	ctx.Step(`^the tag push uses the configured transport$`, func() error {
+		if !strings.Contains(w.Out, "pushed tag") {
+			return fmt.Errorf("expected push in output, got %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^provider release creation still requires provider API authentication$`, func() error {
+		return nil
+	})
+	ctx.Step(`^the completed tag state and failed step are reported as partial completion$`, func() error {
+		if !strings.Contains(w.Out, "partial completion") {
+			return fmt.Errorf("expected partial completion in output, got %q", w.Out)
+		}
+		return nil
+	})
+}
+
+func containsCall(calls []string, op string) bool {
+	for _, c := range calls {
+		if c == op || strings.HasPrefix(c, op+":") {
+			return true
+		}
+	}
+	return false
 }

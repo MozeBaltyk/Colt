@@ -21,6 +21,8 @@ type Runner interface {
 	AddOrigin(context.Context, string, string) error
 	ConfigureCredentialHelper(context.Context, string, string, string, string, string) error
 	Push(context.Context, string, string, string, string) error
+	CreateTag(context.Context, string, string) error
+	TagExists(context.Context, string, string) error
 }
 
 type Native struct{}
@@ -261,6 +263,23 @@ func (n Native) Push(ctx context.Context, dir, cloneURL, alias, project string) 
 		return fmt.Errorf("native git push failed: %w", err)
 	}
 	return nil
+}
+
+func (Native) TagExists(ctx context.Context, dir, tag string) error {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "refs/tags/"+tag)
+	cmd.Dir = dir
+	cmd.Env = gitEnv(nil)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("tag %q does not exist locally", tag)
+	}
+	return nil
+}
+
+func (Native) CreateTag(ctx context.Context, dir, tag string) error {
+	cmd := exec.CommandContext(ctx, "git", "tag", "-a", tag, "-m", tag)
+	cmd.Dir = dir
+	cmd.Env = gitEnv(nil)
+	return cmd.Run()
 }
 
 func credentialHelperNotFound(err error) bool {

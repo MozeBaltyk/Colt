@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -25,6 +26,22 @@ func (giteaAdapter) get(ctx context.Context, c *client, project string) (*Reposi
 	return c.get(ctx, "/api/v1/repos/"+url.PathEscape(c.settings.Namespace)+"/"+url.PathEscape(project))
 }
 
+func (giteaAdapter) list(ctx context.Context, c *client) ([]Repository, error) {
+	var results []repositoryResponse
+	if err := c.request(ctx, http.MethodGet, "/api/v1/user/repos", nil, &results); err != nil {
+		return nil, fmt.Errorf("list repositories: %w", err)
+	}
+	repos := make([]Repository, 0, len(results))
+	for _, r := range results {
+		repo, err := c.repository(r)
+		if err != nil {
+			return nil, err
+		}
+		repos = append(repos, *repo)
+	}
+	return repos, nil
+}
+
 func (giteaAdapter) create(ctx context.Context, c *client, project, visibility string) (*Repository, error) {
 	account, err := c.Authenticate(ctx)
 	if err != nil {
@@ -39,4 +56,9 @@ func (giteaAdapter) create(ctx context.Context, c *client, project, visibility s
 
 func (giteaAdapter) revoke(context.Context, *client, RevocationOptions) error {
 	return ErrRevocationUnsupported
+}
+
+func (giteaAdapter) release(ctx context.Context, c *client, project, version string) error {
+	path := "/api/v1/repos/" + url.PathEscape(c.settings.Namespace) + "/" + url.PathEscape(project) + "/releases"
+	return c.request(ctx, http.MethodPost, path, map[string]any{"tag_name": version, "title": version, "body": ""}, nil)
 }

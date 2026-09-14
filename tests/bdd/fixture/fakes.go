@@ -160,13 +160,26 @@ func (f *FakeGit) Push(_ context.Context, _ /* dir */, url, _, _ string) error {
 	return nil
 }
 
+func (f *FakeGit) CreateTag(_ context.Context, _ /* dir */, tag string) error {
+	f.Operations = append(f.Operations, "tag:"+tag)
+	return nil
+}
+
+func (f *FakeGit) TagExists(_ context.Context, _ /* dir */, tag string) error {
+	f.Operations = append(f.Operations, "tag-exists:"+tag)
+	return nil
+}
+
 type FakeClient struct {
 	Account    string
 	AuthErr    error
 	GetRepo    *provider.Repository
 	GetErr     error
+	ListRepos  []provider.Repository
+	ListErr    error
 	CreateRepo *provider.Repository
 	CreateErr  error
+	ReleaseErr error
 	Visibility string
 	RevokeErr  error
 	Calls      []string
@@ -192,6 +205,14 @@ func (f *FakeClient) Get(_ context.Context, project string) (*provider.Repositor
 	return f.GetRepo, nil
 }
 
+func (f *FakeClient) List(_ context.Context) ([]provider.Repository, error) {
+	f.Calls = append(f.Calls, "List")
+	if f.ListErr != nil {
+		return nil, f.ListErr
+	}
+	return f.ListRepos, nil
+}
+
 func (f *FakeClient) Create(_ context.Context, project string, visibility ...string) (*provider.Repository, error) {
 	f.Calls = append(f.Calls, "Create:"+project)
 	if len(visibility) > 0 {
@@ -201,6 +222,11 @@ func (f *FakeClient) Create(_ context.Context, project string, visibility ...str
 		return nil, f.CreateErr
 	}
 	return f.CreateRepo, nil
+}
+
+func (f *FakeClient) Release(_ context.Context, version, tag string) error {
+	f.Calls = append(f.Calls, "Release:"+version+":"+tag)
+	return f.ReleaseErr
 }
 
 func (f *FakeClient) Revoke(context.Context, provider.RevocationOptions) error {
