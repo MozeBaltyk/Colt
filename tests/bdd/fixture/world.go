@@ -69,6 +69,8 @@ type World struct {
 	HelperInput         string
 	SSHState            map[string][]byte
 	SSHAgent            string
+	ExplicitTransport   string
+	SelectedTransport   string
 }
 
 type NewClientCall struct {

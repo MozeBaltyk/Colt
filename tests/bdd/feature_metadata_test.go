@@ -17,6 +17,8 @@ var updateBDDCoverage = flag.Bool("update-bdd-coverage", false, "write .local/bd
 
 var requirementTag = regexp.MustCompile(`^[A-Z]+(?:-[A-Z]+)*-[0-9]+$`)
 
+var specRequirement = regexp.MustCompile(`^\|\s*` + "`" + `([A-Z]+(?:-[A-Z]+)*-[0-9]+)` + "`" + `\s*\|`)
+
 type featureScenario struct {
 	file    string
 	name    string
@@ -27,6 +29,12 @@ type featureScenario struct {
 
 type requirementCoverage struct {
 	active, planned, unimplemented []featureScenario
+}
+
+type specRequirementInfo struct {
+	id          string
+	verification string
+	specFile    string
 }
 
 func TestBDDTagHygiene(t *testing.T) {
@@ -180,6 +188,156 @@ func validateFeatureScenarios(scenarios []featureScenario) error {
 		return fmt.Errorf("feature tag hygiene:\n%s", strings.Join(problems, "\n"))
 	}
 	return nil
+}
+
+func TestBDDTraceability(t *testing.T) {
+	scenarios := loadFeatureScenarios(t)
+	if err := validateFeatureScenarios(scenarios); err != nil {
+		t.Fatal(err)
+	}
+	specs := loadSpecRequirements(t)
+	if err := validateTraceability(scenarios, specs); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func loadSpecRequirements(t *testing.T) map[string]specRequirementInfo {
+	t.Helper()
+	specDir := filepath.Join(repoRoot(), "docs", "specs")
+	files, err := filepath.Glob(filepath.Join(specDir, "*.md"))
+	if err != nil {
+		t.Fatalf("find spec files: %v", err)
+	}
+	sort.Strings(files)
+	specs := map[string]specRequirementInfo{}
+	for _, path := range files {
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatalf("open %s: %v", path, err)
+		}
+		scanner := bufio.NewScanner(f)
+		for line := 1; scanner.Scan(); line++ {
+			text := strings.TrimSpace(scanner.Text())
+			m := specRequirement.FindStringSubmatch(text)
+			if m == nil {
+				continue
+			}
+			id := m[1]
+			if _, exists := specs[id]; exists {
+				t.Fatalf("duplicate requirement ID %q", id)
+			}
+			rest := text[strings.Index(text, "`|")+2:]
+			verif := ""
+			if idx := strings.Index(rest, "|"); idx > 0 {
+				verif = strings.TrimSpace(rest[idx+1:])
+			}
+			specs[id] = specRequirementInfo{id: id, verification: verif, specFile: path}
+		}
+		if err := scanner.Err(); err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		f.Close()
+	}
+	return specs
+}
+
+func validateTraceability(scenarios []featureScenario, specs map[string]specRequirementInfo) error {
+	var problems []string
+
+	// Build the set of requirement IDs referenced in features.
+	featureRefs := map[string]bool{}
+	for _, s := range scenarios {
+		for _, rawTag := range s.tags {
+			tag := strings.TrimPrefix(rawTag, "@")
+			if !requirementTag.MatchString(tag) {
+				continue
+			}
+			featureRefs[tag] = true
+		}
+	}
+
+	// 1. Feature references an undefined requirement ID.
+	for ref := range featureRefs {
+		if _, ok := specs[ref]; !ok {
+			problems = append(problems, fmt.Sprintf("feature references undefined requirement %q", ref))
+		}
+	}
+
+	// 2. Acceptance-backed normative requirement with no corresponding feature/scenario.
+	//    Skip requirements verified only by architecture/security review, and M6 Analyzer.
+	for id, info := range specs {
+		if strings.HasPrefix(id, "CORE-ARCH") || strings.HasPrefix(id, "CORE-MODEL") ||
+			strings.HasPrefix(id, "CORE-PROVIDER-007") || strings.HasPrefix(id, "CORE-GIT-002") ||
+			strings.HasPrefix(id, "CORE-CREDENTIAL-004") || strings.HasPrefix(id, "CORE-CREDENTIAL-007") ||
+			strings.HasPrefix(id, "CORE-NAMESPACE-001") {
+			continue
+		}
+		if strings.HasPrefix(id, "HEALTH-") || strings.HasPrefix(id, "TEMPLATE-") {
+			if strings.Contains(info.verification, "Architecture review") || strings.Contains(info.verification, "Security review") {
+				continue
+			}
+		}
+		if strings.HasPrefix(id, "CORE-") && (strings.Contains(info.verification, "Architecture review") || strings.Contains(info.verification, "Security review") || strings.Contains(info.verification, "Security integration test") || strings.Contains(info.verification, "Specification and implementation review")) {
+			continue
+		}
+		if _, ok := featureRefs[id]; !ok {
+			problems = append(problems, fmt.Sprintf("acceptance-backed requirement %q has no feature/scenario", id))
+		}
+	}
+
+	// 4. Milestone-state mismatches: planned M2-M5 scenario missing @planned.
+	for _, s := range scenarios {
+		status := "active"
+		for _, tag := range s.tags {
+			if tag == "@planned" {
+				status = "planned"
+			} else if tag == "@unimplemented" {
+				status = "unimplemented"
+			}
+		}
+		if status == "planned" {
+			continue
+		}
+		for _, rawTag := range s.tags {
+			tag := strings.TrimPrefix(rawTag, "@")
+			if !requirementTag.MatchString(tag) {
+				continue
+			}
+			info, ok := specs[tag]
+			if !ok {
+				continue
+			}
+			milestone := milestoneForSpec(info.specFile)
+			if milestone >= "M2" && milestone <= "M5" && status != "planned" {
+				problems = append(problems, fmt.Sprintf("%s:%d %s: planned %s scenario missing @planned", s.file, s.line, s.name, tag))
+			}
+		}
+	}
+
+	if len(problems) != 0 {
+		return fmt.Errorf("traceability:\n%s", strings.Join(problems, "\n"))
+	}
+	return nil
+}
+
+func milestoneForSpec(specFile string) string {
+	base := filepath.Base(specFile)
+	switch base {
+	case "00-core.md", "01-project-init.md":
+		return "M1"
+	case "02-project-lifecycle.md":
+		return "M2"
+	case "03-template-init.md":
+		return "M3"
+	case "04-workspace.md":
+		return "M4"
+	case "05-project-health.md":
+		return "M5"
+	case "06-analyzer.md":
+		return "M6"
+	default:
+		return "M1"
+	}
 }
 
 func buildRequirementIndex(scenarios []featureScenario) map[string]requirementCoverage {

@@ -30,8 +30,16 @@ Feature: Blank project initialization
     Then the command fails before mutation
     And preflight state is unchanged with no credential, provider, or Git operation
 
-  @INIT-001 @INIT-007 @CORE-SAFETY-001
-  Scenario: Unsupported transport fails preflight
+  @INIT-004 @CORE-SAFETY-001
+  Scenario: Reject a relative destination whose parent does not exist
+    Given destination parent "missing" does not exist
+    When I run "colt init demo --destination missing/demo"
+    Then the command fails before mutation
+    And the missing parent is not created
+    And no unrelated filesystem state is modified
+
+   @INIT-001 @INIT-007 @CORE-SAFETY-001
+   Scenario: Unsupported transport fails preflight
     Given the selected provider transport is unsupported
     When I run "colt init demo"
     Then the command fails before mutation

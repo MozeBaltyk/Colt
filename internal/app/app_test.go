@@ -622,7 +622,7 @@ func TestINIT_001MalformedSelectedProviderFailsBeforePreflightEffects(t *testing
 func TestINIT_007ProgrammaticUnsupportedTransportIsRejected(t *testing.T) {
 	p := appProvider()
 	p.Transport = "ftp"
-	if _, err := initTransport(p); err == nil || !strings.Contains(err.Error(), "unsupported transport") {
+	if _, err := InitTransport(p, "", ""); err == nil || !strings.Contains(err.Error(), "unsupported transport") {
 		t.Fatalf("error = %v", err)
 	}
 }

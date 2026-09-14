@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/MozeBaltyk/Colt/internal/app"
 	"github.com/MozeBaltyk/Colt/internal/config"
 	"github.com/MozeBaltyk/Colt/internal/credential"
 	gitnative "github.com/MozeBaltyk/Colt/internal/git"
@@ -107,6 +108,70 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	})
 	ctx.Step(`^custom destination parent "([^"]*)" exists$`, func(relative string) error {
 		return os.MkdirAll(filepath.Join(w.Dir, filepath.FromSlash(relative)), 0o755)
+	})
+	ctx.Step(`^destination parent "([^"]*)" does not exist$`, func(relative string) error {
+		p := filepath.Join(w.Dir, filepath.FromSlash(relative))
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			return fmt.Errorf("parent %q already exists: %v", relative, err)
+		}
+		return nil
+	})
+	ctx.Step(`^the product default transport is (HTTPS|SSH)$`, func(transport string) error {
+		cfg, err := config.Load(w.ConfigPath)
+		if err != nil {
+			return err
+		}
+		cfg.Transport = strings.ToLower(transport)
+		return config.Save(w.ConfigPath, cfg)
+	})
+	ctx.Step(`^the provider preference is (HTTPS|SSH)$`, func(transport string) error {
+		p := w.Providers["personal"]
+		p.Transport = strings.ToLower(transport)
+		w.Providers["personal"] = p
+		return w.SaveConfig()
+	})
+	ctx.Step(`^the global preference is (HTTPS|SSH)$`, func(transport string) error {
+		cfg, err := config.Load(w.ConfigPath)
+		if err != nil {
+			return err
+		}
+		cfg.Transport = strings.ToLower(transport)
+		return config.Save(w.ConfigPath, cfg)
+	})
+	ctx.Step(`^the explicit command choice is (HTTPS|SSH)$`, func(transport string) error {
+		w.ExplicitTransport = strings.ToLower(transport)
+		return nil
+	})
+	ctx.Step(`^Colt selects the clone/push target$`, func() error {
+		selected, ok := w.Providers["personal"]
+		if !ok {
+			return errors.New("no personal provider configured")
+		}
+		transport, err := app.InitTransport(selected, w.ExplicitTransport, w.ConfigPath)
+		if err != nil {
+			w.RunErr = err
+			return nil
+		}
+		w.SelectedTransport = transport
+		return nil
+	})
+	ctx.Step(`^the HTTPS target is used$`, func() error {
+		if w.RunErr != nil {
+			return fmt.Errorf("unexpected failure: %v", w.RunErr)
+		}
+		if w.SelectedTransport != "https" {
+			return fmt.Errorf("expected HTTPS target, got %q", w.SelectedTransport)
+		}
+		return nil
+	})
+	ctx.Step(`^the SSH target is used$`, func() error {
+		if w.RunErr != nil {
+			return fmt.Errorf("unexpected failure: %v", w.RunErr)
+		}
+		if w.SelectedTransport != "ssh" {
+			return fmt.Errorf("expected SSH target, got %q", w.SelectedTransport)
+		}
+		return nil
 	})
 	ctx.Step(`^the transport preference resolves to HTTPS$`, func() error {
 		w.Git.Real = true
@@ -441,6 +506,13 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		}
 		return nil
 	})
+	ctx.Step(`^the missing parent is not created$`, func() error {
+		p := filepath.Join(w.Dir, "missing")
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			return fmt.Errorf("missing parent was created: %v", err)
+		}
+		return nil
+	})
 	ctx.Step(`^no mutating Git operation or provider client construction occurs$`, func() error {
 		if strings.Join(w.Git.Operations, ",") != "available" || len(w.NewClientCalls) != 0 {
 			return fmt.Errorf("operations occurred: git=%v clients=%d", w.Git.Operations, len(w.NewClientCalls))
@@ -486,6 +558,24 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		}
 		if _, err := os.Lstat(filepath.Join(w.Dir, "demo")); !os.IsNotExist(err) {
 			return fmt.Errorf("destination was mutated: %v", err)
+		}
+		return globalGitUnchanged()
+	})
+	ctx.Step(`^no unrelated filesystem state is modified$`, func() error {
+		var mutOps []string
+		for _, op := range w.Git.Operations {
+			if op != "available" {
+				mutOps = append(mutOps, op)
+			}
+		}
+		if len(mutOps) != 0 || len(w.NewClientCalls) != 0 || len(w.Client.Calls) != 0 {
+			return fmt.Errorf("operations occurred: git=%v clients=%d provider=%v", mutOps, len(w.NewClientCalls), w.Client.Calls)
+		}
+		if w.Store != nil && (w.Store.Gets != 0 || w.Store.Puts != 0 || w.Store.Deletes != 0) {
+			return fmt.Errorf("credential store changed or was read: gets=%d puts=%d deletes=%d", w.Store.Gets, w.Store.Puts, w.Store.Deletes)
+		}
+		if after, _ := os.ReadFile(w.ConfigPath); !bytes.Equal(w.ConfigBefore, after) {
+			return errors.New("provider configuration changed")
 		}
 		return globalGitUnchanged()
 	})

@@ -16,6 +16,7 @@ import (
 )
 
 type Config struct {
+	Transport string `yaml:"transport,omitempty"`
 	Providers map[string]Provider `yaml:"providers"`
 }
 

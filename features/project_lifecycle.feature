@@ -17,7 +17,7 @@ Feature: Planned project lifecycle
   @planned @LIFECYCLE-CLONE-001
   Scenario: Clone one unambiguous repository safely
     Given selected-provider metadata resolves "api" to a clean authoritative URL on its configured authority without userinfo, query, or fragment
-    And its destination is a clean relative missing or empty path confined beneath the workspace root
+    And its destination is a clean relative missing or empty path
     When I run `colt clone api`
     Then destination access remains root-relative, no-follow, and confined throughout the operation
     And native Git ignores inherited GIT controls and global and system configuration
@@ -59,33 +59,71 @@ Feature: Planned project lifecycle
     When I run `colt release 1.2.3`
     Then the command fails before creating or changing a tag, executing local controls, or exposing credentials
 
-  @planned @LIFECYCLE-TRANSPORT-001
+  @planned @CORE-GIT-004 @LIFECYCLE-TRANSPORT-001
   Scenario: HTTPS transport selects the authoritative HTTPS repository URL
     Given the transport preference resolves to HTTPS
     When Colt selects the clone/push target
     Then the target is the authoritative HTTPS URL for the selected provider repository
     And the managed repository configures the repository-local Colt credential helper
 
-  @planned @LIFECYCLE-TRANSPORT-001
+  @planned @CORE-GIT-004 @LIFECYCLE-TRANSPORT-001
   Scenario: SSH transport selects the authoritative SSH repository URL
     Given the transport preference resolves to SSH
     When Colt selects the clone/push target
     Then the target is the authoritative SSH URL for the selected provider repository
 
-  @planned @LIFECYCLE-TRANSPORT-001
+  @planned @CORE-GIT-009 @LIFECYCLE-TRANSPORT-001
   Scenario: Explicit transport preference overrides the default
     Given the product default transport is HTTPS
     And an explicit transport preference selects SSH
     When Colt selects the clone/push target
     Then the SSH target is used
 
-  @planned @LIFECYCLE-TRANSPORT-001
+  @planned @CORE-GIT-009 @LIFECYCLE-TRANSPORT-001
+  Scenario: Explicit choice overrides provider preference
+    Given the product default transport is HTTPS
+    And the provider preference is SSH
+    And the explicit command choice is HTTPS
+    When Colt selects the clone/push target
+    Then the HTTPS target is used
+
+  @planned @CORE-GIT-009 @LIFECYCLE-TRANSPORT-001
+  Scenario: Explicit choice overrides global preference
+    Given the product default transport is HTTPS
+    And the global preference is SSH
+    And the explicit command choice is HTTPS
+    When Colt selects the clone/push target
+    Then the HTTPS target is used
+
+  @planned @CORE-GIT-009 @LIFECYCLE-TRANSPORT-001
+  Scenario: Provider preference overrides global preference
+    Given the product default transport is HTTPS
+    And the global preference is HTTPS
+    And the provider preference is SSH
+    When Colt selects the clone/push target
+    Then the SSH target is used
+
+  @planned @CORE-GIT-009 @LIFECYCLE-TRANSPORT-001
+  Scenario: Provider preference overrides product default
+    Given the product default transport is HTTPS
+    And the provider preference is SSH
+    When Colt selects the clone/push target
+    Then the SSH target is used
+
+  @planned @CORE-GIT-009 @LIFECYCLE-TRANSPORT-001
+  Scenario: Global preference overrides product default
+    Given the product default transport is HTTPS
+    And the global preference is SSH
+    When Colt selects the clone/push target
+    Then the SSH target is used
+
+  @planned @CORE-GIT-009 @LIFECYCLE-TRANSPORT-001
   Scenario: Unsupported transport fails before repository mutation
     Given the requested transport is unsupported for the selected provider
     When Colt selects the clone/push target
     Then the command fails before repository mutation
 
-  @planned @LIFECYCLE-TRANSPORT-001
+  @planned @CORE-GIT-009 @LIFECYCLE-TRANSPORT-001
   Scenario: Clone leaves ordinary Git usable without re-entering credentials
     Given a repository was cloned with HTTPS transport and the Colt credential helper
     When I run ordinary "git fetch" without invoking Colt

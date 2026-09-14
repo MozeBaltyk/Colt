@@ -620,7 +620,7 @@ func (a *App) providerStatus(cmd *cobra.Command, args []string, repository strin
 }
 
 func (a *App) repositoryTransportStatus(cmd *cobra.Command, client provider.Client, p config.Provider, alias, project string, tokenEnvNames []string) (string, string) {
-	transport, err := initTransport(p)
+	transport, err := InitTransport(p, "", "")
 	if err != nil {
 		return "", "configured transport is invalid"
 	}
@@ -679,7 +679,7 @@ func resolvedCredentialSource(p config.Provider) string {
 
 func matchingOrigin(cfg config.Config, origin string) (alias, transport, project string) {
 	for candidate, p := range cfg.Providers {
-		selected, err := initTransport(p)
+		selected, err := InitTransport(p, "", "")
 		if err != nil {
 			continue
 		}
@@ -1014,6 +1014,7 @@ type initOptions struct {
 	provider    string
 	destination string
 	visibility  string
+	transport   string
 }
 
 func (a *App) initCommand() *cobra.Command {
@@ -1041,6 +1042,7 @@ func (a *App) initCommand() *cobra.Command {
 	cmd.Flags().StringVarP(&opts.provider, "provider", "p", "", "provider alias")
 	cmd.Flags().StringVarP(&opts.destination, "destination", "d", "", "remote clone destination (relative to the current directory or absolute)")
 	cmd.Flags().StringVar(&opts.visibility, "visibility", "", "repository visibility (private or public)")
+	cmd.Flags().StringVar(&opts.transport, "transport", "", "Git transport: https or ssh (default from config or https)")
 	return cmd
 }
 
@@ -1080,7 +1082,7 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) (
 		return err
 	}
 	report.provider = alias + " · namespace " + selected.Namespace
-	transport, err := initTransport(selected)
+	transport, err := InitTransport(selected, opts.transport, a.ConfigPath)
 	if err != nil {
 		return err
 	}
@@ -1324,14 +1326,29 @@ func validateNamespacePath(root, namespace string) error {
 	return nil
 }
 
-func initTransport(p config.Provider) (string, error) {
-	if p.Transport == "" {
-		return "https", nil
+func InitTransport(p config.Provider, explicitTransport string, configPath string) (string, error) {
+	// Precedence: explicit command option > provider transport preference >
+	// global transport preference > product default (HTTPS).
+	if explicitTransport != "" {
+		if explicitTransport != "https" && explicitTransport != "ssh" {
+			return "", errors.New("unsupported transport; use https or ssh")
+		}
+		return explicitTransport, nil
 	}
-	if p.Transport != "https" && p.Transport != "ssh" {
-		return "", errors.New("unsupported transport; use https or ssh")
+	if p.Transport != "" {
+		if p.Transport != "https" && p.Transport != "ssh" {
+			return "", errors.New("unsupported transport; use https or ssh")
+		}
+		return p.Transport, nil
 	}
-	return p.Transport, nil
+	cfg, err := config.Load(configPath)
+	if err == nil && cfg.Transport != "" {
+		if cfg.Transport != "https" && cfg.Transport != "ssh" {
+			return "", errors.New("unsupported transport; use https or ssh")
+		}
+		return cfg.Transport, nil
+	}
+	return "https", nil
 }
 
 func validateWorkDir(path string) error {
