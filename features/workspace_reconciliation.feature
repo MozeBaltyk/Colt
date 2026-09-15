@@ -61,11 +61,62 @@ Feature: Planned declarative workspace reconciliation
        | colt sync           |
        | colt sync --dry-run |
 
-   @planned @WORKSPACE-SYNC-001
-   Scenario: Mirror a repository to a local Gitea/Forgejo instance
-     Given M7 has deployed a local Gitea or Forgejo instance via `colt run`
-     And the local instance is configured as a provider alias
-     When I run `colt mirror <source> <local-alias>`
-     Then the repository is cloned from the source provider and pushed to the local instance
-     And the local instance contains the same branches and commits
-     And the local origin is updated to the local instance URL
+    @planned @MIRROR-001
+    Scenario: Mirror lists source repositories, clones, creates target, pushes, cleans up
+      Given M7 has deployed a local Gitea or Forgejo instance via `colt run`
+      And the source provider namespace has three repositories
+      When I run `colt mirror <source> <local-alias> --namespace <ns>`
+      Then all three source repositories are listed
+      And each repository is cloned into a temporary directory
+      And the repository is created on the target provider
+      And all branches and tags are pushed to the target
+      And the temporary directories are removed
+
+    @planned @MIRROR-002
+    Scenario: Mirror independent failures do not abort unrelated mirrors
+      Given M7 has deployed a local Gitea or Forgejo instance
+      And the source provider namespace has two repositories
+      And one repository cannot be cloned
+      When I run `colt mirror <source> <local-alias>`
+      Then the other repository is mirrored successfully
+      And the failed repository is reported
+      And completed mirrors are retained
+
+    @planned @MIRROR-003
+    Scenario Outline: Mirror target conflicts fail safely without --replace
+      Given M7 has deployed a local Gitea or Forgejo instance
+      And the target provider already has repository "demo"
+      When I run `colt mirror <source> <local-alias>`
+      Then the command fails without overwriting the existing target
+      And the existing target repository is unchanged
+
+      Examples:
+        | source      |
+        | github      |
+        | gitlab      |
+
+    @planned @MIRROR-003
+    Scenario: Mirror --replace explicitly enables replacement
+      Given M7 has deployed a local Gitea or Forgejo instance
+      And the target provider already has repository "demo"
+      When I run `colt mirror <source> <local-alias> --replace`
+      Then the target repository is replaced
+      And unrelated state is not silently overwritten
+
+    @planned @MIRROR-004
+    Scenario: Mirror is one-way and source and target remain independent
+      Given M7 has deployed a local Gitea or Forgejo instance
+      And the source provider has repository "demo"
+      When I run `colt mirror <source> <local-alias>`
+      Then the mirror completes successfully
+      And a later change on the source does not automatically propagate to the target
+      And another explicit `colt mirror` invocation is required
+
+    @planned @MIRROR-005
+    Scenario: Mirror target remotes are credential-free
+      Given M7 has deployed a local Gitea or Forgejo instance
+      And the source provider namespace has repository "demo"
+      When I run `colt mirror <source> <local-alias>`
+      Then the target remote URL contains no credentials
+      And the target provider URL is used
+      And the source provider URL is not retained as the target push remote

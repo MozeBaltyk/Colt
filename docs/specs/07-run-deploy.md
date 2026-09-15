@@ -47,6 +47,9 @@ All three are `WantedBy=multi-user.target` so the deployment survives reboot.
 | `RUN-008` | `colt run stop/start/rm` MUST control the deployment lifecycle. `rm` MUST NOT remove volumes unless `--volumes`. | Lifecycle test |
 | `RUN-009` | `--image` overrides the default image tag. | Unit inspection |
 | `RUN-010` | On any systemd/podman/permission failure, MUST report the failing layer and stop, leaving prior deployment intact unless `--replace`. | Failure-path test |
+| `RUN-011` | Database container MUST declare an engine-appropriate `--health-cmd` (`mysqladmin ping` / `pg_isready`). | Unit inspection / container health check |
+| `RUN-012` | App unit MUST wait for the database to become healthy before starting the app container. | Unit inspection / startup order test |
+| `RUN-013` | `colt run` requires root (writes to `/etc/systemd/system/`). Non-root execution MUST fail with an actionable error suggesting `sudo`. | Non-root execution test |
 
 ## Image defaults
 

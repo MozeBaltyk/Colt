@@ -255,3 +255,16 @@ Feature: Blank project initialization
     Then the existing helper remains and the Colt helper appears exactly once locally
     And credential.useHttpPath is true in repository-local configuration
     And global Git configuration is unchanged
+
+  @CORE-GIT-009
+  Scenario: Explicit transport preference overrides the product default
+    Given the product default transport is HTTPS
+    And an explicit transport preference selects SSH
+    When I run "colt init demo --transport ssh"
+    Then the SSH target is used
+
+  @CORE-GIT-009
+  Scenario: Unsupported transport fails before repository mutation
+    Given the requested transport is invalid
+    When I run "colt init demo --transport ftp"
+    Then the command fails before creating a destination or remote
