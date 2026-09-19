@@ -366,13 +366,10 @@ func (a *App) authCommand() *cobra.Command {
 					return err
 				}
 			}
-			if revoke {
-				return errors.New("--revoke is not supported; no local or remote credential was changed")
-			}
-			return a.logoutProvider(cmd, alias)
+			return a.logoutProvider(cmd, alias, revoke)
 		},
 	}
-	logout.Flags().BoolVar(&revoke, "revoke", false, "unsupported: provider-side revocation is not implemented")
+	logout.Flags().BoolVar(&revoke, "revoke", false, "also attempt provider-side revocation of the credential")
 	f := login.Flags()
 	f.StringVar(&opts.host, "host", "", "provider host (required for Gitea/Forgejo; defaults for GitHub and GitLab)")
 	f.StringVar(&opts.baseURL, "base-url", "", "HTTPS API base URL (defaults from provider host)")
@@ -453,7 +450,7 @@ func loginRequiredInputs(cmd *cobra.Command, providerType string, opts *authOpti
 	return required
 }
 
-func (a *App) logoutProvider(cmd *cobra.Command, alias string) error {
+func (a *App) logoutProvider(cmd *cobra.Command, alias string, revoke bool) error {
 	if a.pathErr != nil {
 		return a.pathErr
 	}
@@ -469,26 +466,61 @@ func (a *App) logoutProvider(cmd *cobra.Command, alias string) error {
 	if envName == "" {
 		envName = credential.ConventionalVar(p.Type)
 	}
+
+	var remoteErr error
+	if revoke {
+		remoteErr = a.revokeProviderCredential(cmd, p)
+	}
+
 	if p.Auth.Source == "env" {
 		fmt.Fprintf(cmd.OutOrStdout(), "no stored credential removed for %s; ! %s may still provide credentials (environment unchanged)\n", alias, envName)
-		return nil
+		return remoteErr
 	}
 
 	err = a.credentialStore().Delete(p.Auth.CredentialID)
+	var removeErr error
 	switch {
 	case errors.Is(err, credential.ErrNotFound):
 		fmt.Fprintf(cmd.OutOrStdout(), "no stored credential found for %s; nothing changed\n", p.Auth.CredentialID)
 	case errors.Is(err, credential.ErrStoreUnavailable):
-		return errors.New("credential storage unavailable; local credential was not removed")
+		removeErr = errors.New("credential storage unavailable; local credential was not removed")
 	case errors.Is(err, credential.ErrPartialDelete):
-		return errors.New("credential removal partially failed; the credential may remain in one local store; provider configuration is unchanged")
+		removeErr = errors.New("credential removal partially failed; the credential may remain in one local store; provider configuration is unchanged")
 	case err != nil:
-		return errors.New("credential storage failure; local credential was not removed safely")
+		removeErr = errors.New("credential storage failure; local credential was not removed safely")
 	default:
 		fmt.Fprintf(cmd.OutOrStdout(), "removed stored credential %s; provider configuration unchanged\n", p.Auth.CredentialID)
 	}
+	if removeErr != nil {
+		fmt.Fprintln(cmd.OutOrStdout(), "! local credential removal failed")
+		return errors.Join(remoteErr, removeErr)
+	}
 	fmt.Fprintf(cmd.OutOrStdout(), "! %s may still provide credentials (environment unchanged)\n", envName)
-	return nil
+	return remoteErr
+}
+
+var errRemoteRevocationFailed = errors.New("remote credential revocation failed")
+
+func (a *App) revokeProviderCredential(cmd *cobra.Command, p config.Provider) error {
+	token, _, err := config.Token(p, a.credentialStore())
+	if err == nil {
+		var client provider.Client
+		client, err = a.NewClient(p, token)
+		if err == nil {
+			err = client.Revoke(cmd.Context(), provider.RevocationOptions{})
+		}
+	}
+	switch {
+	case err == nil:
+		fmt.Fprintln(cmd.OutOrStdout(), "✓ remote credential revoked")
+		return nil
+	case errors.Is(err, provider.ErrRevocationUnsupported):
+		fmt.Fprintln(cmd.OutOrStdout(), "provider-side revocation unsupported")
+		return nil
+	default:
+		fmt.Fprintln(cmd.OutOrStdout(), "! remote revocation failed")
+		return errRemoteRevocationFailed
+	}
 }
 
 func (a *App) providerStatus(cmd *cobra.Command, args []string, repository string) error {

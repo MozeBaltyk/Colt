@@ -586,8 +586,92 @@ func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		w.Client.AuthErr = errors.New("network failure: provider API unreachable")
 		return nil
 	})
+	// provisionStoredLogout configures provider "personal" with a stored
+	// credential so logout scenarios (plain and --revoke) have a local
+	// credential to remove.
+	provisionStoredLogout := func(secret string) error {
+		p := fixture.StdProvider("github", "example-user")
+		p.Auth = config.Auth{Source: "stored", CredentialID: "github.com/personal"}
+		w.Providers = map[string]config.Provider{"personal": p}
+		w.Store = fixture.NewFakeCredentialStore()
+		w.Store.Credentials[p.Auth.CredentialID] = credential.Credential{Kind: "bearer_token", Secret: secret}
+		w.Credentials = w.Store
+		w.Secrets = append(w.Secrets, secret)
+		return w.SaveConfig()
+	}
 	ctx.Step(`^the provider API is unreachable$`, func() error {
 		w.Client.AuthErr = errors.New("provider API unreachable")
+		return nil
+	})
+	ctx.Step(`^provider "personal" supports provider-side revocation$`, func() error {
+		w.Client.RevokeErr = nil
+		return provisionStoredLogout("revoke-secret")
+	})
+	ctx.Step(`^provider-side revocation fails for provider "personal"$`, func() error {
+		w.Client.RevokeErr = errors.New("remote revocation failed")
+		return provisionStoredLogout("revoke-secret")
+	})
+	ctx.Step(`^provider-side revocation succeeds for provider "personal"$`, func() error {
+		w.Client.RevokeErr = nil
+		return provisionStoredLogout("revoke-secret")
+	})
+	ctx.Step(`^local credential deletion fails$`, func() error {
+		if w.Store == nil {
+			return errors.New("no injected credential store configured")
+		}
+		w.Store.DeleteErr = errors.New("credential deletion failed")
+		return nil
+	})
+	ctx.Step(`^the provider reports revocation as unsupported$`, func() error {
+		w.Client.RevokeErr = provider.ErrRevocationUnsupported
+		return provisionStoredLogout("revoke-secret")
+	})
+	ctx.Step(`^the remote credential is revoked$`, func() error {
+		if !w.Client.Called("Revoke") {
+			return fmt.Errorf("revocation was not attempted: %v", w.Client.Calls)
+		}
+		return nil
+	})
+	ctx.Step(`^output reports "! remote revocation failed"$`, func() error {
+		if !strings.Contains(w.Out, "! remote revocation failed") {
+			return fmt.Errorf("remote revocation failure missing from %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^output reports local credential removal$`, func() error {
+		if !strings.Contains(w.Out, "removed stored credential") {
+			return fmt.Errorf("local credential removal missing from %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^output reports the remote revocation$`, func() error {
+		if !strings.Contains(w.Out, "✓ remote credential revoked") {
+			return fmt.Errorf("remote revocation report missing from %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^output reports "local credential removal failed"$`, func() error {
+		if !strings.Contains(w.Out, "! local credential removal failed") {
+			return fmt.Errorf("local credential removal failure missing from %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^output reports revocation is unsupported without exposing secrets$`, func() error {
+		if !strings.Contains(w.Out, "provider-side revocation unsupported") || w.Leaked(w.Out) != "" {
+			return fmt.Errorf("unsafe or missing unsupported-revocation report: %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^the local persisted credential is removed$`, func() error {
+		return assertStoredCredentialRemoved(w)
+	})
+	ctx.Step(`^the local persisted credential is still removed$`, func() error {
+		return assertStoredCredentialRemoved(w)
+	})
+	ctx.Step(`^no revocation API call is attempted$`, func() error {
+		if w.Client.Called("Revoke") {
+			return fmt.Errorf("unexpected revocation attempt: %v", w.Client.Calls)
+		}
 		return nil
 	})
 	ctx.Step(`^no providers are configured$`, func() error {
@@ -1472,6 +1556,16 @@ func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 func checkOfflineClean(w *fixture.World) error {
 	if secret := w.Leaked(w.Out); secret != "" {
 		return fmt.Errorf("output leaks a credential value")
+	}
+	return nil
+}
+
+func assertStoredCredentialRemoved(w *fixture.World) error {
+	if w.Store == nil {
+		return errors.New("no injected credential store configured")
+	}
+	if _, ok := w.Store.Credentials["github.com/personal"]; ok {
+		return errors.New("local credential was not removed")
 	}
 	return nil
 }

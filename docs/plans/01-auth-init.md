@@ -1,6 +1,6 @@
 # Plan: M1 — Authentication & Blank Initialization
 
-Partially implemented; absent behavior is `@unimplemented`.
+Partially implemented; remaining absent behavior is `@unimplemented`.
 
 ## Dependencies
 
@@ -17,14 +17,12 @@ None (foundation milestone).
 | 5 | `colt auth login/status/logout` | `cmd/colt/` | ⬜ partial |
 | 6 | `colt init` (remote + `--local`) | `cmd/colt/` | ⬜ partial |
 | 7 | Container-backed Gitea/Forgejo vertical tests | `features/` | ✅ done |
-| 8 | Production native-backend persistence acceptance | — | ❌ @unimplemented |
-| 9 | Provider-side revocation (`logout --revoke`) | — | ❌ @unimplemented |
+| 8 | Production native-backend persistence acceptance | `integration/` | ✅ done (gated) |
+| 9 | Provider-side revocation (`logout --revoke`) | `internal/app/` | ✅ done |
 
 ## Left to do (order)
 
-1. **Persistence backend** — secure OS store + explicit-consent plaintext fallback + `@unimplemented` acceptance.
-2. **Provider-side revocation** — `logout --revoke` per provider adapter.
-3. **Remaining provider adapters** — fill gaps for GitLab/Gitea/Forgejo if any adapter is partial.
+1. **Remaining provider adapters** — fill gaps for GitLab/Gitea/Forgejo if any adapter is partial.
 
 ## Acceptance
 

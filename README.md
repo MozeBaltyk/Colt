@@ -66,8 +66,10 @@ already-created consented plaintext fallback. macOS Keychain support requires a
 CGO-enabled build; Windows Credential Manager remains supported without the
 Windows plaintext fallback.
 `auth logout` removes the selected stored credential from both local stores,
-preserving config, environment, SSH state, and unrelated credentials. Colt
-never requires `gh`, `glab`, or `curl`, and never changes global Git identity.
+preserving config, environment, SSH state, and unrelated credentials. With
+`--revoke`, Colt also attempts provider-side revocation first, reporting remote
+supported / unsupported / failed independently of the local removal outcome.
+Colt never requires `gh`, `glab`, or `curl`, and never changes global Git identity.
 Provider-independent ownership is called a **namespace**.
 
 HTTPS repositories use a Git credential helper that invokes `colt` by name.
@@ -78,8 +80,11 @@ because portable shell-safe quoting across Git's supported platforms is not avai
 
 Milestone 1 includes environment and manual-token authentication, secure
 persistence with consent-only plaintext fallback, local-only logout, blank
-initialization, and HTTPS Git transport. Browser/device authorization and
-provider-side revocation remain `@unimplemented`. The real
+initialization, and HTTPS Git transport. Provider-side revocation is
+implemented, reporting remote supported/unsupported/failed independently of
+local credential removal. Production native persistence acceptance is gated
+behind the `integration` lane, characterized by a native OS keyring round-trip
+test that skips when no native credential facility is available. The real
 Colt-to-Gitea and Colt-to-Forgejo initialization and push paths are exercised in container-backed CI.
 Milestone 2 core list/clone/release primitives are available with authoritative
 transport validation, partial-release reporting, race-safe clone destination

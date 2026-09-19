@@ -157,14 +157,14 @@ Feature: Provider configuration and authentication
     Then the command succeeds
     And the credential is stored as "github.com/personal" without its value in config
 
-  @unimplemented @CORE-CREDENTIAL-005 @CORE-CREDENTIAL-002
+  @integration @CORE-CREDENTIAL-005 @CORE-CREDENTIAL-002
   Scenario: Production persistence uses a real native OS credential backend
     Given a supported native OS credential backend is available
     When a manual token is enrolled by the real Colt binary
     Then the credential is persisted without invoking an external executable
     And no reusable credential value appears in output or config
 
-  @unimplemented @CORE-CREDENTIAL-005 @CORE-CREDENTIAL-004
+  @integration @CORE-CREDENTIAL-005 @CORE-CREDENTIAL-004
   Scenario: Persisted credential is reused by a later Colt process
     Given provider "personal" has a persisted secure credential
     When a new Colt process authenticates provider "personal" without re-login
@@ -627,14 +627,14 @@ Feature: Provider configuration and authentication
     And `colt auth status` still authenticates via "GITHUB_TOKEN"
     And output does not contain "env-fake-secret-4"
 
-  @unimplemented @CORE-PROVIDER-009
+  @CORE-PROVIDER-009
   Scenario: Logout with revoke removes remote and local credential
     Given provider "personal" supports provider-side revocation
     When I run `colt auth logout personal --revoke`
     Then the remote credential is revoked
     And the local persisted credential is removed
 
-  @unimplemented @CORE-PROVIDER-009
+  @CORE-PROVIDER-009
   Scenario: Remote revocation failure still allows local credential removal
     Given provider-side revocation fails for provider "personal"
     When I run `colt auth logout personal --revoke`
@@ -642,7 +642,7 @@ Feature: Provider configuration and authentication
     And output reports local credential removal
     And the local persisted credential is removed
 
-  @unimplemented @CORE-PROVIDER-009
+  @CORE-PROVIDER-009
   Scenario: Local credential removal failure is reported after remote revocation
     Given provider-side revocation succeeds for provider "personal"
     And local credential deletion fails
@@ -650,16 +650,17 @@ Feature: Provider configuration and authentication
     Then output reports the remote revocation
     And output reports "local credential removal failed"
 
-  @unimplemented @CORE-PROVIDER-009
+  @CORE-PROVIDER-009
   Scenario: Unsupported provider-side revocation is reported safely
     Given the provider reports revocation as unsupported
     When I run `colt auth logout personal --revoke`
     Then output reports revocation is unsupported without exposing secrets
     And the local persisted credential is still removed
 
-  @unimplemented @CORE-PROVIDER-009
+  @CORE-PROVIDER-009
   Scenario: Ordinary logout does not attempt remote revocation
-    Given the provider API is unreachable
+    Given provider "personal" has a credential in an injected secure-store double
+    And the provider API is unreachable
     When I run `colt auth logout personal`
     Then no revocation API call is attempted
     And the local persisted credential is removed

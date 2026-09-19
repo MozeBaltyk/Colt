@@ -35,6 +35,8 @@ import (
 	"testing"
 	"time"
 
+	keyring "github.com/99designs/keyring"
+	"github.com/MozeBaltyk/Colt/internal/credential"
 	"github.com/cucumber/godog"
 )
 
@@ -335,6 +337,53 @@ func TestBackendTokenAuth(t *testing.T) {
 				t.Fatalf("login = %q, want %q", me.Login, adminUser)
 			}
 		})
+	}
+}
+
+// TestProductionNativePersistence characterizes the two @integration
+// `CORE-CREDENTIAL-005` production scenarios: a credential written through one
+// SecureStore round-trips through a second, fresh SecureStore (a later process
+// reopening the backend) and is then deleted. It skips when no real native
+// keyring is available. No external-executable check is needed: production
+// SecureStore restricts AllowedBackends to the native OS facilities
+// (WinCred/Keychain/SecretService), so neither write nor read can shell out.
+func TestProductionNativePersistence(t *testing.T) {
+	if _, err := keyring.Open(keyring.Config{
+		ServiceName: "colt",
+		AllowedBackends: []keyring.BackendType{
+			keyring.WinCredBackend,
+			keyring.KeychainBackend,
+			keyring.SecretServiceBackend,
+		},
+	}); err != nil {
+		t.Skipf("no native OS credential backend available: %v", err)
+	}
+
+	id := fmt.Sprintf("integration-native-persistence-%d", time.Now().UnixNano())
+	cred := credential.Credential{Kind: "bearer_token", Secret: "integration-native-secret"}
+	cleanup := credential.NewSecureStore()
+	defer func() { _ = cleanup.Delete(id) }()
+
+	writer := credential.NewSecureStore()
+	if err := writer.Create(id, cred); err != nil {
+		t.Fatalf("write credential: %v", err)
+	}
+
+	// A fresh SecureStore models a later process re-opening the backend.
+	reader := credential.NewSecureStore()
+	got, err := reader.Get(id)
+	if err != nil {
+		t.Fatalf("read credential through a fresh store: %v", err)
+	}
+	if got.Secret != cred.Secret || got.Kind != "bearer_token" {
+		t.Fatalf("round-tripped credential = %+v", got)
+	}
+
+	if err := reader.Delete(id); err != nil {
+		t.Fatalf("delete credential: %v", err)
+	}
+	if _, err := reader.Get(id); !errors.Is(err, credential.ErrNotFound) {
+		t.Fatalf("credential still present after delete: %v", err)
 	}
 }
 

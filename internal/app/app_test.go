@@ -427,10 +427,61 @@ func TestCORE_PROVIDER_008LogoutRejectsUnsafeOperations(t *testing.T) {
 			}
 		})
 	}
-	store := &recordingStore{credentials: map[string]credential.Credential{"github.com/personal": {Kind: "bearer_token", Secret: "keep"}}}
-	_, err := execute(t, &App{ConfigPath: path, Credentials: store}, "auth", "logout", "personal", "--revoke")
-	if err == nil || !strings.Contains(err.Error(), "--revoke is not supported") || len(store.deletes) != 0 {
-		t.Fatalf("revoke error=%v deletes=%v", err, store.deletes)
+}
+
+func TestCORE_PROVIDER_009LogoutRevokeOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		revokeErr   error
+		deleteErr   error
+		wantErr     bool
+		wantRevokes int
+		remoteMsg   string
+		localMsg    string
+		localGone   bool
+	}{
+		{"supported", nil, nil, false, 1, "✓ remote credential revoked", "removed stored credential github.com/personal", true},
+		{"failed", errors.New("remote revocation failed"), nil, true, 1, "! remote revocation failed", "removed stored credential github.com/personal", true},
+		{"unsupported", provider.ErrRevocationUnsupported, nil, false, 1, "provider-side revocation unsupported", "removed stored credential github.com/personal", true},
+		{"local delete failure", nil, errors.New("credential delete failed"), true, 1, "✓ remote credential revoked", "! local credential removal failed", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": storedProvider("personal")}}); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GITHUB_TOKEN", "")
+			store := &recordingStore{credentials: map[string]credential.Credential{
+				"github.com/personal": {Kind: "bearer_token", Secret: "revoke-test-secret"},
+			}, deleteErr: tc.deleteErr}
+			client := &fakeClient{revokeErr: tc.revokeErr}
+			a := &App{ConfigPath: path, Credentials: store, NewClient: func(config.Provider, string) (provider.Client, error) {
+				return client, nil
+			}}
+			output, err := execute(t, a, "auth", "logout", "personal", "--revoke")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error=%v wantErr=%v output=%q", err, tc.wantErr, output)
+			}
+			if client.revokes != tc.wantRevokes {
+				t.Fatalf("revokes=%d want=%d", client.revokes, tc.wantRevokes)
+			}
+			for _, want := range []string{tc.remoteMsg, tc.localMsg} {
+				if want != "" && !strings.Contains(output, want) {
+					t.Fatalf("output=%q missing %q", output, want)
+				}
+			}
+			if strings.Contains(output, "revoke-test-secret") {
+				t.Fatalf("output leaked the credential: %q", output)
+			}
+			_, remainingErr := store.Get("github.com/personal")
+			if tc.localGone {
+				if !errors.Is(remainingErr, credential.ErrNotFound) {
+					t.Fatalf("credential not removed: %v", remainingErr)
+				}
+			} else if remainingErr != nil {
+				t.Fatalf("credential unexpectedly removed: %v", remainingErr)
+			}
+		})
 	}
 }
 
@@ -2611,6 +2662,8 @@ type fakeClient struct {
 	listRepos       []provider.Repository
 	gets, creates   int
 	visibility      string
+	revokeErr       error
+	revokes         int
 }
 
 func (f *fakeClient) Authenticate(context.Context) (string, error) { return f.account, f.authErr }
@@ -2628,8 +2681,11 @@ func (f *fakeClient) Create(_ context.Context, _ string, visibility ...string) (
 	}
 	return f.created, f.createErr
 }
-func (f *fakeClient) Release(context.Context, string, string) error            { return nil }
-func (f *fakeClient) Revoke(context.Context, provider.RevocationOptions) error { return nil }
+func (f *fakeClient) Release(context.Context, string, string) error { return nil }
+func (f *fakeClient) Revoke(context.Context, provider.RevocationOptions) error {
+	f.revokes++
+	return f.revokeErr
+}
 
 func testApp(path, workDir string, runner *fakeGit, client *fakeClient) *App {
 	return &App{ConfigPath: path, WorkDir: workDir, Git: runner, NewClient: func(config.Provider, string) (provider.Client, error) { return client, nil }}
