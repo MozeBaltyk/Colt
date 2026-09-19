@@ -2212,7 +2212,7 @@ func TestCORE_GIT_011StatusTransportIsIndependentAndAuthorityMatched(t *testing.
 		{"wrong authority", "https://example.org/octocat/demo.git", "https", nil, nil, false, "✓ connected", "not checked", false},
 		{"wrong namespace", "https://github.com/other/demo.git", "https", nil, nil, false, "✓ connected", "not checked", false},
 		{"origin with userinfo", "https://attacker@github.com/octocat/demo.git", "https", nil, nil, false, "✓ connected", "not checked", false},
-		{"wrong configured transport", "git@github.com:octocat/demo.git", "https", nil, nil, false, "✓ connected", "not checked", false},
+		{"authoritative origin using other transport", "git@github.com:octocat/demo.git", "https", nil, nil, false, "✓ connected", "SSH · ✓ Git authentication/connectivity and read access confirmed", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -2462,6 +2462,7 @@ func TestLIST_004NoProvidersConfiguredFails(t *testing.T) {
 }
 
 func TestCLONE_001ClonesRepository(t *testing.T) {
+	workDir := t.TempDir()
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	p := storedProvider("personal")
 	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": p}}); err != nil {
@@ -2474,7 +2475,7 @@ func TestCLONE_001ClonesRepository(t *testing.T) {
 	client := &fakeClient{
 		found: &provider.Repository{CloneURL: "https://github.com/octocat/demo.git"},
 	}
-	_, err := execute(t, &App{ConfigPath: path, Credentials: store, Git: runner, NewClient: func(config.Provider, string) (provider.Client, error) {
+	_, err := execute(t, &App{ConfigPath: path, WorkDir: workDir, Credentials: store, Git: runner, NewClient: func(config.Provider, string) (provider.Client, error) {
 		return client, nil
 	}}, "clone", "demo")
 	if err != nil {
@@ -2508,6 +2509,23 @@ func TestCLONE_003InvalidProjectNameFails(t *testing.T) {
 	}
 }
 
+func TestMatchingOriginAcceptsEitherAuthoritativeTransport(t *testing.T) {
+	p := appProvider()
+	p.Transport = "ssh"
+	cfg := config.Config{Providers: map[string]config.Provider{"work": p}}
+	for _, tc := range []struct {
+		origin, transport string
+	}{
+		{"https://gitlab.com/team/demo.git", "https"},
+		{"git@gitlab.com:team/demo.git", "ssh"},
+	} {
+		alias, transport, project := matchingOrigin(cfg, tc.origin)
+		if alias != "work" || transport != tc.transport || project != "demo" {
+			t.Fatalf("matchingOrigin(%q) = %q, %q, %q", tc.origin, alias, transport, project)
+		}
+	}
+}
+
 type fakeGit struct {
 	calls                 []string
 	availableErr          error
@@ -2517,6 +2535,7 @@ type fakeGit struct {
 	originErr             error
 	lsRemoteErr           error
 	lsRemoteTokenEnvNames []string
+	cloneHook             func(string) error
 }
 
 func (g *fakeGit) Available() error { g.calls = append(g.calls, "available"); return g.availableErr }
@@ -2532,7 +2551,19 @@ func (g *fakeGit) LsRemote(_ context.Context, _, origin, alias, project string, 
 func (g *fakeGit) Init(context.Context, string) error { g.calls = append(g.calls, "init"); return nil }
 func (g *fakeGit) Clone(_ context.Context, url, destination, _, _, _ string) error {
 	g.calls = append(g.calls, "clone:"+url+":"+destination)
-	return g.cloneErr
+	if g.cloneErr != nil {
+		return g.cloneErr
+	}
+	if err := os.MkdirAll(destination, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(destination, "README.md"), []byte("clone\n"), 0o644); err != nil {
+		return err
+	}
+	if g.cloneHook != nil {
+		return g.cloneHook(destination)
+	}
+	return nil
 }
 func (g *fakeGit) SetIdentity(context.Context, string, string, string) error {
 	g.calls = append(g.calls, "identity")
@@ -2554,12 +2585,16 @@ func (g *fakeGit) Push(_ context.Context, _, url, _, _ string) error {
 	g.calls = append(g.calls, "push:"+url)
 	return g.pushErr
 }
-func (g *fakeGit) CreateTag(_ context.Context, _ /* dir */, tag string) error {
+func (g *fakeGit) PushTag(_ context.Context, _, url, _, _, tag string, _ []string) error {
+	g.calls = append(g.calls, "push-tag:"+url+":"+tag)
+	return g.pushErr
+}
+func (g *fakeGit) CreateTag(_ context.Context, _ /* dir */, tag, _, _ string) error {
 	g.calls = append(g.calls, "tag:"+tag)
 	return nil
 }
-func (g *fakeGit) TagExists(_ context.Context, _ /* dir */, tag string) error {
-	g.calls = append(g.calls, "tag-exists:"+tag)
+func (g *fakeGit) ValidateTag(_ context.Context, _ /* dir */, tag string) error {
+	g.calls = append(g.calls, "validate-tag:"+tag)
 	return nil
 }
 
@@ -2589,7 +2624,7 @@ func (f *fakeClient) Create(_ context.Context, _ string, visibility ...string) (
 	}
 	return f.created, f.createErr
 }
-func (f *fakeClient) Release(context.Context, string, string) error { return nil }
+func (f *fakeClient) Release(context.Context, string, string) error            { return nil }
 func (f *fakeClient) Revoke(context.Context, provider.RevocationOptions) error { return nil }
 
 func testApp(path, workDir string, runner *fakeGit, client *fakeClient) *App {

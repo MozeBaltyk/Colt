@@ -29,6 +29,7 @@ type FakeGit struct {
 	ProbeBounded bool
 	ProbeAlias   string
 	ProbeProject string
+	CloneHook    func(string) error
 }
 
 func (f *FakeGit) Available() error {
@@ -82,6 +83,9 @@ func (f *FakeGit) Clone(ctx context.Context, url, dir, username, alias, project 
 			return err
 		}
 		f.Origins = append(f.Origins, url)
+		if f.CloneHook != nil {
+			return f.CloneHook(dir)
+		}
 		return nil
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -91,6 +95,9 @@ func (f *FakeGit) Clone(ctx context.Context, url, dir, username, alias, project 
 		return fmt.Errorf("fake git init: %s: %v", out, err)
 	}
 	f.Origins = append(f.Origins, url)
+	if f.CloneHook != nil {
+		return f.CloneHook(dir)
+	}
 	return nil
 }
 
@@ -155,13 +162,23 @@ func (f *FakeGit) Push(_ context.Context, _ /* dir */, url, _, _ string) error {
 	return nil
 }
 
-func (f *FakeGit) CreateTag(_ context.Context, _ /* dir */, tag string) error {
+func (f *FakeGit) PushTag(_ context.Context, _ /* dir */, url, _, _, tag string, _ []string) error {
+	f.Operations = append(f.Operations, "push-tag:"+tag)
+	if f.PushErr != nil {
+		return f.PushErr
+	}
+	f.Pushes++
+	f.PushURL = url
+	return nil
+}
+
+func (f *FakeGit) CreateTag(_ context.Context, _ /* dir */, tag, _, _ string) error {
 	f.Operations = append(f.Operations, "tag:"+tag)
 	return nil
 }
 
-func (f *FakeGit) TagExists(_ context.Context, _ /* dir */, tag string) error {
-	f.Operations = append(f.Operations, "tag-exists:"+tag)
+func (f *FakeGit) ValidateTag(_ context.Context, _ /* dir */, tag string) error {
+	f.Operations = append(f.Operations, "validate-tag:"+tag)
 	return nil
 }
 

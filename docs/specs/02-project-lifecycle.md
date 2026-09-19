@@ -1,6 +1,6 @@
 # Project Lifecycle Specification
 
-**Milestone 2 is partially implemented.** List and clone are current behavior; release is wired. Remaining scenarios describe intended acceptance behavior, not current command or release availability. It uses normal provider resolution and the shared rules in [shared core](00-core.md).
+**Milestone 2 is partially implemented.** Core list, clone, transport selection, minimum release behavior, and race-safe clone destination confinement are current. Complete hostile repository-local configuration rejection remains `@planned`. It uses normal provider resolution and the shared rules in [shared core](00-core.md).
 
 ## Repository Operations
 
@@ -59,6 +59,6 @@ Implementation-level Git hardening, redirect handling, and path-confinement mech
 | `LIFECYCLE-SECURITY-003` | Release **MUST** disable Git hooks including pre-push before pushing the tag.                                                                                                                                                                                                                                                        | [`project_lifecycle.feature`](../../features/project_lifecycle.feature) |
 | `LIFECYCLE-SECURITY-004` | Clone and release **MUST** reject URL rewriting, pushurl overrides, and redirect to a different authority or repository.                                                                                                                                                                                                             | [`project_lifecycle.feature`](../../features/project_lifecycle.feature) |
 | `LIFECYCLE-SECURITY-005` | Destination paths **MUST** remain root-relative, no-follow, and confined. Absolute paths, traversing paths, symlinks, escaping-symlink ancestors, and non-empty destinations **MUST** fail before any mutation.                                                                                                                       | [`project_lifecycle.feature`](../../features/project_lifecycle.feature) |
-| `LIFECYCLE-SECURITY-006` | A destination ancestor **MUST NOT** be swapped to an escaping symlink between validation and an actual write. Access **MUST** fail closed without outside-root access or mutation.                                                                                                                                                    | [`project_lifecycle.feature`](../../features/project_lifecycle.feature) |
+| `LIFECYCLE-SECURITY-006` | A destination ancestor **MUST NOT** be swapped to an escaping symlink between validation and an actual write. The completed clone MAY be installed beneath the already-opened work root or the operation MAY fail closed, but it **MUST NOT** access or mutate outside that root.                                                        | [`project_lifecycle.feature`](../../features/project_lifecycle.feature) |
 
 Advanced release notes, changelog integration, and signed tags are deferred.

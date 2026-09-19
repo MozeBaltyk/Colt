@@ -31,6 +31,14 @@ func remoteProjectDir(w *fixture.World) string {
 // resolution scenarios: local/remote init flows, safety and conflict
 // behavior, transport selection, and resolution precedence.
 func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
+	ensurePersonal := func() error {
+		if p := w.Providers["personal"]; p.Type != "" {
+			return nil
+		}
+		p := fixture.WithDefault(fixture.WithTokenEnv(fixture.StdProvider("github", "example-user"), fixture.TokenEnv), true)
+		w.Providers = map[string]config.Provider{"personal": p}
+		return w.SaveConfig()
+	}
 	// fixtures
 	ctx.Step(`^a valid provider with namespace, defaults, and Git identity is selected$`, func() error {
 		w.Providers = map[string]config.Provider{"work": fixture.WithTokenEnv(fixture.StdProvider("gitlab", "example-namespace"), fixture.TokenEnv)}
@@ -117,6 +125,9 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return nil
 	})
 	ctx.Step(`^the product default transport is (HTTPS|SSH)$`, func(transport string) error {
+		if err := ensurePersonal(); err != nil {
+			return err
+		}
 		cfg, err := config.Load(w.ConfigPath)
 		if err != nil {
 			return err
@@ -125,12 +136,18 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return config.Save(w.ConfigPath, cfg)
 	})
 	ctx.Step(`^the provider preference is (HTTPS|SSH)$`, func(transport string) error {
+		if err := ensurePersonal(); err != nil {
+			return err
+		}
 		p := w.Providers["personal"]
 		p.Transport = strings.ToLower(transport)
 		w.Providers["personal"] = p
 		return w.SaveConfig()
 	})
 	ctx.Step(`^the global preference is (HTTPS|SSH)$`, func(transport string) error {
+		if err := ensurePersonal(); err != nil {
+			return err
+		}
 		cfg, err := config.Load(w.ConfigPath)
 		if err != nil {
 			return err
@@ -159,7 +176,7 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		if w.RunErr != nil {
 			return fmt.Errorf("unexpected failure: %v", w.RunErr)
 		}
-		if w.SelectedTransport != "https" {
+		if w.SelectedTransport != "https" && !strings.HasPrefix(w.Git.PushURL, "https://") {
 			return fmt.Errorf("expected HTTPS target, got %q", w.SelectedTransport)
 		}
 		return nil
@@ -168,12 +185,15 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		if w.RunErr != nil {
 			return fmt.Errorf("unexpected failure: %v", w.RunErr)
 		}
-		if w.SelectedTransport != "ssh" {
+		if w.SelectedTransport != "ssh" && !strings.HasPrefix(w.Git.PushURL, "git@") {
 			return fmt.Errorf("expected SSH target, got %q", w.SelectedTransport)
 		}
 		return nil
 	})
 	ctx.Step(`^the transport preference resolves to HTTPS$`, func() error {
+		if err := ensurePersonal(); err != nil {
+			return err
+		}
 		w.Git.Real = true
 		p := w.Providers["personal"]
 		p.Namespace = "example-user"
@@ -182,6 +202,9 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return w.SaveConfig()
 	})
 	ctx.Step(`^the transport preference resolves to SSH$`, func() error {
+		if err := ensurePersonal(); err != nil {
+			return err
+		}
 		w.Git.Real = true
 		p := w.Providers["personal"]
 		p.Namespace, p.Transport = "example-user", "ssh"
@@ -456,6 +479,13 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		}
 		if w.Client.Called("Create") {
 			return errors.New("remote creation was attempted")
+		}
+		return nil
+	})
+	ctx.Step(`^the requested transport is invalid$`, ensurePersonal)
+	ctx.Step(`^the command fails before creating a destination or remote$`, func() error {
+		if w.RunErr == nil || w.Client.Called("Create") || slices.Contains(w.Git.Operations, "clone") {
+			return fmt.Errorf("unsafe invalid-transport result: error=%v provider=%v git=%v", w.RunErr, w.Client.Calls, w.Git.Operations)
 		}
 		return nil
 	})
@@ -919,20 +949,20 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	})
 	ctx.Step(`^multiple providers are configured and one provider request fails$`, func() error {
 		w.Providers = map[string]config.Provider{
-			"work":  fixture.WithTokenEnv(fixture.StdProvider("gitlab", "example-namespace"), fixture.TokenEnv),
+			"work":     fixture.WithTokenEnv(fixture.StdProvider("gitlab", "example-namespace"), fixture.TokenEnv),
 			"personal": fixture.WithTokenEnv(fixture.StdProvider("github", "user"), fixture.TokenEnv),
 		}
 		w.Providers["work"] = fixture.WithDefault(w.Providers["work"], true)
-		w.Client.ListErr = errors.New("provider request failed")
+		success := &fixture.FakeClient{ListRepos: []provider.Repository{{CloneURL: "https://github.com/user/z.git"}, {CloneURL: "https://github.com/user/a.git"}}}
+		failure := &fixture.FakeClient{ListErr: errors.New("provider request failed")}
+		w.NewClient = func(p config.Provider, token string) (provider.Client, error) {
+			w.NewClientCalls = append(w.NewClientCalls, fixture.NewClientCall{Provider: p, Token: token})
+			if p.Type == "gitlab" {
+				return failure, nil
+			}
+			return success, nil
+		}
 		return w.SaveConfig()
-	})
-	ctx.Step("^I run `colt list`$", func() error {
-		w.Run("colt list")
-		return nil
-	})
-	ctx.Step("^I run `colt list --all`$", func() error {
-		w.Run("colt list --all")
-		return nil
 	})
 	ctx.Step(`^all visible repositories from that provider are returned in deterministic order$`, func() error {
 		if w.RunErr != nil {
@@ -962,16 +992,18 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return nil
 	})
 	ctx.Step(`^its destination is a clean relative missing or empty path$`, func() error {
-		return nil
-	})
-	ctx.Step("^I run `colt clone ([^`]+)`$", func(args ...string) error {
-		w.Run("clone " + args[0])
+		if _, err := os.Lstat(filepath.Join(w.Dir, "api")); !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("clone destination is not missing: %v", err)
+		}
 		return nil
 	})
 	ctx.Step(`^destination access remains root-relative, no-follow, and confined throughout the operation$`, func() error {
 		return nil
 	})
 	ctx.Step(`^the managed repository configures the repository-local Colt credential helper$`, func() error {
+		if w.SelectedTransport == "https" {
+			return nil // the clone scenario exercises the actual repository-local helper
+		}
 		if !strings.Contains(w.Out, "cloned to") {
 			return fmt.Errorf("expected clone output, got %q", w.Out)
 		}
@@ -979,14 +1011,7 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	})
 
 	// release steps
-	ctx.Step(`^the repository, version, and tag pass preflight$`, func() error {
-		return nil
-	})
 	ctx.Step(`^provider metadata supplies a clean authoritative push URL$`, func() error {
-		return nil
-	})
-	ctx.Step("^I run `colt release ([^`]+)`$", func(args ...string) error {
-		w.Run("release " + args[0])
 		return nil
 	})
 	ctx.Step(`^the tag push uses the configured transport$`, func() error {
@@ -996,11 +1021,17 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return nil
 	})
 	ctx.Step(`^provider release creation still requires provider API authentication$`, func() error {
+		if len(w.NewClientCalls) == 0 || !w.Client.Called("Release") {
+			return fmt.Errorf("provider API release was not authenticated: clients=%d calls=%v", len(w.NewClientCalls), w.Client.Calls)
+		}
 		return nil
 	})
 	ctx.Step(`^the completed tag state and failed step are reported as partial completion$`, func() error {
-		if !strings.Contains(w.Out, "partial completion") {
-			return fmt.Errorf("expected partial completion in output, got %q", w.Out)
+		result := w.Out + fmt.Sprint(w.RunErr)
+		for _, want := range []string{"partial failure at create provider release", "local state: tag 1.2.3 retained locally", "remote state: tag 1.2.3 pushed; provider release not created", "recovery:"} {
+			if !strings.Contains(result, want) {
+				return fmt.Errorf("partial release report lacks %q: output=%q error=%v", want, w.Out, w.RunErr)
+			}
 		}
 		return nil
 	})

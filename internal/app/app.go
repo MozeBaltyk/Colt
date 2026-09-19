@@ -679,16 +679,11 @@ func resolvedCredentialSource(p config.Provider) string {
 
 func matchingOrigin(cfg config.Config, origin string) (alias, transport, project string) {
 	for candidate, p := range cfg.Providers {
-		selected, err := InitTransport(p, "", "")
-		if err != nil {
-			continue
-		}
-		var actual string
-		var ok bool
-		if selected == "https" {
-			actual, ok = cleanHTTPSRepository(origin, p)
-		} else {
+		actual, ok := cleanHTTPSRepository(origin, p)
+		detected := "https"
+		if !ok {
 			actual, ok = cleanSSHRepository(origin, p)
+			detected = "ssh"
 		}
 		if !ok {
 			continue
@@ -696,7 +691,7 @@ func matchingOrigin(cfg config.Config, origin string) (alias, transport, project
 		if alias != "" {
 			return "", "", ""
 		}
-		alias, transport, project = candidate, selected, actual
+		alias, transport, project = candidate, detected, actual
 	}
 	return
 }
@@ -1139,6 +1134,22 @@ func (a *App) cloneCommand() *cobra.Command {
 			if err := a.Git.Available(); err != nil {
 				return err
 			}
+			workDir := a.WorkDir
+			if workDir == "" {
+				workDir, err = os.Getwd()
+				if err != nil {
+					return fmt.Errorf("determine working directory: %w", err)
+				}
+			}
+			destination := filepath.Join(workDir, project)
+			workRoot, err := openWorkRoot(workDir)
+			if err != nil {
+				return err
+			}
+			defer workRoot.Close()
+			if _, _, err := validateCloneDestination(workRoot, project); err != nil {
+				return err
+			}
 			token, _, err := config.Token(selected, a.credentialStore())
 			if err != nil {
 				return err
@@ -1162,21 +1173,30 @@ func (a *App) cloneCommand() *cobra.Command {
 			if actual, ok := valid(cloneURL, selected); !ok || actual != project {
 				return errors.New("provider returned an unexpected clone target")
 			}
-			out := cmd.OutOrStdout()
-			workDir := a.WorkDir
-			if workDir == "" {
-				workDir, _ = os.Getwd()
+			stagingParent, err := os.MkdirTemp("", "colt-clone-")
+			if err != nil {
+				return fmt.Errorf("create private clone staging directory: %w", err)
 			}
-			destination := filepath.Join(workDir, project)
-			if err := a.Git.Clone(cmd.Context(), cloneURL, destination, "", alias, project); err != nil {
+			defer os.RemoveAll(stagingParent)
+			if err := os.Chmod(stagingParent, 0o700); err != nil {
+				return fmt.Errorf("secure clone staging directory: %w", err)
+			}
+			staging := filepath.Join(stagingParent, "repository")
+			if err := a.Git.Clone(cmd.Context(), cloneURL, staging, "", alias, project); err != nil {
 				return fmt.Errorf("clone failed: %w", err)
 			}
-			fmt.Fprintln(out, "cloned to "+destination)
+			if err := a.Git.SetIdentity(cmd.Context(), staging, selected.GitName, selected.GitEmail); err != nil {
+				return fmt.Errorf("set repository identity: %w", err)
+			}
 			if transport == "https" {
-				if err := a.Git.ConfigureCredentialHelper(cmd.Context(), destination, cloneURL, "", alias, project); err != nil {
+				if err := a.Git.ConfigureCredentialHelper(cmd.Context(), staging, cloneURL, "", alias, project); err != nil {
 					return fmt.Errorf("configure credential helper: %w", err)
 				}
 			}
+			if err := installClone(workRoot, staging, project); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "cloned to "+destination)
 			return nil
 		},
 	}
@@ -1230,9 +1250,9 @@ func (a *App) releaseCommand() *cobra.Command {
 			if originErr != nil || origin == "" {
 				return errors.New("cannot determine repository from current origin; run this inside a Git repository with a matching remote")
 			}
-			_, _, project := matchingOrigin(cfg, origin)
-			if project == "" {
-				return errors.New("current origin does not match any configured provider repository")
+			originAlias, _, project := matchingOrigin(cfg, origin)
+			if project == "" || originAlias != alias {
+				return errors.New("current origin does not match the selected provider repository")
 			}
 			// Validate repository exists
 			repo, err := client.Get(cmd.Context(), project)
@@ -1244,7 +1264,7 @@ func (a *App) releaseCommand() *cobra.Command {
 			}
 			// Validate tag exists locally
 			tag := version
-			if err := a.Git.TagExists(cmd.Context(), workDir, tag); err != nil {
+			if err := a.Git.ValidateTag(cmd.Context(), workDir, tag); err != nil {
 				return fmt.Errorf("validate tag: %w", err)
 			}
 			// Validate push target belongs to selected provider/repository
@@ -1256,18 +1276,24 @@ func (a *App) releaseCommand() *cobra.Command {
 				return err
 			}
 			// Create local tag
-			if err := a.Git.CreateTag(cmd.Context(), workDir, tag); err != nil {
+			if err := a.Git.CreateTag(cmd.Context(), workDir, tag, selected.GitName, selected.GitEmail); err != nil {
 				return fmt.Errorf("create tag: %w", err)
 			}
 			fmt.Fprintln(out, "created tag "+tag)
 			// Push tag
-			if err := a.Git.Push(cmd.Context(), workDir, pushURL, alias, ""); err != nil {
+			if err := a.Git.PushTag(cmd.Context(), workDir, pushURL, alias, project, tag, providerTokenEnvNames(cfg)); err != nil {
 				return fmt.Errorf("push tag: %w", err)
 			}
 			fmt.Fprintln(out, "pushed tag "+tag)
 			// Create provider release
 			if err := client.Release(cmd.Context(), version, tag); err != nil {
-				return fmt.Errorf("partial completion: tag pushed, provider release failed: %w", err)
+				return partial(
+					"create provider release",
+					"tag "+tag+" retained locally",
+					"tag "+tag+" pushed; provider release not created",
+					"retry the provider release after resolving the provider API failure; do not recreate or force the tag",
+					err,
+				)
 			}
 			fmt.Fprintln(out, "released "+version)
 			return nil

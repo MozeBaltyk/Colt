@@ -167,7 +167,9 @@ type partialError struct {
 	cause                         error
 }
 
-func (e *partialError) Error() string { return "partial failure at " + e.step }
+func (e *partialError) Error() string {
+	return fmt.Sprintf("partial failure at %s: local state: %s; remote state: %s; recovery: %s", e.step, e.local, e.remote, e.recovery)
+}
 func (e *partialError) Unwrap() error { return e.cause }
 
 func initCause(err error, transport, step string) (string, string) {

@@ -32,9 +32,9 @@ type requirementCoverage struct {
 }
 
 type specRequirementInfo struct {
-	id          string
+	id           string
 	verification string
-	specFile    string
+	specFile     string
 }
 
 func TestBDDTagHygiene(t *testing.T) {
@@ -285,7 +285,7 @@ func validateTraceability(scenarios []featureScenario, specs map[string]specRequ
 		}
 	}
 
-	// 4. Milestone-state mismatches: planned M2-M5 scenario missing @planned.
+	// 4. Milestone-state mismatches: planned M3-M5 scenario missing @planned.
 	for _, s := range scenarios {
 		status := "active"
 		for _, tag := range s.tags {
@@ -308,7 +308,7 @@ func validateTraceability(scenarios []featureScenario, specs map[string]specRequ
 				continue
 			}
 			milestone := milestoneForSpec(info.specFile)
-			if milestone >= "M2" && milestone <= "M5" && status != "planned" {
+			if milestone >= "M3" && milestone <= "M5" && status != "planned" {
 				problems = append(problems, fmt.Sprintf("%s:%d %s: planned %s scenario missing @planned", s.file, s.line, s.name, tag))
 			}
 		}

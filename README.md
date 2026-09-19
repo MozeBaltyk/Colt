@@ -23,6 +23,9 @@ colt auth login <github|gitlab|gitea|forgejo> <alias> \
 colt auth status
 colt auth logout <alias>
 colt init <project> [--local] [--provider <alias>] [--destination <path>]
+colt list [--provider <alias> | --all]
+colt clone <repository> [--provider <alias>] [--transport https|ssh]
+colt release <version> [--provider <alias>] [--transport https|ssh]
 ```
 
 Configuration uses Go's `os.UserConfigDir()`. On Linux, this is
@@ -78,9 +81,11 @@ persistence with consent-only plaintext fallback, local-only logout, blank
 initialization, and HTTPS Git transport. Browser/device authorization and
 provider-side revocation remain `@unimplemented`. The real
 Colt-to-Gitea and Colt-to-Forgejo initialization and push paths are exercised in container-backed CI.
-Later planned
-work adds lifecycle list/clone/release primitives (M2), parameterized data-only
-templates (M3), declarative workspace `status`/`sync` (M4), diagnostic project
+Milestone 2 core list/clone/release primitives are available with authoritative
+transport validation, partial-release reporting, and race-safe clone destination
+confinement. Complete hostile repository-config rejection remains planned.
+Later planned work adds
+parameterized data-only templates (M3), declarative workspace `status`/`sync` (M4), diagnostic project
 health (M5), and a read-only analyzer (M6). Colt is not a wrapper or replacement
 command surface for `gh` or `glab`.
 
@@ -89,7 +94,7 @@ command surface for `gh` or `glab`.
 - [Product definition and specification order](docs/specs/product.md)
 - [Shared active-MVP requirements](docs/specs/00-core.md)
 - [First MVP: blank project initialization](docs/specs/01-project-init.md)
-- [Planned M2: project lifecycle](docs/specs/02-project-lifecycle.md)
+- [M2: project lifecycle](docs/specs/02-project-lifecycle.md)
 - [Planned M3: template initialization](docs/specs/03-template-init.md)
 - [Planned M4: workspace reconciliation](docs/specs/04-workspace.md)
 - [Planned M5: project health](docs/specs/05-project-health.md)

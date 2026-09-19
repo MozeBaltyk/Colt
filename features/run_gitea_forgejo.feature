@@ -4,7 +4,7 @@ Feature: Run / deploy a permanent Gitea or Forgejo server
    M7 prerequisite for M4 local-provider sync (Colt mirror / colt sync).
    Planned — scenarios do not represent current command availability.
 
-   @planned @RUN-001 @RUN-002 @RUN-003
+   @planned @RUN-001 @RUN-002 @RUN-003 @RUN-011 @RUN-012
    Scenario: Deploy gitea with defaults
     Given podman and systemd are available on the host
     And no existing deployment named "personal"
@@ -17,6 +17,8 @@ Feature: Run / deploy a permanent Gitea or Forgejo server
     And the podman network personal-net exists
     And volumes personal-data, personal-config, personal-db exist
     And all three units are enabled and active
+    And the database unit declares an engine-appropriate health command
+    And the app unit waits for the database to become healthy
     And the env file /etc/colt/run/personal/env has mode 0600
     And no password appears in any unit file as a literal
 
@@ -91,9 +93,16 @@ Feature: Run / deploy a permanent Gitea or Forgejo server
     And the error names podman as the missing runtime
     And no units are created
 
-   @planned @forgejo
+   @planned @forgejo @RUN-001
    Scenario: Deploy forgejo uses postgres
     Given podman and systemd are available
     When I run `colt run forgejo personal --password X`
     Then container-personal-db.service uses the postgres image
     And the env file sets DB_TYPE=postgres
+
+   @planned @RUN-013
+   Scenario: Non-root deployment fails before host mutation
+    Given the current user is not root
+    When I run `colt run gitea personal --password X`
+    Then the command fails with an actionable error suggesting sudo
+    And no units, networks, or volumes are created

@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -199,6 +200,161 @@ case "$(set)" in *must-not-be-injected*) exit 13;; esac
 	t.Setenv("SSH_AUTH_SOCK", "/agent/socket")
 	if err := (Native{}).Push(context.Background(), t.TempDir(), "git@example.test:team/demo.git", "work", "demo"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReleaseTagPushUsesExplicitTargetWithoutHooksOrLocalConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-backed fake git is Unix-only")
+	}
+	bin := t.TempDir()
+	script := filepath.Join(bin, "git")
+	contents := `#!/bin/sh
+test "$*" = "-c core.hooksPath=/dev/null -c url.git@example.test:team/demo.git.insteadOf=git@example.test:team/demo.git push --no-verify -- git@example.test:team/demo.git refs/tags/1.2.3:refs/tags/1.2.3" || exit 2
+test "$GIT_CONFIG_GLOBAL" = "/dev/null" || exit 3
+test "$GIT_CONFIG_NOSYSTEM" = 1 || exit 4
+test "$GIT_ALLOW_PROTOCOL" = ssh || exit 5
+test "$GIT_SSH_COMMAND" = "ssh -oBatchMode=yes -oStrictHostKeyChecking=yes" || exit 6
+test -z "$COLT_TEST_TOKEN" || exit 7
+test "$SSH_AUTH_SOCK" = "/agent/socket" || exit 8
+`
+	if err := os.WriteFile(script, []byte(contents), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("COLT_TEST_TOKEN", "must-not-reach-ssh")
+	t.Setenv("SSH_AUTH_SOCK", "/agent/socket")
+	if err := (Native{}).PushTag(context.Background(), t.TempDir(), "git@example.test:team/demo.git", "work", "demo", "1.2.3", []string{"COLT_TEST_TOKEN"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateTagRequiresAValidAbsentTag(t *testing.T) {
+	dir := t.TempDir()
+	native := Native{}
+	if err := native.Init(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.ValidateTag(context.Background(), dir, "1.2.3"); err != nil {
+		t.Fatalf("absent valid tag rejected: %v", err)
+	}
+	if err := native.SetIdentity(context.Background(), dir, "Test", "test@example.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := native.Commit(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.CreateTag(context.Background(), dir, "1.2.3", "Test", "test@example.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.ValidateTag(context.Background(), dir, "1.2.3"); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("existing tag validation error = %v", err)
+	}
+	if err := native.ValidateTag(context.Background(), dir, "bad tag"); err == nil || !strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("invalid tag validation error = %v", err)
+	}
+}
+
+func TestReleaseTagCommandsIgnoreHostileGitConfigAndHooks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executable hook fixture is Unix-only")
+	}
+	dir := t.TempDir()
+	native := Native{}
+	if err := native.Init(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.SetIdentity(context.Background(), dir, "Test", "test@example.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := native.Commit(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "executed")
+	hostile := filepath.Join(t.TempDir(), "hostile")
+	if err := os.WriteFile(hostile, []byte("#!/bin/sh\ntouch '"+marker+"'\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"config", "--local", "tag.gpgSign", "true"},
+		{"config", "--local", "gpg.program", hostile},
+		{"config", "--local", "core.hooksPath", filepath.Dir(hostile)},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	hook := filepath.Join(dir, ".git", "hooks", "reference-transaction")
+	if err := os.MkdirAll(filepath.Dir(hook), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\ntouch '"+marker+"'\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "alias.tag")
+	t.Setenv("GIT_CONFIG_VALUE_0", "!"+hostile)
+	if err := native.ValidateTag(context.Background(), dir, "2.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.CreateTag(context.Background(), dir, "2.0.0", "Test", "test@example.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("hostile Git control executed: %v", err)
+	}
+}
+
+func TestReleaseTagPushDoesNotExecuteHostileRepositoryControls(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executable hook fixture is Unix-only")
+	}
+	dir := t.TempDir()
+	native := Native{}
+	if err := native.Init(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.SetIdentity(context.Background(), dir, "Test", "test@example.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := native.Commit(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.CreateTag(context.Background(), dir, "3.0.0", "Test", "test@example.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "executed")
+	hostile := filepath.Join(t.TempDir(), "hostile")
+	if err := os.WriteFile(hostile, []byte("#!/bin/sh\ntouch '"+marker+"'\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"config", "--local", "core.sshCommand", hostile},
+		{"config", "--local", "core.hooksPath", filepath.Dir(hostile)},
+		{"config", "--local", "url.git@localhost:.insteadOf", "git@127.0.0.1:"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	hooks := filepath.Join(dir, ".git", "hooks")
+	if err := os.MkdirAll(hooks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hooks, "pre-push"), []byte("#!/bin/sh\ntouch '"+marker+"'\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := native.PushTag(ctx, dir, "git@127.0.0.1:/missing/demo.git", "work", "demo", "3.0.0", []string{"COLT_TEST_TOKEN"}); err == nil {
+		t.Fatal("push unexpectedly succeeded")
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("hostile repository control executed: %v", err)
 	}
 }
 

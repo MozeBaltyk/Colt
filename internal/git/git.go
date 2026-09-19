@@ -21,8 +21,9 @@ type Runner interface {
 	AddOrigin(context.Context, string, string) error
 	ConfigureCredentialHelper(context.Context, string, string, string, string, string) error
 	Push(context.Context, string, string, string, string) error
-	CreateTag(context.Context, string, string) error
-	TagExists(context.Context, string, string) error
+	PushTag(context.Context, string, string, string, string, string, []string) error
+	CreateTag(context.Context, string, string, string, string) error
+	ValidateTag(context.Context, string, string) error
 }
 
 type Native struct{}
@@ -266,21 +267,55 @@ func (n Native) Push(ctx context.Context, dir, cloneURL, alias, project string) 
 	return nil
 }
 
-func (Native) TagExists(ctx context.Context, dir, tag string) error {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "refs/tags/"+tag)
-	cmd.Dir = dir
-	cmd.Env = gitEnv(nil)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("tag %q does not exist locally", tag)
+func (n Native) PushTag(ctx context.Context, dir, pushURL, alias, project, tag string, tokenEnvNames []string) error {
+	args := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "url." + pushURL + ".insteadOf=" + pushURL, "push", "--no-verify", "--", pushURL, "refs/tags/" + tag + ":refs/tags/" + tag}
+	env := gitEnv([]string{"GIT_TERMINAL_PROMPT=0"})
+	if strings.HasPrefix(pushURL, "https://") {
+		helper, err := transientCredentialHelper(alias, project)
+		if err != nil {
+			return err
+		}
+		args = append([]string{"-c", "http.followRedirects=false", "-c", "http.proxy=", "-c", "http." + pushURL + ".proxy=", "-c", "credential.helper=", "-c", "credential.helper=" + helper, "-c", "credential.useHttpPath=true"}, args...)
+		env = gitEnv([]string{"GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL=https"})
+		if ca := os.Getenv("SSL_CERT_FILE"); ca != "" {
+			args = append([]string{"-c", "http.sslCAInfo=" + ca}, args...)
+		}
+	} else if !strings.HasPrefix(pushURL, "git@") {
+		return errors.New("unsupported Git transport")
+	} else {
+		env = gitEnvWithout([]string{"GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL=ssh", "GIT_SSH_COMMAND=ssh -oBatchMode=yes -oStrictHostKeyChecking=yes"}, tokenEnvNames)
+	}
+	if err := n.runWithEnv(ctx, dir, env, args...); err != nil {
+		return fmt.Errorf("native git tag push failed: %w", err)
 	}
 	return nil
 }
 
-func (Native) CreateTag(ctx context.Context, dir, tag string) error {
-	cmd := exec.CommandContext(ctx, "git", "tag", "-a", tag, "-m", tag)
+func (Native) ValidateTag(ctx context.Context, dir, tag string) error {
+	check := exec.CommandContext(ctx, "git", "check-ref-format", "refs/tags/"+tag)
+	check.Dir, check.Env = dir, gitEnv(nil)
+	if err := check.Run(); err != nil {
+		return fmt.Errorf("tag %q is invalid", tag)
+	}
+	cmd := exec.CommandContext(ctx, "git", "-c", "core.hooksPath="+os.DevNull, "rev-parse", "--verify", "refs/tags/"+tag)
 	cmd.Dir = dir
 	cmd.Env = gitEnv(nil)
-	return cmd.Run()
+	if err := cmd.Run(); err == nil {
+		return fmt.Errorf("tag %q already exists locally", tag)
+	} else if _, ok := err.(*exec.ExitError); !ok {
+		return errors.New("native git failed to inspect the release tag")
+	}
+	return nil
+}
+
+func (Native) CreateTag(ctx context.Context, dir, tag, name, email string) error {
+	cmd := exec.CommandContext(ctx, "git", "-c", "core.hooksPath="+os.DevNull, "-c", "tag.gpgSign=false", "-c", "user.name="+name, "-c", "user.email="+email, "tag", "-a", tag, "-m", tag)
+	cmd.Dir = dir
+	cmd.Env = gitEnv(nil)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("native git failed to create tag: %s", strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func credentialHelperNotFound(err error) bool {
