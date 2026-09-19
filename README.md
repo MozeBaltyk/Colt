@@ -82,8 +82,8 @@ initialization, and HTTPS Git transport. Browser/device authorization and
 provider-side revocation remain `@unimplemented`. The real
 Colt-to-Gitea and Colt-to-Forgejo initialization and push paths are exercised in container-backed CI.
 Milestone 2 core list/clone/release primitives are available with authoritative
-transport validation, partial-release reporting, and race-safe clone destination
-confinement. Complete hostile repository-config rejection remains planned.
+transport validation, partial-release reporting, race-safe clone destination
+confinement, and hostile repository-local Git configuration rejection.
 Later planned work adds
 parameterized data-only templates (M3), declarative workspace `status`/`sync` (M4), diagnostic project
 health (M5), and a read-only analyzer (M6). Colt is not a wrapper or replacement

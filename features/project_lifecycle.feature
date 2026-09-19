@@ -1,6 +1,6 @@
 Feature: Project lifecycle
-  Milestone 2 core list, clone, transport, and minimum release behavior is implemented.
-  Hostile repository-configuration hardening remains planned.
+  Milestone 2 core list, clone, transport, minimum release, and hostile
+  repository-configuration hardening are implemented.
 
   @LIFECYCLE-LIST-001
   Scenario: List repositories through normal provider resolution
@@ -44,13 +44,13 @@ Feature: Project lifecycle
     Then the completed clone is installed beneath the opened work root
     And the outside sentinel is unchanged
 
-  @planned @LIFECYCLE-SECURITY-001
+  @LIFECYCLE-SECURITY-001
   Scenario: Clone ignores inherited Git controls
     Given inherited, global, and system Git controls are hostile
     When I run `colt clone api`
     Then native Git ignores inherited GIT controls and global and system configuration
 
-  @planned @LIFECYCLE-CLONE-004
+  @LIFECYCLE-CLONE-004
   Scenario: SSH clone delegates authentication without reading keys
     Given selected-provider metadata resolves "api" to a clean authoritative SSH URL
     When I run `colt clone api --transport ssh`
@@ -78,7 +78,7 @@ Feature: Project lifecycle
     When I run `colt release 1.2.3`
     Then the command fails before creating or changing a tag, executing local controls, or exposing credentials
 
-  @planned @LIFECYCLE-SECURITY-001 @LIFECYCLE-SECURITY-002 @LIFECYCLE-SECURITY-003
+  @LIFECYCLE-SECURITY-001 @LIFECYCLE-SECURITY-002 @LIFECYCLE-SECURITY-003
   Scenario: Reject or isolate hostile release Git configuration
     Given repository-local configuration requests malicious execution, transport, proxy, credential-helper, or pre-push hook behavior
     When I run `colt release 1.2.3`

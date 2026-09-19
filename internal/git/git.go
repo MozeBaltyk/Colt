@@ -24,6 +24,7 @@ type Runner interface {
 	PushTag(context.Context, string, string, string, string, string, []string) error
 	CreateTag(context.Context, string, string, string, string) error
 	ValidateTag(context.Context, string, string) error
+	ValidateRepoConfig(context.Context, string) error
 }
 
 type Native struct{}
@@ -316,6 +317,107 @@ func (Native) CreateTag(ctx context.Context, dir, tag, name, email string) error
 		return fmt.Errorf("native git failed to create tag: %s", strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+// localConfigDeny lists, as one regular expression, every repository-local Git
+// config key a hostile repository can use to execute commands or redirect
+// transport during a Colt release (tag creation and tag push). Git canonicalizes
+// key names to lowercase, so the pattern matches lowercase. credential.helper is
+// validated separately so Colt's own configured helper stays allowed.
+// filter.<driver>.process and diff.<driver>.textconv are deliberately omitted:
+// they execute only on checkout/add, never during tag creation or push, and
+// rejecting them would break legitimate Git-LFS and textconv repositories for no
+// security gain. The set is limited to what LIFECYCLE-SECURITY-002 names:
+// execution, transport/rewrite, proxy, credential-helper, and hook roots.
+const localConfigDeny = `^(core\.(sshcommand|fsmonitor|askpass|gitproxy|hookspath)|gpg\.program|url\..*\.(insteadof|pushinsteadof)|remote\..*\.proxy|http\..*proxy|protocol\..*\.allow)$`
+
+// ValidateRepoConfig scans repository-local Git configuration (never the
+// file by hand) and fails closed when it requests behavior LIFECYCLE-SECURITY-002
+// forbids. It names the offending key. Colt's own credential helper is the one
+// permitted value, so releasing from a Colt-cloned repository keeps working.
+func (Native) ValidateRepoConfig(ctx context.Context, dir string) error {
+	out, ok, err := localConfigLookup(ctx, dir, "--get-regexp", localConfigDeny)
+	if err != nil {
+		return err
+	}
+	if ok {
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			if fields := strings.Fields(line); len(fields) > 0 {
+				return fmt.Errorf("unsafe repository-local Git configuration rejected: %s", fields[0])
+			}
+		}
+	}
+	// Credential helpers are allowlisted rather than blanket-denied so releasing
+	// from a Colt-cloned repository (which carries Colt's own helper) keeps
+	// working. Scope covers the generic credential.helper and every scoped
+	// credential.<url>.helper, because a scoped helper takes precedence over the
+	// generic one and would otherwise bypass the transient helper Colt supplies.
+	out, ok, err = localConfigLookup(ctx, dir, "--get-regexp", "--name-only", `^credential(\..*)?\.helper$`)
+	if err != nil {
+		return err
+	}
+	if ok {
+		for _, key := range strings.Fields(out) {
+			values, present, err := localConfigLookup(ctx, dir, "--get-all", key)
+			if err != nil {
+				return err
+			}
+			if !present {
+				continue
+			}
+			for _, line := range strings.Split(strings.TrimSpace(values), "\n") {
+				value := strings.TrimSpace(line)
+				if value != "" && !isColtCredentialHelper(value) {
+					return fmt.Errorf("unsafe repository-local Git credential helper rejected: %s=%s", key, value)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func isColtCredentialHelper(value string) bool {
+	rest, ok := strings.CutPrefix(value, "!colt git-credential ")
+	if !ok {
+		return false
+	}
+	provider, tail, ok := strings.Cut(rest, " --repository ")
+	if !ok {
+		return false
+	}
+	provider, ok = strings.CutPrefix(provider, "--provider ")
+	if !ok {
+		return false
+	}
+	// Reject any trailing content, shell metacharacters, or unsafe identifiers:
+	// the value is executed by Git as a shell snippet, so only the exact
+	// `--provider <id> --repository <id>` shape Colt itself writes is allowed.
+	return SafeIdentifier(provider) && SafeIdentifier(tail)
+}
+
+// localConfigLookup runs a read-only git config subcommand against the isolated
+// environment. It deliberately omits --local: gitEnv already forces
+// GIT_CONFIG_GLOBAL=/dev/null and GIT_CONFIG_NOSYSTEM=1, so system and global
+// configuration are excluded while repository-local configuration AND its
+// include/path and worktree files are resolved and scanned. ok is false when
+// there is nothing to report: no matching keys, or no repository at all. A
+// genuine Git failure returns an error.
+func localConfigLookup(ctx context.Context, dir string, args ...string) (output string, ok bool, err error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"config"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = gitEnv(nil)
+	out, runErr := cmd.CombinedOutput()
+	if runErr == nil {
+		return string(out), true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 1 {
+		return "", false, nil
+	}
+	if strings.Contains(string(out), "git repository") {
+		return "", false, nil
+	}
+	return "", false, errors.New("native git failed to scan repository-local configuration")
 }
 
 func credentialHelperNotFound(err error) bool {

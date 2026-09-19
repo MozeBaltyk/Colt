@@ -424,3 +424,143 @@ test "$SSH_AUTH_SOCK" = /agent/socket || exit 4
 		t.Fatal(err)
 	}
 }
+
+func TestValidateRepoConfigRejectsHostileLocalConfig(t *testing.T) {
+	cases := []struct {
+		name, key, value string
+	}{
+		{"execution core.sshCommand", "core.sshCommand", "/bin/evil"},
+		{"execution core.fsmonitor", "core.fsmonitor", "/bin/evil"},
+		{"execution core.askpass", "core.askpass", "/bin/evil"},
+		{"execution gpg.program", "gpg.program", "/bin/evil"},
+		{"transport core.gitProxy", "core.gitProxy", "/bin/evil"},
+		{"transport insteadOf", "url.evil.insteadOf", "https://github.com/"},
+		{"transport pushInsteadOf", "url.evil.pushInsteadOf", "https://github.com/"},
+		{"transport remote proxy", "remote.origin.proxy", "http://evil"},
+		{"proxy http.proxy", "http.proxy", "http://evil"},
+		{"proxy scoped http proxy", "http.https://example.proxy", "http://evil"},
+		{"protocol allow", "protocol.ext.allow", "always"},
+		{"hooksPath", "core.hooksPath", "/tmp/hooks"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			native := Native{}
+			ctx := context.Background()
+			if err := native.Init(ctx, dir); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("git", "config", "--local", tc.key, tc.value)
+			cmd.Dir = dir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git config %s: %v: %s", tc.key, err, out)
+			}
+			if err := native.ValidateRepoConfig(ctx, dir); err == nil || !strings.Contains(err.Error(), "unsafe") {
+				t.Fatalf("ValidateRepoConfig(%s) error = %v, want unsafe rejection", tc.key, err)
+			}
+		})
+	}
+}
+
+func TestValidateRepoConfigCredentialHelperAndCleanRepo(t *testing.T) {
+	dir := t.TempDir()
+	native := Native{}
+	ctx := context.Background()
+	if err := native.Init(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.ValidateRepoConfig(ctx, dir); err != nil {
+		t.Fatalf("clean repository rejected: %v", err)
+	}
+	set := func(key, v string) {
+		t.Helper()
+		cmd := exec.Command("git", "config", "--local", key, v)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git config %s: %v: %s", key, err, out)
+		}
+	}
+	set("credential.helper", "!evil-helper")
+	if err := native.ValidateRepoConfig(ctx, dir); err == nil || !strings.Contains(err.Error(), "credential helper") {
+		t.Fatalf("hostile credential.helper error = %v", err)
+	}
+	// Scoped helpers take precedence over the generic one and must be caught.
+	set("credential.helper", "")
+	set("credential.https://github.com.helper", "!evil-scoped")
+	if err := native.ValidateRepoConfig(ctx, dir); err == nil || !strings.Contains(err.Error(), "credential helper") {
+		t.Fatalf("hostile scoped credential helper error = %v", err)
+	}
+	set("credential.https://github.com.helper", "")
+	// The helper value is executed as a shell snippet; trailing commands and
+	// unsafe identifiers must be rejected even with the Colt prefix present.
+	set("credential.helper", "!colt git-credential --provider work --repository demo; /bin/evil")
+	if err := native.ValidateRepoConfig(ctx, dir); err == nil || !strings.Contains(err.Error(), "credential helper") {
+		t.Fatalf("shell-injected credential helper accepted = %v", err)
+	}
+	set("credential.helper", "!colt git-credential --provider work --repository demo")
+	set("credential.https://github.com.helper", "!colt git-credential --provider work --repository demo")
+	if err := native.ValidateRepoConfig(ctx, dir); err != nil {
+		t.Fatalf("Colt credential helper rejected: %v", err)
+	}
+}
+
+func TestValidateRepoConfigRejectsHostileIncludedConfig(t *testing.T) {
+	dir := t.TempDir()
+	native := Native{}
+	ctx := context.Background()
+	if err := native.Init(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	// include.path is not itself denied, but a hostile file it pulls in must be
+	// surfaced by the scan rather than silently bypassing the gate.
+	include := filepath.Join(dir, "hostile.inc")
+	if err := os.WriteFile(include, []byte("[core]\n\tsshCommand = /bin/evil\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "config", "--local", "--add", "include.path", include)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config include.path: %v: %s", err, out)
+	}
+	if err := native.ValidateRepoConfig(ctx, dir); err == nil || !strings.Contains(err.Error(), "unsafe") {
+		t.Fatalf("included hostile configuration not rejected: %v", err)
+	}
+}
+
+func TestValidateRepoConfigToleratesNonRepository(t *testing.T) {
+	if err := (Native{}).ValidateRepoConfig(context.Background(), t.TempDir()); err != nil {
+		t.Fatalf("non-repository should be treated as nothing to scan: %v", err)
+	}
+}
+
+func TestSSHCloneDelegatesWithoutCredentialHelperOrKeyAccess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-backed fake git is Unix-only")
+	}
+	bin := t.TempDir()
+	script := filepath.Join(bin, "git")
+	contents := `#!/bin/sh
+case "$*" in "clone -- git@example.test:team/demo.git destination") ;; *) exit 2;; esac
+test "$GIT_TERMINAL_PROMPT" = 0 || exit 3
+test "$GIT_CONFIG_GLOBAL" = /dev/null || exit 4
+test "$GIT_CONFIG_NOSYSTEM" = 1 || exit 5
+test -z "$GIT_CONFIG_COUNT" || exit 6
+test -z "$GIT_SSH_COMMAND" || exit 7
+test -z "$GIT_ASKPASS" || exit 8
+test "$SSH_AUTH_SOCK" = /agent/socket || exit 9
+case "$*" in *credential.helper*) exit 10;; esac
+`
+	if err := os.WriteFile(script, []byte(contents), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("GIT_SSH_COMMAND", "ssh -oStrictHostKeyChecking=no")
+	t.Setenv("GIT_ASKPASS", "/bin/evil-askpass")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.sshCommand")
+	t.Setenv("GIT_CONFIG_VALUE_0", "/bin/evil")
+	t.Setenv("SSH_AUTH_SOCK", "/agent/socket")
+	if err := (Native{}).Clone(context.Background(), "git@example.test:team/demo.git", "destination", "", "work", "demo"); err != nil {
+		t.Fatal(err)
+	}
+}

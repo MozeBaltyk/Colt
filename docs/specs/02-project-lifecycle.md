@@ -1,6 +1,6 @@
 # Project Lifecycle Specification
 
-**Milestone 2 is partially implemented.** Core list, clone, transport selection, minimum release behavior, and race-safe clone destination confinement are current. Complete hostile repository-local configuration rejection remains `@planned`. It uses normal provider resolution and the shared rules in [shared core](00-core.md).
+**Milestone 2 is implemented.** Core list, clone, transport selection, minimum release behavior, race-safe clone destination confinement, and hostile repository-local configuration rejection are current. It uses normal provider resolution and the shared rules in [shared core](00-core.md).
 
 ## Repository Operations
 

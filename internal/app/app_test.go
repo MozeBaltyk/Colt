@@ -2597,6 +2597,10 @@ func (g *fakeGit) ValidateTag(_ context.Context, _ /* dir */, tag string) error 
 	g.calls = append(g.calls, "validate-tag:"+tag)
 	return nil
 }
+func (g *fakeGit) ValidateRepoConfig(context.Context, string) error {
+	g.calls = append(g.calls, "validate-config")
+	return nil
+}
 
 type fakeClient struct {
 	account         string

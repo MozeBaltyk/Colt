@@ -20,6 +20,7 @@ import (
 
 func RegisterLifecycleSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	var outside, moved, sentinel string
+	var hostileMarker string
 	configure := func(transport string) error {
 		p := fixture.WithDefault(fixture.WithTokenEnv(fixture.StdProvider("github", "example-user"), fixture.TokenEnv), true)
 		p.Transport = transport
@@ -263,6 +264,128 @@ func RegisterLifecycleSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	ctx.Step(`^Colt does not force, overwrite, or roll back the tag or release$`, func() error {
 		if !slices.Contains(w.Git.Operations, "push-tag:1.2.3") || w.RunErr == nil {
 			return fmt.Errorf("partial release state missing: %v %v", w.RunErr, w.Git.Operations)
+		}
+		return nil
+	})
+
+	// LIFECYCLE-SECURITY-001: hostile inherited/global/system Git controls must
+	// have no effect on clone. The exact argv/env isolation is proven in the
+	// internal/git shell-fake tests; here the command must still complete against
+	// a hostile environment and produce the authoritative, credential-free clone
+	// with exactly the Colt helper configured.
+	ctx.Step(`^inherited, global, and system Git controls are hostile$`, func() error {
+		if err := configure("https"); err != nil {
+			return err
+		}
+		w.Client.GetRepo = &provider.Repository{CloneURL: "https://github.com/example-user/api.git", SSHURL: "git@github.com:example-user/api.git"}
+		for name, value := range map[string]string{
+			"GIT_CONFIG_COUNT":   "1",
+			"GIT_CONFIG_KEY_0":   "core.sshCommand",
+			"GIT_CONFIG_VALUE_0": "/bin/evil-ssh",
+			"GIT_SSH_COMMAND":    "/bin/evil-ssh",
+			"GIT_ASKPASS":        "/bin/evil-askpass",
+			"GIT_CONFIG_GLOBAL":  filepath.Join(w.Dir, "hostile-global.gitconfig"),
+			"GIT_CONFIG_SYSTEM":  filepath.Join(w.Dir, "hostile-system.gitconfig"),
+		} {
+			if err := os.Setenv(name, value); err != nil {
+				return err
+			}
+		}
+		global := "[core]\n\tsshCommand = !/bin/evil-ssh\n[credential]\n\thelper = !/bin/evil-helper\n[user]\n\tname = Hostile\n\temail = hostile@example.invalid\n"
+		if err := os.WriteFile(os.Getenv("GIT_CONFIG_GLOBAL"), []byte(global), 0o600); err != nil {
+			return err
+		}
+		system := "[core]\n\tsshCommand = !/bin/evil-ssh\n"
+		return os.WriteFile(os.Getenv("GIT_CONFIG_SYSTEM"), []byte(system), 0o600)
+	})
+	ctx.Step(`^native Git ignores inherited GIT controls and global and system configuration$`, func() error {
+		if w.RunErr != nil {
+			return fmt.Errorf("clone failed under hostile environment: %v", w.RunErr)
+		}
+		if !slices.Contains(w.Git.Operations, "clone") {
+			return fmt.Errorf("clone not recorded: %v", w.Git.Operations)
+		}
+		if w.Git.Helpers != 1 {
+			return fmt.Errorf("expected exactly the Colt credential helper, got %d", w.Git.Helpers)
+		}
+		if len(w.Git.Origins) == 0 || !strings.HasPrefix(w.Git.Origins[len(w.Git.Origins)-1], "https://github.com/") {
+			return fmt.Errorf("clone origin not authoritative and credential-free: %v", w.Git.Origins)
+		}
+		return nil
+	})
+
+	// LIFECYCLE-CLONE-004: SSH clone delegates to the user's SSH environment and
+	// must not configure a credential helper.
+	ctx.Step(`^selected-provider metadata resolves "([^"]*)" to a clean authoritative SSH URL$`, func(project string) error {
+		if err := configure("ssh"); err != nil {
+			return err
+		}
+		w.Client.GetRepo = &provider.Repository{CloneURL: "https://github.com/example-user/" + project + ".git", SSHURL: "git@github.com:example-user/" + project + ".git"}
+		return nil
+	})
+	ctx.Step(`^SSH clone uses the existing user SSH environment without Colt reading private keys$`, func() error {
+		if w.RunErr != nil {
+			return fmt.Errorf("ssh clone failed: %v", w.RunErr)
+		}
+		if w.Git.Helpers != 0 {
+			return fmt.Errorf("SSH clone configured a credential helper: %d", w.Git.Helpers)
+		}
+		if len(w.Git.Origins) == 0 || !strings.HasPrefix(w.Git.Origins[len(w.Git.Origins)-1], "git@") {
+			return fmt.Errorf("SSH clone origin not recorded as SSH: %v", w.Git.Origins)
+		}
+		return nil
+	})
+
+	// LIFECYCLE-SECURITY-001/002/003: hostile repository-local configuration plus
+	// a pre-push hook must make `colt release` fail closed before any mutation.
+	ctx.Step(`^repository-local configuration requests malicious execution, transport, proxy, credential-helper, or pre-push hook behavior$`, func() error {
+		if err := prepareRelease("https"); err != nil {
+			return err
+		}
+		native := gitnative.Native{}
+		if err := native.Init(context.Background(), w.Dir); err != nil {
+			return err
+		}
+		if err := native.SetIdentity(context.Background(), w.Dir, "Test", "test@example.invalid"); err != nil {
+			return err
+		}
+		if _, err := native.Commit(context.Background(), w.Dir); err != nil {
+			return err
+		}
+		hostileMarker = filepath.Join(w.Dir, "hostile-executed")
+		for _, kv := range [][2]string{
+			{"core.sshCommand", "touch " + hostileMarker},
+			{"core.hooksPath", filepath.Join(w.Dir, ".git", "hooks")},
+			{"url.evil.example.insteadOf", "https://github.com/"},
+			{"http.proxy", "http://127.0.0.1:1"},
+			{"gpg.program", "touch " + hostileMarker},
+			{"credential.helper", "!touch " + hostileMarker},
+			{"protocol.ext.allow", "always"},
+		} {
+			cmd := exec.Command("git", "config", "--local", kv[0], kv[1])
+			cmd.Dir = w.Dir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("git config --local %s: %v: %s", kv[0], err, out)
+			}
+		}
+		hook := filepath.Join(w.Dir, ".git", "hooks", "pre-push")
+		if err := os.MkdirAll(filepath.Dir(hook), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(hook, []byte("#!/bin/sh\ntouch '"+hostileMarker+"'\nexit 1\n"), 0o700); err != nil {
+			return err
+		}
+		return nil
+	})
+	ctx.Step(`^release Git ignores inherited, global, system, and unsafe repository-local controls and disables hooks including pre-push$`, func() error {
+		if w.RunErr == nil {
+			return errors.New("hostile release unexpectedly succeeded")
+		}
+		if !strings.Contains(w.RunErr.Error(), "unsafe") {
+			return fmt.Errorf("release rejection did not name unsafe config: %v", w.RunErr)
+		}
+		if _, err := os.Stat(hostileMarker); !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("hostile repository-local control or pre-push hook executed: %v", err)
 		}
 		return nil
 	})

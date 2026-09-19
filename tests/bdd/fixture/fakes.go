@@ -182,6 +182,13 @@ func (f *FakeGit) ValidateTag(_ context.Context, _ /* dir */, tag string) error 
 	return nil
 }
 
+func (f *FakeGit) ValidateRepoConfig(ctx context.Context, dir string) error {
+	f.Operations = append(f.Operations, "validate-config")
+	// Always enforce against real repository-local config: a fake worktree has no
+	// repository, so Native returns nil there and only rejects a real hostile repo.
+	return gitnative.Native{}.ValidateRepoConfig(ctx, dir)
+}
+
 type FakeClient struct {
 	Account    string
 	AuthErr    error

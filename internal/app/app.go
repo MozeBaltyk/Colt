@@ -1254,6 +1254,10 @@ func (a *App) releaseCommand() *cobra.Command {
 			if project == "" || originAlias != alias {
 				return errors.New("current origin does not match the selected provider repository")
 			}
+			// Reject hostile repository-local configuration before any mutation.
+			if err := a.Git.ValidateRepoConfig(cmd.Context(), workDir); err != nil {
+				return err
+			}
 			// Validate repository exists
 			repo, err := client.Get(cmd.Context(), project)
 			if err != nil {

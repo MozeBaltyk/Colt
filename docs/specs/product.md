@@ -23,9 +23,9 @@ Colt owns configuration, workflow, and provider integration. Provider HTTP APIs 
 
 When documents differ, use this order:
 
-1.  Active normative requirements in [shared core](00-core.md) and [project initialization](01-project-init.md).
+1.  Active normative requirements in [shared core](00-core.md), [project initialization](01-project-init.md), and [project lifecycle](02-project-lifecycle.md).
 2.  Active-MVP [Gherkin acceptance specifications](../../features/), excluding scenarios explicitly tagged `@planned` or `@unimplemented`.
-3.  Planned capability specifications and their `@planned` scenarios: [project lifecycle](02-project-lifecycle.md), [templates](03-template-init.md), [workspace reconciliation](04-workspace.md), [project health](05-project-health.md), and [analyzer](06-analyzer.md).
+3.  Planned capability specifications and their `@planned` scenarios: [templates](03-template-init.md), [workspace reconciliation](04-workspace.md), [project health](05-project-health.md), and [analyzer](06-analyzer.md).
 4.  [Roadmap](90-roadmap.md).
 
 Code and released behavior do not become available merely because they are specified here. When an active normative document changes behavior covered by an existing acceptance specification, that acceptance specification must be updated before the change is considered internally consistent.
@@ -35,7 +35,7 @@ Code and released behavior do not become available merely because they are speci
 | Order | Capability                                       | Detail                    |
 |:------|:-------------------------------------------------|:--------------------------|
 | M1 | Environment provider authentication (GitHub, GitLab, Gitea, Forgejo) and blank initialization | Partially implemented; Gitea/Forgejo have real container-backed vertical tests; absent behavior is tagged `@unimplemented` |
-| M2 | Project lifecycle | Partially implemented — core list, clone, transport, minimum release, and clone path-race confinement are active; hostile local-config hardening remains planned |
+| M2 | Project lifecycle | Implemented — core list, clone, transport, minimum release, clone path-race confinement, and hostile repository-local Git configuration rejection are active |
 | M3 | Parameterized template initialization | Planned |
 | M7 | Run/deploy — self-hosted Gitea/Forgejo via systemd + podman | Planned |
 | M4 | Declarative workspace reconciliation | Planned |
