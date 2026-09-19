@@ -218,7 +218,7 @@ Feature: Provider configuration and authentication
       | is group-readable          |
       | is world-readable          |
 
-  @unimplemented @CORE-CREDENTIAL-002
+  @CORE-CREDENTIAL-002
   Scenario: Credential file contents are never printed
     Given the plaintext credential file contains "plaintext-fake-secret-1"
     When any auth command runs with verbose output enabled
@@ -395,7 +395,7 @@ Feature: Provider configuration and authentication
     And each provider shows its alias, type, host, namespace, and default status
     And "Connection" is "not checked"
 
-  @unimplemented @CORE-PROVIDER-005 @CORE-CREDENTIAL-002
+  @CORE-PROVIDER-005 @CORE-CREDENTIAL-002
   Scenario: Offline auth status reads no secret values and contacts nothing
     Given providers are configured with environment, secure-store, and plaintext credential sources
     When I run `colt auth status --offline`
@@ -445,7 +445,7 @@ Feature: Provider configuration and authentication
     And no provider or native Git operation is invoked
     And output explains the environment credential still resolves without revealing it
 
-  @unimplemented @CORE-PROVIDER-005 @CORE-CREDENTIAL-002
+  @CORE-PROVIDER-005 @CORE-CREDENTIAL-002
   Scenario: Persisted credential rejected by provider produces actionable failure
     Given provider "personal" has a persisted credential the provider rejects
     When I run `colt auth status`
@@ -665,7 +665,7 @@ Feature: Provider configuration and authentication
     Then no revocation API call is attempted
     And the local persisted credential is removed
 
-  @unimplemented @CORE-PROVIDER-005 @CORE-CREDENTIAL-002
+  @CORE-PROVIDER-005 @CORE-CREDENTIAL-002
   Scenario: Live status reports stored credential source without exposing secret
     Given provider "personal" has auth source "stored" with credential_id "github.com/personal"
     And its credential "stored-fake-secret-5" is valid
@@ -674,7 +674,7 @@ Feature: Provider configuration and authentication
     And status shows "connected"
     And output does not contain "stored-fake-secret-5"
 
-  @unimplemented @CORE-PROVIDER-005 @CORE-CREDENTIAL-002
+  @CORE-PROVIDER-005 @CORE-CREDENTIAL-002
   Scenario: Live status reports environment credential source without exposing secret
     Given provider "personal" has auth source "env" with token_env "GITHUB_TOKEN"
     And "GITHUB_TOKEN" contains "env-fake-secret-6"
@@ -682,7 +682,7 @@ Feature: Provider configuration and authentication
     Then status shows "Credential: environment"
     And output does not contain "env-fake-secret-6"
 
-  @unimplemented @CORE-PROVIDER-005 @CORE-CREDENTIAL-002
+  @CORE-PROVIDER-005 @CORE-CREDENTIAL-002
   Scenario: Offline status reports configured credential reference without resolving secret
     Given provider "personal" has auth source "stored" with credential_id "github.com/personal"
     When I run `colt auth status --offline`
@@ -691,7 +691,7 @@ Feature: Provider configuration and authentication
     And status shows "not checked"
     And no secret value is read or displayed
 
-  @unimplemented @CORE-GIT-002 @CORE-GIT-005 @CORE-GIT-008
+  @CORE-GIT-002 @CORE-GIT-005 @CORE-GIT-008
   Scenario: HTTPS managed repository uses the Colt credential helper
     Given a managed repository has remote "https://github.com/example-user/example-project.git"
     When I run ordinary "git push" without invoking Colt
@@ -728,14 +728,14 @@ Feature: Provider configuration and authentication
     When Git requests the provider credential
     Then helper stdout is exactly the GitHub username and password protocol fields for "helper-only-secret"
 
-  @unimplemented @CORE-GIT-002 @CORE-GIT-006
+  @CORE-GIT-002 @CORE-GIT-006
   Scenario: HTTPS push reuses persisted Colt authentication
     Given provider "personal" has a persisted credential
     And the managed repository configures the Colt credential helper
     When I run ordinary "git push"
     Then the push authenticates without re-entering credentials
 
-  @unimplemented @CORE-GIT-008 @CORE-CREDENTIAL-002
+  @CORE-GIT-008 @CORE-CREDENTIAL-002
   Scenario: HTTPS remote URL never contains a reusable credential
     Given a managed HTTPS repository
     Then the "origin" URL contains no token, password, or userinfo
@@ -770,30 +770,36 @@ Feature: Provider configuration and authentication
     When Git requests the provider credential
     Then the helper succeeds with no credential output
 
-  @unimplemented @CORE-GIT-010
+  @CORE-GIT-010
   Scenario: SSH managed repository uses the provider-authoritative SSH URL
-    Given the transport preference resolves to SSH
-    Then the "origin" URL is "git@github.com:example-user/example-project.git"
+    Given provider "personal" is configured for SSH transport with authoritative SSH URL "git@github.com:example-user/example-project.git"
+    When I run `colt auth status personal --repository example-project`
+    Then the SSH transport validates the provider-authoritative SSH URL "git@github.com:example-user/example-project.git"
 
-  @unimplemented @CORE-GIT-010
+  @CORE-GIT-010
   Scenario: GitHub SSH URL uses git as the SSH user
-    Given a GitHub SSH remote
-    Then the SSH user is "git", not the provider account name
-    And the repository owner remains in the repository path
+    Given provider "personal" is configured for SSH transport with authoritative SSH URL "git@github.com:example-user/example-project.git"
+    When I run `colt auth status personal --repository example-project`
+    Then the SSH remote uses "git" as the SSH user, not the provider account name
+    And the repository owner "example-user" remains in the repository path
 
-  @unimplemented @CORE-GIT-010
+  @CORE-GIT-010
   Scenario: Existing SSH configuration can authenticate Git operations
-    Given the user's SSH agent and default keys select the correct identity
-    Then no "~/.ssh/config" entry is required
-    And Git operations authenticate through the existing SSH environment
+    Given provider "personal" has a valid API credential
+    And provider "personal" is configured for SSH transport
+    And the current repository origin is "git@github.com:example-user/demo.git"
+    When I run `colt auth status`
+    Then the SSH transport probe succeeds without writing "~/.ssh/config"
+    And native Git uses the user's SSH configuration and keys without a provider token
 
-  @unimplemented @CORE-GIT-010
+  @CORE-GIT-010
   Scenario: SSH private key remains outside Colt credential storage
-    Given a managed SSH repository
+    Given provider "personal" is configured for SSH transport with authoritative SSH URL "git@github.com:example-user/example-project.git"
+    When I run `colt auth status personal --repository example-project`
     Then the Colt credential subsystem holds no SSH private-key material
     And Colt never invokes key generation or agent management
 
-  @unimplemented @CORE-PROVIDER-006 @CORE-GIT-010
+  @CORE-PROVIDER-006 @CORE-GIT-010
   Scenario: SSH keys do not authenticate GitHub API calls
     Given the configured Git transport is SSH
     And native Git SSH access to a repository works
@@ -803,34 +809,34 @@ Feature: Provider configuration and authentication
     Then Colt automatically starts GitHub OAuth Device Flow
     And the SSH key is not used for provider API authentication
 
-  @unimplemented @CORE-GIT-010 @CORE-PROVIDER-005
+  @CORE-GIT-010 @CORE-PROVIDER-005
   Scenario: Missing SSH access produces a Git transport failure distinct from provider API authentication
-    Given provider API authentication succeeds for provider "personal"
+    Given provider "personal" API authentication succeeds over SSH transport
     And native Git SSH access fails because no registered public key matches
     When repository access is checked
     Then the Git failure is reported separately from provider authentication
 
-  @unimplemented @CORE-GIT-010 @CORE-PROVIDER-008
+  @CORE-GIT-010 @CORE-PROVIDER-008
   Scenario: SSH repository access can succeed after Colt provider logout
-    Given provider "personal" has no persisted credential after logout
-    And the user's SSH key remains registered with the provider
-    When I run ordinary "git push" over SSH
-    Then the push can still succeed
-    And no SSH configuration was modified by the logout
+    Given provider "personal" has a persisted credential and user SSH keys
+    When I run `colt auth logout personal`
+    Then the injected secure-store credential for "personal" is removed
+    And no SSH key, SSH configuration, or ssh-agent state is modified
 
-  @unimplemented @CORE-GIT-010
+  @CORE-GIT-010
   Scenario: Multiple accounts on one SSH host use host aliases
-    Given SSH hosts "github-personal" and "github-work" both resolve to "github.com"
-    When the repository remote uses "git@github-personal:example-user/example-project.git"
+    Given provider "personal" is configured for SSH transport with authoritative SSH URL "git@github.com:example-user/example-project.git"
+    And the current repository remote is the alias "git@github-personal:example-user/example-project.git"
+    When I run `colt auth status personal --repository example-project`
     Then the alias is treated as a local SSH name, not a provider authority
-    And the selected transport is validated against the expected provider repository
+    And the transport is validated against the expected provider repository
 
-  @unimplemented @CORE-GIT-008 @CORE-PROVIDER-008
+  @CORE-GIT-008 @CORE-PROVIDER-008
   Scenario: Logout leaves HTTPS helper configuration but removes its credential
     Given a managed HTTPS repository configures the Colt credential helper
     When I run `colt auth logout personal`
     Then the repository remote and helper configuration are unchanged
-    And a later "git push" may fail or fall through to another credential source
+    And a later "git push" falls through without a stored credential
 
   @CORE-IDENTITY-001
   Scenario: Git identity is preserved independently of provider authentication

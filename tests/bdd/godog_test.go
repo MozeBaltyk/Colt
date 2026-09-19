@@ -41,6 +41,7 @@ func TestBDD(t *testing.T) {
 			steps.RegisterInitSteps(ctx, w)
 			steps.RegisterAuthSteps(ctx, w)
 			steps.RegisterLifecycleSteps(ctx, w)
+			steps.RegisterCoreGitSteps(ctx, w)
 		},
 		Options: &godog.Options{
 			Format:      "pretty",
@@ -48,8 +49,10 @@ func TestBDD(t *testing.T) {
 			Strict:      true,
 			Concurrency: 1,
 			// Status tags are the only exclusions: every other scenario executes.
-			// @integration runs separately against live container backends.
-			Tags:     "~@planned&&~@unimplemented&&~@integration",
+			// @integration runs separately against live container backends, and
+			// @blackbox scenarios run as PTY/process tests in TestBlackbox
+			// (which needs the built binary and a real pseudo-terminal).
+			Tags:     "~@planned&&~@unimplemented&&~@integration&&~@blackbox",
 			TestingT: t,
 		},
 	}

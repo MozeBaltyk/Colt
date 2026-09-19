@@ -66,7 +66,7 @@ Feature: Interactive command input
     Then the command succeeds
     And no reusable credential value appears in output
 
-  @unimplemented @CORE-CLI-003 @CORE-CREDENTIAL-002
+  @blackbox @CORE-CLI-003 @CORE-CREDENTIAL-002
   Scenario: A real terminal does not echo a prompted reusable secret
     Given the real Colt binary is attached to a pseudo-terminal
     When the terminal token prompt receives "prompted-fake-secret"

@@ -75,8 +75,14 @@ func (a *App) Root() *cobra.Command {
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 	}
 	root.PersistentFlags().Bool("noninteractive", false, "disable interactive prompts and authorization flows")
+	root.PersistentFlags().BoolP("verbose", "v", false, "print additional non-secret diagnostics")
 	root.AddCommand(a.authCommand(), a.initCommand(), a.listCommand(), a.cloneCommand(), a.releaseCommand(), a.gitCredentialCommand())
 	return root
+}
+
+func verbose(cmd *cobra.Command) bool {
+	v, _ := cmd.Root().PersistentFlags().GetBool("verbose")
+	return v
 }
 
 type requiredInput struct {
@@ -609,14 +615,20 @@ func (a *App) providerStatus(cmd *cobra.Command, args []string, repository strin
 				}
 			} else {
 				fmt.Fprintf(cmd.OutOrStdout(), "  Credential:  %s\n", resolvedCredentialSource(p))
+				if verbose(cmd) && p.Auth.CredentialID != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "  Credential ID: %s\n", p.Auth.CredentialID)
+				}
 				client, clientErr := a.NewClient(p, token)
 				if clientErr != nil {
 					fmt.Fprintf(cmd.OutOrStdout(), "  Connection:  ✗ unreachable\n    %s\n", safeExplanation(clientErr.Error()))
 				} else {
 					account, authErr := client.Authenticate(cmd.Context())
 					if authErr != nil {
-						fmt.Fprintf(cmd.OutOrStdout(), "  Connection:  ✗ %s\n", authState(authErr))
-						if exp := safeExplanation(authErr.Error()); exp != "" {
+						state := authState(authErr)
+						fmt.Fprintf(cmd.OutOrStdout(), "  Connection:  ✗ %s\n", state)
+						if state == "authentication failed" && resolvedCredentialSource(p) == "stored" {
+							fmt.Fprintf(cmd.OutOrStdout(), "    Run: colt auth login %s %s\n", p.Type, alias)
+						} else if exp := safeExplanation(authErr.Error()); exp != "" {
 							fmt.Fprintf(cmd.OutOrStdout(), "    %s\n", exp)
 						}
 					} else {

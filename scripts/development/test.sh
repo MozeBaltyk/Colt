@@ -37,7 +37,7 @@ for layer in "${layers[@]}"; do
             go test ./tests/bdd/... -count=1
             ;;
         blackbox)
-            go test -tags bdd ./tests/bdd/... -run '^TestBlackbox$' -count=1
+            go test -tags bdd ./tests/bdd/... -run 'TestBlackbox' -count=1
             ;;
         coverage)
             go test ./tests/bdd/ -run '^TestBDDRequirementIndex$' -count=1 -args -update-bdd-coverage

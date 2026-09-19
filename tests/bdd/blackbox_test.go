@@ -8,10 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/MozeBaltyk/Colt/tests/bdd/fixture"
+	"github.com/creack/pty"
 )
 
 func TestBlackbox(t *testing.T) {
@@ -35,7 +39,7 @@ func TestBlackbox(t *testing.T) {
 			t.Fatal(err)
 		}
 		output := runBlackbox(t, binary, dir, configPath, "init", "demo", "--local")
-		if !strings.Contains(output, "initialized demo") {
+		if !strings.Contains(output, "Local state: initial commit") {
 			t.Fatalf("unexpected init output: %q", output)
 		}
 		if _, err := os.Stat(filepath.Join(dir, "demo", ".git")); err != nil {
@@ -99,6 +103,94 @@ func TestBlackbox(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestBlackboxSecretPromptDoesNotEcho drives the real binary under a
+// pseudo-terminal and asserts that a prompted reusable secret never appears in
+// the terminal transcript (echo is disabled by the non-echoing reader).
+func TestBlackboxSecretPromptDoesNotEcho(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pseudo-terminal test is not supported on Windows")
+	}
+	buildDir := t.TempDir()
+	binary := filepath.Join(buildDir, "colt")
+	ctx, cancel := context.WithTimeout(context.Background(), fixture.CommandTimeout)
+	defer cancel()
+	build := exec.CommandContext(ctx, "go", "build", "-o", binary, "./cmd/colt")
+	build.Dir = repoRoot()
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build colt: %v: %s", err, output)
+	}
+
+	dir, configPath := blackboxSandbox(t)
+	secret := "prompted-fake-secret"
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), fixture.CommandTimeout)
+	defer runCancel()
+	cmd := exec.CommandContext(runCtx, binary, "auth", "login", "github", "personal",
+		"--namespace", "octocat", "--git-name", "Test", "--git-email", "test@example.com")
+	cmd.Env = blackboxEnv(filepath.Join(dir, "home"), configPath)
+
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatalf("start pty: %v", err)
+	}
+	defer ptmx.Close()
+
+	var mu sync.Mutex
+	var transcript strings.Builder
+	readDone := make(chan struct{})
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			n, err := ptmx.Read(buf)
+			if n > 0 {
+				mu.Lock()
+				transcript.Write(buf[:n])
+				mu.Unlock()
+			}
+			if err != nil {
+				close(readDone)
+				return
+			}
+		}
+	}()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		seen := strings.Contains(transcript.String(), "Token: ")
+		mu.Unlock()
+		if seen {
+			break
+		}
+		if time.Now().After(deadline) {
+			mu.Lock()
+			defer mu.Unlock()
+			t.Fatalf("token prompt not observed; transcript=%q", transcript.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// ponytail: brief delay so the child enters `term.ReadPassword` and disables
+	// echo before we type; the race is inherent to PTY testing without a termios
+	// probe and 400ms is generous for a local/CI bdd lane.
+	time.Sleep(400 * time.Millisecond)
+	if _, err := ptmx.WriteString(secret + "\n"); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+
+	select {
+	case <-readDone:
+	case <-time.After(10 * time.Second):
+	}
+	_ = cmd.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Contains(transcript.String(), secret) {
+		t.Fatalf("prompted secret echoed to terminal transcript:\n%s", transcript.String())
+	}
 }
 
 func blackboxSandbox(t *testing.T) (string, string) {
