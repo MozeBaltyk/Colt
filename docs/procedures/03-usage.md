@@ -6,6 +6,13 @@
 
 ## Workflow
 
+On a Linux deployment host, run `sudo colt run status` to list all deployments
+found in Colt's protected state directory or systemd units. The concise list
+marks managed, retained/partial, and `legacy (read-only)` installs and shows
+app, database, and network unit states. Use `sudo colt run status <name>` for
+details. Removal retains volumes unless the destructive `--volumes` flag is
+explicitly supplied (`--volume` is a deprecated alias).
+
 Remote `colt init <project>` clones to
 `<user-home>/<namespace>/<project>`. Use `--destination <path>` to replace the
 complete clone path; relative paths resolve from the current directory and the

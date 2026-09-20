@@ -17,20 +17,21 @@ import (
 // FakeHost records all host mutations in memory. It never invokes systemctl,
 // podman, sudo, or writes outside the test process.
 type FakeHost struct {
-	GOOS      string
-	UID       int
-	Missing   map[string]bool
-	Existing  map[string]bool
-	Files     map[string]string
-	Modes     map[string]fs.FileMode
-	Commands  []string
-	Mutations []string
-	Resources map[string]bool
-	Labels    map[string]string
+	GOOS       string
+	UID        int
+	Missing    map[string]bool
+	Existing   map[string]bool
+	Files      map[string]string
+	Modes      map[string]fs.FileMode
+	Commands   []string
+	Mutations  []string
+	Resources  map[string]bool
+	Labels     map[string]string
+	UnitStates map[string]string
 }
 
 func NewFakeHost() *FakeHost {
-	return &FakeHost{GOOS: "linux", Labels: map[string]string{}, Missing: map[string]bool{}, Existing: map[string]bool{}, Files: map[string]string{}, Modes: map[string]fs.FileMode{}, Resources: map[string]bool{}}
+	return &FakeHost{GOOS: "linux", Labels: map[string]string{}, Missing: map[string]bool{}, Existing: map[string]bool{}, Files: map[string]string{}, Modes: map[string]fs.FileMode{}, Resources: map[string]bool{}, UnitStates: map[string]string{}}
 }
 
 type fakeExitError struct{ code int }
@@ -47,6 +48,35 @@ func (f *FakeHost) LookPath(name string) (string, error) {
 	return "/usr/bin/" + name, nil
 }
 func (f *FakeHost) Exists(path string) (bool, error) { return f.Existing[path], nil }
+func (f *FakeHost) ReadDir(dir string) ([]fs.DirEntry, error) {
+	entries := map[string]bool{}
+	for path, exists := range f.Existing {
+		if exists && filepath.Dir(path) == dir {
+			_, file := f.Files[path]
+			entries[filepath.Base(path)] = dir == "/etc/colt/run" && !file
+		}
+	}
+	result := make([]fs.DirEntry, 0, len(entries))
+	for name, isDir := range entries {
+		result = append(result, fakeDirEntry{name, isDir})
+	}
+	return result, nil
+}
+
+type fakeDirEntry struct {
+	name string
+	dir  bool
+}
+
+func (e fakeDirEntry) Name() string { return e.name }
+func (e fakeDirEntry) IsDir() bool  { return e.dir }
+func (e fakeDirEntry) Type() fs.FileMode {
+	if e.dir {
+		return fs.ModeDir
+	}
+	return 0
+}
+func (e fakeDirEntry) Info() (fs.FileInfo, error) { return nil, nil }
 func (f *FakeHost) MkdirAll(path string, mode fs.FileMode) error {
 	f.Mutations = append(f.Mutations, "mkdir-all:"+path)
 	f.Modes[path] = mode
@@ -87,6 +117,7 @@ func (f *FakeHost) Run(_ context.Context, name string, args ...string) error {
 	f.Commands = append(f.Commands, call)
 	if strings.HasSuffix(name, "/systemctl") && len(args) > 1 && (args[0] == "enable" || args[0] == "start") {
 		unit := args[len(args)-1]
+		f.UnitStates[unit] = "active"
 		if strings.HasPrefix(unit, "container-") {
 			container := strings.TrimSuffix(strings.TrimPrefix(unit, "container-"), ".service")
 			content := f.Files[filepath.Join("/etc/systemd/system", unit)]
@@ -95,6 +126,14 @@ func (f *FakeHost) Run(_ context.Context, name string, args ...string) error {
 				f.Resources["container:"+container] = true
 				f.Labels["container:"+container] = owner
 			}
+		}
+	}
+	if strings.HasSuffix(name, "/systemctl") && len(args) == 2 && args[0] == "stop" {
+		unit := args[1]
+		f.UnitStates[unit] = "inactive"
+		if strings.HasPrefix(unit, "container-") {
+			container := strings.TrimSuffix(strings.TrimPrefix(unit, "container-"), ".service")
+			f.Resources["container:"+container] = false
 		}
 	}
 	if strings.HasSuffix(name, "/podman") && len(args) >= 3 {
@@ -135,6 +174,9 @@ func (f *FakeHost) RunOutput(_ context.Context, name string, args ...string) (st
 		return "", fakeExitError{1}
 	}
 	if strings.Contains(call, "systemctl show") {
+		if len(args) != 0 && f.UnitStates[args[len(args)-1]] != "" {
+			return f.UnitStates[args[len(args)-1]], nil
+		}
 		return "active", nil
 	}
 	if strings.Contains(call, "podman volume inspect") {
@@ -143,7 +185,13 @@ func (f *FakeHost) RunOutput(_ context.Context, name string, args ...string) (st
 	}
 	return "", nil
 }
-func (f *FakeHost) ReadFile(path string) ([]byte, error) { return []byte(f.Files[path]), nil }
+func (f *FakeHost) ReadFile(path string) ([]byte, error) {
+	data, ok := f.Files[path]
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+	return []byte(data), nil
+}
 func (f *FakeHost) Remove(path string) error {
 	f.Mutations = append(f.Mutations, "remove:"+path)
 	delete(f.Files, path)

@@ -12,10 +12,10 @@ later configured as a provider via `colt auth login gitea|forgejo <alias>`.
 
 ``` text
 colt run <gitea|forgejo> <name> [--replace] [--image <ref>] [--password <secret>] [--external-url <https-url>]
-colt run status <name>
+colt run status [<name>]
 colt run stop <name>
 colt run start <name>
-colt run rm <name> [--volumes]
+colt run rm <name> [--volumes] # deprecated alias: --volume
 ```
 
 `<name>` is the deployment name. It becomes the systemd unit suffix,
@@ -44,7 +44,7 @@ All three are `WantedBy=multi-user.target` so the deployment survives reboot.
 | `RUN-004` | MUST NOT hardcode passwords in unit files. Secrets MUST live in an `EnvironmentFile=` pointed at a 0600 file (e.g. `/etc/colt/run/<name>/env`). | File permission inspection |
 | `RUN-005` | Generate application `security.SECRET_KEY` and DB password initially. Preserve both on replacement. Legacy `--password` overrides the initial application key only; a different replacement key MUST fail before stopping services. No prompt or administrator provisioning. | Key-preservation and rotation-rejection tests |
 | `RUN-006` | `--replace` MUST stop/remove owned runtime resources before recreating, retaining volumes, credentials and omitted image/URL options. Also resumes retained deployments. Without it, an existing deployment MUST fail. | Orchestration re-deploy test |
-| `RUN-007` | `colt run status <name>` MUST report deployment type, actual validated systemd state (including failed/activating), image, ports, and volume paths. | Output test |
+| `RUN-007` | `colt run status` MUST discover, deduplicate, sort, and concisely list valid deployment names from deployment directories and Colt unit filenames, including partial and read-only legacy installs; an empty host reports `no deployments found`. `colt run status <name>` MUST report ownership/lifecycle, each present unit's actual systemd state (including failed/activating), absent units, best-effort type/image and volume availability without reading env secrets or failing solely on incomplete legacy state. | Output and orchestration tests |
 | `RUN-008` | `rm` MUST retain protected ownership, credentials and metadata unless `--volumes`. A later `--replace` or `rm --volumes` MUST work; missing resources/units are tolerated, unfamiliar ones rejected. Never force-remove networks/volumes or their consumers. | Retained/partial lifecycle orchestration tests |
 | `RUN-009` | `--image` overrides the default image tag. | Unit inspection |
 | `RUN-010` | On any systemd/podman/permission failure, MUST report the failing layer and stop, leaving prior deployment intact unless `--replace`. A failed fresh deployment MUST best-effort remove only resources created by that attempt; replacement is not transactional. | Failure-path test |
@@ -52,6 +52,7 @@ All three are `WantedBy=multi-user.target` so the deployment survives reboot.
 | `RUN-012` | App unit MUST wait for the database to become healthy before starting the app container. | Unit inspection / startup order test |
 | `RUN-013` | `colt run` requires root (writes to `/etc/systemd/system/`). Non-root execution MUST fail with an actionable error suggesting `sudo`. | Non-root execution test |
 | `RUN-014` | `--external-url` MUST accept only a clean absolute root-path HTTPS URL, configure the application’s advertised web/SSH host while retaining container HTTP, persist/report it, and print a token-free manual onboarding template. Invalid values MUST fail before mutation. | Rendering / output / failure-path test |
+| `RUN-015` | Lifecycle success MUST be based on verified state, not successful command dispatch: `stop` requires every exact unit inactive and its owned app/DB containers absent; `start` clears exact-unit failed state before ordered startup, retains readiness checks, and requires every unit active. | Fake-host stop/start state tests |
 
 ## Image defaults
 
@@ -183,6 +184,8 @@ resources, and leaves 0700 `/etc/colt/run/<name>` with 0600 env, metadata and ow
 records. Resume using `colt run <type> <name> --replace`; later explicit
 `colt run rm <name> --volumes` purges verified-owned volumes and recovery records.
 **The latter is destructive and requires an operator's deliberate choice.**
+The deprecated singular `--volume` spelling is an alias for the same explicit
+destructive boolean; omission of either spelling always retains volumes.
 Partial removals can be retried; missing objects are not adopted or recreated
 during removal. If a volume is missing, redeploy refuses a mixed old/new database:
 restore a complete backup or deliberately finish purging before a fresh deploy.

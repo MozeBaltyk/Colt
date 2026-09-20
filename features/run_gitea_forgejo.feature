@@ -68,7 +68,14 @@ Feature: Deterministic orchestration of a Gitea or Forgejo deployment
     When I run `colt run status personal`
     Then output contains "active", the image ref, ports 3000 and 2222, and volume paths
 
-   @RUN-008
+   @RUN-007
+   Scenario: Status discovers managed and legacy partial deployments
+    Given a deployment named "personal" is active
+    And a legacy partial deployment named "gateau" has no network unit
+    When I run `colt run status`
+    Then status lists "gateau" before "personal" with gateau legacy read-only and its network absent
+
+   @RUN-008 @RUN-015
    Scenario: Stop and start cycle preserves data
     Given a deployment named "personal" is active
     When I run `colt run stop personal`

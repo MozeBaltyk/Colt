@@ -13,28 +13,31 @@ import (
 )
 
 type fakeHost struct {
-	goos      string
-	euid      int
-	missing   map[string]bool
-	existing  map[string]bool
-	files     map[string]string
-	modes     map[string]fs.FileMode
-	owners    map[string][2]int
-	commands  []string
-	mutations []string
-	outputs   map[string]string
-	failures  map[string]error
-	resources map[string]bool
-	writeErrs map[string]error
-	mkdirErr  error
-	labels    map[string]string
-	readyErr  error
-	readyHook func(context.Context) error
-	runHook   func(context.Context, string, []string) error
+	goos                string
+	euid                int
+	missing             map[string]bool
+	existing            map[string]bool
+	files               map[string]string
+	modes               map[string]fs.FileMode
+	owners              map[string][2]int
+	commands            []string
+	mutations           []string
+	reads               []string
+	outputs             map[string]string
+	failures            map[string]error
+	resources           map[string]bool
+	writeErrs           map[string]error
+	mkdirErr            error
+	labels              map[string]string
+	readyErr            error
+	readyHook           func(context.Context) error
+	runHook             func(context.Context, string, []string) error
+	outputSequences     map[string][]string
+	stopCleanupDisabled map[string]bool
 }
 
 func newFakeHost() *fakeHost {
-	return &fakeHost{goos: "linux", labels: map[string]string{}, files: map[string]string{}, modes: map[string]fs.FileMode{}, owners: map[string][2]int{}, missing: map[string]bool{}, existing: map[string]bool{}, outputs: map[string]string{}, failures: map[string]error{}, resources: map[string]bool{}, writeErrs: map[string]error{}}
+	return &fakeHost{goos: "linux", labels: map[string]string{}, files: map[string]string{}, modes: map[string]fs.FileMode{}, owners: map[string][2]int{}, missing: map[string]bool{}, existing: map[string]bool{}, outputs: map[string]string{}, failures: map[string]error{}, resources: map[string]bool{}, writeErrs: map[string]error{}, outputSequences: map[string][]string{}, stopCleanupDisabled: map[string]bool{}}
 }
 
 type fakeExitError struct{ code int }
@@ -51,6 +54,35 @@ func (f *fakeHost) LookPath(name string) (string, error) {
 	return "/usr/bin/" + name, nil
 }
 func (f *fakeHost) Exists(path string) (bool, error) { return f.existing[path], nil }
+func (f *fakeHost) ReadDir(dir string) ([]fs.DirEntry, error) {
+	entries := map[string]bool{}
+	for path, exists := range f.existing {
+		if exists && filepath.Dir(path) == dir {
+			_, file := f.files[path]
+			entries[filepath.Base(path)] = dir == runDir && !file
+		}
+	}
+	result := make([]fs.DirEntry, 0, len(entries))
+	for name, isDir := range entries {
+		result = append(result, fakeDirEntry{name, isDir})
+	}
+	return result, nil
+}
+
+type fakeDirEntry struct {
+	name string
+	dir  bool
+}
+
+func (e fakeDirEntry) Name() string { return e.name }
+func (e fakeDirEntry) IsDir() bool  { return e.dir }
+func (e fakeDirEntry) Type() fs.FileMode {
+	if e.dir {
+		return fs.ModeDir
+	}
+	return 0
+}
+func (e fakeDirEntry) Info() (fs.FileInfo, error) { return nil, nil }
 func (f *fakeHost) MkdirAll(path string, mode fs.FileMode) error {
 	f.mutations = append(f.mutations, "mkdir-all:"+path)
 	f.modes[path] = mode
@@ -119,6 +151,7 @@ func (f *fakeHost) Run(ctx context.Context, name string, args ...string) error {
 	}
 	if strings.HasSuffix(name, "/systemctl") && len(args) > 1 && (args[0] == "enable" || args[0] == "start") {
 		unit := args[len(args)-1]
+		f.outputs[name+" show --property=ActiveState --value "+unit] = "active"
 		if strings.HasPrefix(unit, "container-") {
 			container := strings.TrimSuffix(strings.TrimPrefix(unit, "container-"), ".service")
 			content := f.files[filepath.Join(unitDir, unit)]
@@ -126,6 +159,16 @@ func (f *fakeHost) Run(ctx context.Context, name string, args ...string) error {
 			if !f.resources["container:"+container] {
 				f.resources["container:"+container] = true
 				f.labels["container:"+container] = owner
+			}
+		}
+	}
+	if strings.HasSuffix(name, "/systemctl") && len(args) == 2 && args[0] == "stop" {
+		unit := args[1]
+		f.outputs[name+" show --property=ActiveState --value "+unit] = "inactive"
+		if strings.HasPrefix(unit, "container-") {
+			container := strings.TrimSuffix(strings.TrimPrefix(unit, "container-"), ".service")
+			if !f.stopCleanupDisabled[container] {
+				f.resources["container:"+container] = false
 			}
 		}
 	}
@@ -154,6 +197,10 @@ func (f *fakeHost) RunOutput(ctx context.Context, name string, args ...string) (
 		return "", err
 	}
 	call := strings.Join(append([]string{name}, args...), " ")
+	if sequence := f.outputSequences[call]; len(sequence) != 0 {
+		f.outputSequences[call] = sequence[1:]
+		return sequence[0], f.failures[call]
+	}
 	if value, ok := f.outputs[call]; ok {
 		return value, f.failures[call]
 	}
@@ -183,7 +230,14 @@ func (f *fakeHost) RunOutput(ctx context.Context, name string, args ...string) (
 	}
 	return f.outputs[call], f.failures[call]
 }
-func (f *fakeHost) ReadFile(path string) ([]byte, error) { return []byte(f.files[path]), nil }
+func (f *fakeHost) ReadFile(path string) ([]byte, error) {
+	f.reads = append(f.reads, path)
+	data, ok := f.files[path]
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+	return []byte(data), nil
+}
 func (f *fakeHost) Remove(path string) error {
 	f.mutations = append(f.mutations, "remove:"+path)
 	if err := f.failures["remove:"+path]; err != nil {
@@ -404,6 +458,88 @@ func TestRUNStatusReportsStateImagePortsAndVolumes(t *testing.T) {
 	}
 	if len(host.mutations) != 0 {
 		t.Fatalf("status mutated host: %v", host.mutations)
+	}
+}
+
+func TestRUNStatusDiscoversSortedDeduplicatedDeployments(t *testing.T) {
+	host := newFakeHost()
+	secret := "do-not-print-this-secret"
+	for _, name := range []string{"zeta", "alpha", "bad_name", "busy.lock"} {
+		host.existing[filepath.Join(runDir, name)] = true
+	}
+	host.files[filepath.Join(runDir, "alpha", "env")] = "SECRET=" + secret
+	envPath := filepath.Join(runDir, "alpha", "env")
+	host.existing[envPath] = true
+	for path, content := range map[string]string{
+		filepath.Join(unitDir, "container-beta-app.service"):          "ExecStart=/usr/bin/podman run example.invalid/gitea:1\n",
+		filepath.Join(unitDir, "container-alpha-app.service"):         "",
+		filepath.Join(unitDir, "container-Bad-app.service"):           "",
+		filepath.Join(unitDir, "container-gamma-worker.service"):      "",
+		filepath.Join(unitDir, "podman-network-bad_name-net.service"): "",
+	} {
+		host.files[path], host.existing[path] = content, true
+	}
+	out, err := execute(t, &App{Host: host}, "run", "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alpha, beta, zeta := strings.Index(out, "alpha  "), strings.Index(out, "beta  "), strings.Index(out, "zeta  ")
+	if alpha < 0 || beta < alpha || zeta < beta || strings.Count(out, "alpha  ") != 1 {
+		t.Fatalf("status list is not sorted and deduplicated: %q", out)
+	}
+	for _, unwanted := range []string{"bad_name", "busy.lock", "Bad", "gamma", secret} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("status list %q contains %q", out, unwanted)
+		}
+	}
+	if slices.Contains(host.reads, envPath) {
+		t.Fatalf("status list read secret environment file: %v", host.reads)
+	}
+}
+
+func TestRUNStatusEmptyList(t *testing.T) {
+	out, err := execute(t, &App{Host: newFakeHost()}, "run", "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "no deployments found\n" {
+		t.Fatalf("output = %q", out)
+	}
+}
+
+func TestRUNStatusLegacyPartialIsBestEffort(t *testing.T) {
+	host := newFakeHost()
+	p := deploymentPaths("gateau")
+	host.existing[p.configDir] = true
+	host.files[p.appUnit], host.existing[p.appUnit] = "ExecStart=/usr/bin/podman run codeberg.org/forgejo/forgejo:7-rootless\n", true
+	host.files[p.dbUnit], host.existing[p.dbUnit] = "[Unit]\n", true
+	host.failures["/usr/bin/podman volume inspect --format {{.Mountpoint}} gateau-data"] = errors.New("unavailable")
+	out, err := execute(t, &App{Host: host}, "run", "status", "gateau")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ownership/lifecycle: legacy (read-only)", "network unit: absent", "database unit: active", "app unit: active", "type: forgejo", "image: codeberg.org/forgejo/forgejo:7-rootless", "volume gateau-data: unavailable"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("status output %q missing %q", out, want)
+		}
+	}
+}
+
+func TestRUNStatusManagedMissingUnitIsPartial(t *testing.T) {
+	host := newFakeHost()
+	p := deploymentPaths("personal")
+	host.files[p.configDir+"/owner"] = strings.Repeat("a", 43)
+	host.existing[p.configDir+"/owner"] = true
+	host.files[p.metadata] = "type=gitea\nimage=" + giteaImage + "\nexternal_url=\n"
+	host.existing[p.metadata] = true
+	host.files[p.appUnit], host.existing[p.appUnit] = "[Unit]\n", true
+	host.files[p.dbUnit], host.existing[p.dbUnit] = "[Unit]\n", true
+	out, err := execute(t, &App{Host: host}, "run", "status", "personal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "ownership/lifecycle: retained/partial") || !strings.Contains(out, "network unit: absent") {
+		t.Fatalf("status output = %q", out)
 	}
 }
 
@@ -669,6 +805,9 @@ func TestRUNStartStopOrdering(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantStart := []string{
+		"/usr/bin/systemctl reset-failed " + filepath.Base(p.networkUnit),
+		"/usr/bin/systemctl reset-failed " + filepath.Base(p.dbUnit),
+		"/usr/bin/systemctl reset-failed " + filepath.Base(p.appUnit),
 		"/usr/bin/systemctl start " + filepath.Base(p.networkUnit),
 		"/usr/bin/systemctl start " + filepath.Base(p.dbUnit),
 		"/usr/bin/systemctl start " + filepath.Base(p.appUnit),
@@ -678,12 +817,82 @@ func TestRUNStartStopOrdering(t *testing.T) {
 	}
 }
 
+func TestRUNStopResetsFailedUnitAndRequiresInactive(t *testing.T) {
+	host := newFakeHost()
+	a := deployFixture(t, host)
+	p := deploymentPaths("personal")
+	appState := "/usr/bin/systemctl show --property=ActiveState --value " + filepath.Base(p.appUnit)
+	host.outputSequences[appState] = []string{"failed", "inactive"}
+	out, err := execute(t, a, "run", "stop", "personal")
+	if err != nil || out != "stopped deployment personal\n" {
+		t.Fatalf("output=%q error=%v", out, err)
+	}
+	if !slices.Contains(host.commands, "/usr/bin/systemctl reset-failed "+filepath.Base(p.appUnit)) {
+		t.Fatalf("failed unit was not reset exactly: %v", host.commands)
+	}
+}
+
+func TestRUNStopFailsWhenResetUnitRemainsFailed(t *testing.T) {
+	host := newFakeHost()
+	a := deployFixture(t, host)
+	p := deploymentPaths("personal")
+	appState := "/usr/bin/systemctl show --property=ActiveState --value " + filepath.Base(p.appUnit)
+	host.outputSequences[appState] = []string{"failed", "failed"}
+	out, err := execute(t, a, "run", "stop", "personal")
+	if err == nil || !strings.Contains(err.Error(), filepath.Base(p.appUnit)) || !strings.Contains(err.Error(), `ActiveState is "failed", want inactive`) || out != "" {
+		t.Fatalf("output=%q error=%v", out, err)
+	}
+}
+
+func TestRUNStopFailsWhenOwnedContainerRemains(t *testing.T) {
+	host := newFakeHost()
+	a := deployFixture(t, host)
+	host.stopCleanupDisabled["personal-app"] = true
+	out, err := execute(t, a, "run", "stop", "personal")
+	if err == nil || !strings.Contains(err.Error(), "ExecStopPost left owned container personal-app present") || out != "" {
+		t.Fatalf("output=%q error=%v", out, err)
+	}
+	if !host.resources["container:personal-app"] || slices.ContainsFunc(host.commands, func(command string) bool {
+		return strings.Contains(command, "podman") && strings.Contains(command, " rm ")
+	}) {
+		t.Fatalf("stop removed the lingering container: commands=%v resources=%v", host.commands, host.resources)
+	}
+}
+
+func TestRUNStartFailsWhenReadinessPassesButUnitIsInactive(t *testing.T) {
+	host := newFakeHost()
+	a := deployFixture(t, host)
+	p := deploymentPaths("personal")
+	appState := "/usr/bin/systemctl show --property=ActiveState --value " + filepath.Base(p.appUnit)
+	host.outputSequences[appState] = []string{"inactive"}
+	ready := false
+	host.readyHook = func(context.Context) error { ready = true; return nil }
+	out, err := execute(t, a, "run", "start", "personal")
+	if err == nil || !ready || !strings.Contains(err.Error(), filepath.Base(p.appUnit)) || !strings.Contains(err.Error(), `ActiveState is "inactive", want active`) || out != "" {
+		t.Fatalf("ready=%v output=%q error=%v", ready, out, err)
+	}
+	for _, path := range []string{p.networkUnit, p.dbUnit, p.appUnit} {
+		if !slices.Contains(host.commands, "/usr/bin/systemctl reset-failed "+filepath.Base(path)) {
+			t.Fatalf("unit was not reset before start: %v", host.commands)
+		}
+	}
+}
+
+func TestRUNStartReportsSuccessAfterVerifiedActive(t *testing.T) {
+	host := newFakeHost()
+	a := deployFixture(t, host)
+	out, err := execute(t, a, "run", "start", "personal")
+	if err != nil || out != "started deployment personal\n" {
+		t.Fatalf("output=%q error=%v", out, err)
+	}
+}
+
 func TestRUNRemovePreservesVolumesUnlessRequested(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		flag      []string
 		wantVolRM bool
-	}{{"preserve", nil, false}, {"remove", []string{"--volumes"}, true}} {
+	}{{"preserve", nil, false}, {"remove", []string{"--volumes"}, true}, {"singular alias", []string{"--volume"}, true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			host := newFakeHost()
 			a := deployFixture(t, host)

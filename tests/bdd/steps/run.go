@@ -40,6 +40,15 @@ func RegisterRunSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		w.Host.Commands, w.Host.Mutations = nil, nil
 		return nil
 	})
+	ctx.Step(`^a legacy partial deployment named "([^"]*)" has no network unit$`, func(name string) error {
+		dir := filepath.Join("/etc/colt/run", name)
+		app := filepath.Join("/etc/systemd/system", "container-"+name+"-app.service")
+		db := filepath.Join("/etc/systemd/system", "container-"+name+"-db.service")
+		w.Host.Existing[dir], w.Host.Existing[app], w.Host.Existing[db] = true, true, true
+		w.Host.Files[app] = "ExecStart=/usr/bin/podman run docker.io/gitea/gitea:1-rootless\n"
+		w.Host.Files[db] = "[Unit]\n"
+		return nil
+	})
 	ctx.Step(`^stdin is a terminal$`, func() error {
 		w.Interactive = true
 		return nil
@@ -249,6 +258,13 @@ func RegisterRunSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 			if !strings.Contains(w.Out, want) {
 				return fmt.Errorf("status output missing %q: %q", want, w.Out)
 			}
+		}
+		return nil
+	})
+	ctx.Step(`^status lists "gateau" before "personal" with gateau legacy read-only and its network absent$`, func() error {
+		gateau, personal := strings.Index(w.Out, "gateau  legacy (read-only)"), strings.Index(w.Out, "personal  managed")
+		if w.RunErr != nil || gateau < 0 || personal < gateau || !strings.Contains(w.Out[gateau:personal], "network=absent") {
+			return fmt.Errorf("unexpected status error=%v output=%q", w.RunErr, w.Out)
 		}
 		return nil
 	})
