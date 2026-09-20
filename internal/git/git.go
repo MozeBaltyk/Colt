@@ -122,6 +122,9 @@ func (n Native) SetIdentity(ctx context.Context, dir, name, email string) error 
 }
 
 func (n Native) Commit(ctx context.Context, dir string) (string, error) {
+	if err := n.run(ctx, dir, nil, "add", "--force", "--all", "--", "."); err != nil {
+		return "", err
+	}
 	if err := n.run(ctx, dir, nil, "commit", "--allow-empty", "-m", "Initial commit"); err != nil {
 		return "", err
 	}
@@ -133,6 +136,25 @@ func (n Native) Commit(ctx context.Context, dir string) (string, error) {
 		return "", errors.New("native git failed to read the initial commit")
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+// RequireUnbornHEAD rejects cloned repositories carrying any existing history.
+func RequireUnbornHEAD(ctx context.Context, dir string) error {
+	symbolic := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD")
+	symbolic.Dir, symbolic.Env = dir, gitEnv(nil)
+	if err := symbolic.Run(); err != nil {
+		return errors.New("cloned repository HEAD is not an unborn branch")
+	}
+	count := exec.CommandContext(ctx, "git", "rev-list", "--all", "--count")
+	count.Dir, count.Env = dir, gitEnv(nil)
+	output, err := count.Output()
+	if err != nil {
+		return errors.New("native git failed to inspect cloned repository history")
+	}
+	if strings.TrimSpace(string(output)) != "0" {
+		return errors.New("cloned repository has inherited Git history; template initialization requires an unborn HEAD")
+	}
+	return nil
 }
 
 func (n Native) AddOrigin(ctx context.Context, dir, cloneURL string) error {

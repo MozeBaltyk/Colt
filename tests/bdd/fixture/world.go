@@ -48,6 +48,10 @@ type World struct {
 	RunErr                error
 	GlobalGit             string
 	Providers             map[string]config.Provider
+	Templates             map[string]config.Template
+	TemplateSource        string
+	TemplateSnapshot      []byte
+	TemplateInspection    string
 	// Login context for `colt auth login` steps.
 	LoginAlias      string
 	LoginType       string
@@ -140,6 +144,10 @@ func (w *World) Reset(t *testing.T) {
 	w.RunErr = nil
 	w.GlobalGit = ""
 	w.Providers = map[string]config.Provider{}
+	w.Templates = map[string]config.Template{}
+	w.TemplateSource = ""
+	w.TemplateSnapshot = nil
+	w.TemplateInspection = ""
 	w.LoginAlias, w.LoginType = "work", "gitlab"
 	w.PendingHost, w.PendingBase = "", ""
 	w.LoginCredential = ""
@@ -203,7 +211,7 @@ func (w *World) BuildApp() {
 }
 
 func (w *World) SaveConfig() error {
-	return config.Save(w.ConfigPath, config.Config{Providers: w.Providers})
+	return config.Save(w.ConfigPath, config.Config{Providers: w.Providers, Templates: w.Templates})
 }
 
 func (w *World) Run(cmdLine string) {

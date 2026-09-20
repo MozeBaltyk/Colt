@@ -16,8 +16,25 @@ import (
 )
 
 type Config struct {
-	Transport string `yaml:"transport,omitempty"`
+	Transport string              `yaml:"transport,omitempty"`
 	Providers map[string]Provider `yaml:"providers"`
+	Templates map[string]Template `yaml:"templates,omitempty"`
+}
+
+type Template struct {
+	Default  string                     `yaml:"default"`
+	Versions map[string]TemplateVersion `yaml:"versions"`
+}
+
+type TemplateVersion struct {
+	Source     string                       `yaml:"source"`
+	Digest     string                       `yaml:"digest"`
+	Parameters map[string]TemplateParameter `yaml:"parameters,omitempty"`
+}
+
+type TemplateParameter struct {
+	Required bool    `yaml:"required,omitempty"`
+	Default  *string `yaml:"default,omitempty"`
 }
 
 type Provider struct {
@@ -47,6 +64,8 @@ const maxConfigSize = 1 << 20
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
 var envRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var namespacePartRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+var parameterRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
+var digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 func Path() (string, error) {
 	if path := os.Getenv("COLT_CONFIG"); path != "" {
@@ -74,6 +93,9 @@ func Load(path string) (Config, error) {
 	}
 	if len(data) > maxConfigSize {
 		return Config{}, fmt.Errorf("config exceeds maximum size of %d bytes", maxConfigSize)
+	}
+	if err := validateTemplateYAML(data); err != nil {
+		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 	var cfg Config
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -110,6 +132,80 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+func validateTemplateYAML(data []byte) error {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil || len(document.Content) == 0 {
+		return err
+	}
+	root := document.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil
+	}
+	templates := mappingValue(root, "templates")
+	if templates == nil {
+		return nil
+	}
+	if templates.Kind != yaml.MappingNode {
+		return errors.New("templates must be a mapping")
+	}
+	for i := 0; i < len(templates.Content); i += 2 {
+		name, template := templates.Content[i], templates.Content[i+1]
+		if name.Tag != "!!str" || template.Kind != yaml.MappingNode {
+			return errors.New("template names must be strings and definitions must be mappings")
+		}
+		if value := mappingValue(template, "default"); value != nil && value.Tag != "!!str" {
+			return fmt.Errorf("template %q default must be a string", name.Value)
+		}
+		versions := mappingValue(template, "versions")
+		if versions == nil || versions.Kind != yaml.MappingNode {
+			return fmt.Errorf("template %q versions must be a mapping", name.Value)
+		}
+		for j := 0; j < len(versions.Content); j += 2 {
+			version, configured := versions.Content[j], versions.Content[j+1]
+			if version.Tag != "!!str" || configured.Kind != yaml.MappingNode {
+				return fmt.Errorf("template %q version names must be strings and definitions must be mappings", name.Value)
+			}
+			for _, field := range []string{"source", "digest"} {
+				if value := mappingValue(configured, field); value != nil && value.Tag != "!!str" {
+					return fmt.Errorf("template %q version %q %s must be a string", name.Value, version.Value, field)
+				}
+			}
+			parameters := mappingValue(configured, "parameters")
+			if parameters == nil {
+				continue
+			}
+			if parameters.Kind != yaml.MappingNode {
+				return fmt.Errorf("template %q version %q parameters must be a mapping", name.Value, version.Value)
+			}
+			for k := 0; k < len(parameters.Content); k += 2 {
+				parameter, declaration := parameters.Content[k], parameters.Content[k+1]
+				if parameter.Tag != "!!str" || declaration.Kind != yaml.MappingNode {
+					return fmt.Errorf("template %q version %q parameter names must be strings and declarations must be mappings", name.Value, version.Value)
+				}
+				if value := mappingValue(declaration, "required"); value != nil && value.Tag != "!!bool" {
+					return fmt.Errorf("template parameter %q required must be a boolean", parameter.Value)
+				}
+				if value := mappingValue(declaration, "default"); value != nil && value.Tag != "!!str" {
+					return fmt.Errorf("template parameter %q default must be a string", parameter.Value)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			return mapping.Content[i+1]
+		}
+	}
+	return nil
+}
+
 func (c Config) Validate() error {
 	defaults := 0
 	for alias, p := range c.Providers {
@@ -123,7 +219,62 @@ func (c Config) Validate() error {
 	if defaults > 1 {
 		return errors.New("invalid config: multiple providers are marked default")
 	}
+	for name, template := range c.Templates {
+		if !nameRE.MatchString(name) || name == "." || name == ".." || strings.Contains(name, "@") {
+			return fmt.Errorf("invalid template %q: name must use 1-100 letters, digits, '.', '_' or '-'", name)
+		}
+		if len(template.Versions) == 0 {
+			return fmt.Errorf("invalid template %q: at least one version is required", name)
+		}
+		if !nameRE.MatchString(template.Default) {
+			return fmt.Errorf("invalid template %q: default must name a configured version", name)
+		}
+		if _, ok := template.Versions[template.Default]; !ok {
+			return fmt.Errorf("invalid template %q: default version %q is not configured", name, template.Default)
+		}
+		for version, configured := range template.Versions {
+			if !nameRE.MatchString(version) || version == "." || version == ".." || strings.Contains(version, "@") {
+				return fmt.Errorf("invalid template %q version %q: version must use 1-100 letters, digits, '.', '_' or '-'", name, version)
+			}
+			if configured.Source == "" || len(configured.Source) > 4096 || strings.TrimSpace(configured.Source) != configured.Source || strings.ContainsAny(configured.Source, "\x00\r\n") || strings.Contains(configured.Source, "://") {
+				return fmt.Errorf("invalid template %q version %q: source must be a non-empty local directory path", name, version)
+			}
+			if !digestRE.MatchString(configured.Digest) {
+				return fmt.Errorf("invalid template %q version %q: digest must be sha256 followed by 64 lowercase hexadecimal digits", name, version)
+			}
+			for parameter, declaration := range configured.Parameters {
+				if !parameterRE.MatchString(parameter) {
+					return fmt.Errorf("invalid template %q version %q parameter %q: use a letter followed by letters, digits, '_' or '-'", name, version, parameter)
+				}
+				if declaration.Required && declaration.Default != nil {
+					return fmt.Errorf("invalid template %q version %q parameter %q: required and default are mutually exclusive", name, version, parameter)
+				}
+				if declaration.Default != nil && strings.ContainsAny(*declaration.Default, "\r\n") {
+					return fmt.Errorf("invalid template %q version %q parameter %q: default must be one line", name, version, parameter)
+				}
+			}
+		}
+	}
 	return nil
+}
+
+func (c Config) ResolveTemplate(ref string) (string, string, TemplateVersion, error) {
+	name, version, pinned := strings.Cut(ref, "@")
+	if name == "" || strings.Contains(version, "@") || pinned && version == "" {
+		return "", "", TemplateVersion{}, errors.New("template must be name or name@version")
+	}
+	template, ok := c.Templates[name]
+	if !ok {
+		return "", "", TemplateVersion{}, fmt.Errorf("unknown template %q", name)
+	}
+	if !pinned {
+		version = template.Default
+	}
+	configured, ok := template.Versions[version]
+	if !ok {
+		return "", "", TemplateVersion{}, fmt.Errorf("unknown template version %q", name+"@"+version)
+	}
+	return name, version, configured, nil
 }
 
 func ValidateProvider(alias string, p Provider) error {

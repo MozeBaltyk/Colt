@@ -8,18 +8,15 @@ M2 (provider resolution, clone primitives).
 
 | # | Action | Where | Status |
 |:--|:---|:---|:--:|
-| 1 | Template source resolution & version pinning | `internal/` | ❌ planned |
-| 2 | `colt init <project> --template <name>[@<version>]` | `cmd/colt/` | ❌ planned |
-| 3 | `colt template list/show` | `cmd/colt/` | ❌ planned |
-| 4 | Data-only interpolation (no eval/hooks) | `internal/` | ❌ planned |
-| 5 | BDD scenarios | `features/template_initialization.feature` | ❌ planned |
+| 1 | Template source resolution & version pinning | `internal/` | ✅ complete |
+| 2 | `colt init <project> --template <name>[@<version>]` | `cmd/colt/` | ✅ complete |
+| 3 | `colt template list/show` | `cmd/colt/` | ✅ complete |
+| 4 | Data-only interpolation (no eval/hooks) | `internal/` | ✅ complete |
+| 5 | BDD scenarios | `features/template_initialization.feature` | ✅ complete |
 
-## Left to do (order)
+## Implementation
 
-1. **Template registry/metadata** — source resolution, version pins, `list`/`show`.
-2. **Parameter validation** — declared params, `--set`, interactive prompts.
-3. **Materialization** — deterministic data-only interpolation, fresh git history, no inherited remotes.
-4. **Tests** — unit + BDD.
+Complete. Local directory versions use explicit canonical SHA-256 pins, strict declared parameters, bounded preflight materialization plans, and the shared local/remote initialization flow.
 
 ## Acceptance
 

@@ -6,7 +6,7 @@ This is the detailed normative **first MVP** project-creation capability. It use
 colt init <project> [--local] [--provider <alias>] [--destination <path>] [--visibility <private|public>]
 ```
 
-The command creates a blank project. Parameterized template selection and materialization belong to planned [Milestone 3](03-template-init.md).
+The command creates a blank project unless the implemented [Milestone 3](03-template-init.md) template options are supplied.
 
 ## Requirements
 

@@ -22,6 +22,54 @@ func TestGitEnvStripsGitVariablesCaseInsensitively(t *testing.T) {
 	}
 }
 
+func TestCommitForceStagesIgnoredTemplateData(t *testing.T) {
+	dir := t.TempDir()
+	native := Native{}
+	ctx := context.Background()
+	if err := native.Init(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.SetIdentity(ctx, dir, "Test", "test@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ignored.txt"), []byte("validated"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := native.Commit(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "show", "HEAD:ignored.txt")
+	cmd.Dir, cmd.Env = dir, gitEnv(nil)
+	output, err := cmd.Output()
+	if err != nil || string(output) != "validated" {
+		t.Fatalf("ignored template file was not committed: output=%q error=%v", output, err)
+	}
+}
+
+func TestRequireUnbornHEADRejectsEmptyInheritedCommit(t *testing.T) {
+	dir := t.TempDir()
+	native := Native{}
+	ctx := context.Background()
+	if err := native.Init(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := RequireUnbornHEAD(ctx, dir); err != nil {
+		t.Fatalf("fresh repository rejected: %v", err)
+	}
+	if err := native.SetIdentity(ctx, dir, "Test", "test@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := native.Commit(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := RequireUnbornHEAD(ctx, dir); err == nil || !strings.Contains(err.Error(), "history") {
+		t.Fatalf("empty inherited commit accepted: %v", err)
+	}
+}
+
 func TestTransientHelperUsesCurrentExecutableWhilePersistentHelperUsesPATH(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {

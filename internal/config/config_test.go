@@ -343,3 +343,106 @@ func TestCORE_PROVIDER_001OversizedConfigIsRejected(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 }
+
+func TestTEMPLATE_SOURCE_001ConfigAndResolution(t *testing.T) {
+	defaultValue := "MIT"
+	version := TemplateVersion{
+		Source: "./templates/service-2",
+		Digest: "sha256:" + strings.Repeat("a", 64),
+		Parameters: map[string]TemplateParameter{
+			"owner":   {Required: true},
+			"license": {Default: &defaultValue},
+		},
+	}
+	cfg := Config{Providers: map[string]Provider{}, Templates: map[string]Template{
+		"service": {Default: "2", Versions: map[string]TemplateVersion{"2": version}},
+	}}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{"service", "service@2"} {
+		name, pin, got, err := loaded.ResolveTemplate(ref)
+		if err != nil || name != "service" || pin != "2" || got.Digest != version.Digest {
+			t.Fatalf("ResolveTemplate(%q)=%q %q %#v %v", ref, name, pin, got, err)
+		}
+	}
+}
+
+func TestTEMPLATE_SOURCE_001RejectsMalformedConfig(t *testing.T) {
+	valid := func() Config {
+		return Config{Providers: map[string]Provider{}, Templates: map[string]Template{
+			"service": {Default: "2", Versions: map[string]TemplateVersion{"2": {Source: "./source", Digest: "sha256:" + strings.Repeat("a", 64)}}},
+		}}
+	}
+	tests := []struct {
+		name, want string
+		change     func(*Config)
+	}{
+		{"name", "invalid template", func(c *Config) { c.Templates["bad@name"] = c.Templates["service"] }},
+		{"default", "not configured", func(c *Config) { t := c.Templates["service"]; t.Default = "3"; c.Templates["service"] = t }},
+		{"version", "version", func(c *Config) { t := c.Templates["service"]; t.Versions["bad@version"] = t.Versions["2"] }},
+		{"source", "local directory path", func(c *Config) {
+			t := c.Templates["service"]
+			v := t.Versions["2"]
+			v.Source = "https://example.invalid/x"
+			t.Versions["2"] = v
+		}},
+		{"digest", "digest", func(c *Config) {
+			t := c.Templates["service"]
+			v := t.Versions["2"]
+			v.Digest = "sha256:no"
+			t.Versions["2"] = v
+		}},
+		{"parameter", "parameter", func(c *Config) {
+			t := c.Templates["service"]
+			v := t.Versions["2"]
+			v.Parameters = map[string]TemplateParameter{"bad.name": {Required: true}}
+			t.Versions["2"] = v
+		}},
+		{"required default", "mutually exclusive", func(c *Config) {
+			value := "x"
+			t := c.Templates["service"]
+			v := t.Versions["2"]
+			v.Parameters = map[string]TemplateParameter{"owner": {Required: true, Default: &value}}
+			t.Versions["2"] = v
+		}},
+		{"multiline default", "one line", func(c *Config) {
+			value := "x\ny"
+			t := c.Templates["service"]
+			v := t.Versions["2"]
+			v.Parameters = map[string]TemplateParameter{"owner": {Default: &value}}
+			t.Versions["2"] = v
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := valid()
+			tc.change(&cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestTEMPLATE_SOURCE_001RejectsNonStringYAMLValues(t *testing.T) {
+	base := "providers: {}\ntemplates:\n  service:\n    default: \"2\"\n    versions:\n      \"2\":\n        source: ./source\n        digest: sha256:" + strings.Repeat("a", 64) + "\n"
+	for _, replacement := range []string{
+		strings.Replace(base, `default: "2"`, "default: 2", 1),
+		strings.Replace(base, "source: ./source", "source: 123", 1),
+		base + "        parameters:\n          owner:\n            default: 123\n",
+	} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(replacement), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "must be a string") {
+			t.Fatalf("Load error=%v", err)
+		}
+	}
+}

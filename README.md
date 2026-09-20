@@ -23,6 +23,9 @@ colt auth login <github|gitlab|gitea|forgejo> <alias> \
 colt auth status
 colt auth logout <alias>
 colt init <project> [--local] [--provider <alias>] [--destination <path>]
+colt init <project> --template <name>[@<version>] [--set <key>=<value>]... [--local] [--provider <alias>]
+colt template list
+colt template show <name>[@<version>]
 colt list [--provider <alias> | --all]
 colt clone <repository> [--provider <alias>] [--transport https|ssh]
 colt release <version> [--provider <alias>] [--transport https|ssh]
@@ -52,6 +55,8 @@ clone path; a relative path is resolved from the current directory and its
 parent must already exist. The flag is rejected with `--local`, whose current
 directory behavior is unchanged. Existing non-empty, file, and symlink
 destinations are always refused.
+
+Configured templates are local, named, versioned directory sources with an explicit default version and canonical `sha256:` content pin. Relative sources resolve from the config file directory. `template list` and `template show` inspect metadata only. Initialization validates the whole bounded source before mutation, ignores source `.git` metadata, rejects links and special files, and performs only exact `{{parameter}}` substitution in file contents and paths. Parameters must be declared as `required: true`, have a string `default`, or default to an empty string. See the [template specification](docs/specs/03-template-init.md) for the minimal YAML schema and digest format.
 
 Provider resolution is always provider-neutral, in this exact order:
 
@@ -89,8 +94,8 @@ Colt-to-Gitea and Colt-to-Forgejo initialization and push paths are exercised in
 Milestone 2 core list/clone/release primitives are available with authoritative
 transport validation, partial-release reporting, race-safe clone destination
 confinement, and hostile repository-local Git configuration rejection.
-Later planned work adds
-parameterized data-only templates (M3), declarative workspace `status`/`sync` (M4), diagnostic project
+Milestone 3 parameterized data-only templates are available. Later planned work adds
+declarative workspace `status`/`sync` (M4), diagnostic project
 health (M5), and a read-only analyzer (M6). Colt is not a wrapper or replacement
 command surface for `gh` or `glab`.
 
@@ -100,7 +105,7 @@ command surface for `gh` or `glab`.
 - [Shared active-MVP requirements](docs/specs/00-core.md)
 - [First MVP: blank project initialization](docs/specs/01-project-init.md)
 - [M2: project lifecycle](docs/specs/02-project-lifecycle.md)
-- [Planned M3: template initialization](docs/specs/03-template-init.md)
+- [M3: template initialization](docs/specs/03-template-init.md)
 - [Planned M4: workspace reconciliation](docs/specs/04-workspace.md)
 - [Planned M5: project health](docs/specs/05-project-health.md)
 - [Planned M6: analyzer](docs/specs/06-analyzer.md)

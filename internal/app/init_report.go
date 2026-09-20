@@ -67,6 +67,22 @@ func (r *initReport) remoteSteps(https, authenticate bool) {
 	}
 }
 
+func (r *initReport) addTemplateStep() {
+	for i, step := range r.steps {
+		if step.name != "Set repository-local identity" {
+			continue
+		}
+		r.steps = append(r.steps, initStep{})
+		copy(r.steps[i+1:], r.steps[i:])
+		r.steps[i] = initStep{name: "Materialize template"}
+		break
+	}
+	r.stepIndex = make(map[string]int, len(r.steps))
+	for i, step := range r.steps {
+		r.stepIndex[step.name] = i
+	}
+}
+
 func (r *initReport) begin(name string) {
 	if i, ok := r.stepIndex[name]; ok {
 		r.current = i

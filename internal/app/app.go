@@ -18,6 +18,7 @@ import (
 	"github.com/MozeBaltyk/Colt/internal/credential"
 	gitnative "github.com/MozeBaltyk/Colt/internal/git"
 	"github.com/MozeBaltyk/Colt/internal/provider"
+	templating "github.com/MozeBaltyk/Colt/internal/template"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -79,7 +80,7 @@ func (a *App) Root() *cobra.Command {
 	}
 	root.PersistentFlags().Bool("noninteractive", false, "disable interactive prompts and authorization flows")
 	root.PersistentFlags().BoolP("verbose", "v", false, "print additional non-secret diagnostics")
-	root.AddCommand(a.authCommand(), a.initCommand(), a.listCommand(), a.cloneCommand(), a.releaseCommand(), a.runCommand(), a.gitCredentialCommand())
+	root.AddCommand(a.authCommand(), a.initCommand(), a.templateCommand(), a.listCommand(), a.cloneCommand(), a.releaseCommand(), a.runCommand(), a.gitCredentialCommand())
 	return root
 }
 
@@ -92,6 +93,8 @@ type requiredInput struct {
 	name, supply string
 	value        *string
 }
+
+const maxInteractiveInput = 64 << 10
 
 func (a *App) interactive(cmd *cobra.Command) bool {
 	disabled, _ := cmd.Root().PersistentFlags().GetBool("noninteractive")
@@ -127,8 +130,8 @@ func (a *App) requireInputs(cmd *cobra.Command, reader **bufio.Reader, inputs ..
 	}
 	for _, input := range missing {
 		fmt.Fprintf(cmd.ErrOrStderr(), "%s: ", input.name)
-		value, err := (*reader).ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
+		value, err := readInteractiveLine(*reader)
+		if err != nil {
 			return fmt.Errorf("read %s: %w", input.name, err)
 		}
 		value = strings.TrimSpace(value)
@@ -138,6 +141,31 @@ func (a *App) requireInputs(cmd *cobra.Command, reader **bufio.Reader, inputs ..
 		*input.value = value
 	}
 	return nil
+}
+
+func readInteractiveLine(reader *bufio.Reader) (string, error) {
+	line := make([]byte, 0, 256)
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(line)+len(fragment) > maxInteractiveInput+2 {
+			return "", fmt.Errorf("input exceeds maximum size of %d bytes", maxInteractiveInput)
+		}
+		line = append(line, fragment...)
+		switch {
+		case err == nil:
+			line = line[:len(line)-1]
+			if len(line) != 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
+			return string(line), nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case errors.Is(err, io.EOF):
+			return string(line), nil
+		default:
+			return "", err
+		}
+	}
 }
 
 func (a *App) gitCredentialCommand() *cobra.Command {
@@ -1037,13 +1065,15 @@ type initOptions struct {
 	destination string
 	visibility  string
 	transport   string
+	template    string
+	sets        []string
 }
 
 func (a *App) initCommand() *cobra.Command {
 	opts := initOptions{}
 	cmd := &cobra.Command{
 		Use:   "init <project>",
-		Short: "Initialize a blank project",
+		Short: "Initialize a project",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 1 {
 				return fmt.Errorf("accepts at most 1 arg(s), received %d", len(args))
@@ -1065,6 +1095,8 @@ func (a *App) initCommand() *cobra.Command {
 	cmd.Flags().StringVarP(&opts.destination, "destination", "d", "", "remote clone destination (relative to the current directory or absolute)")
 	cmd.Flags().StringVar(&opts.visibility, "visibility", "", "repository visibility (private or public)")
 	cmd.Flags().StringVar(&opts.transport, "transport", "", "Git transport: https or ssh (default from config or https)")
+	cmd.Flags().StringVar(&opts.template, "template", "", "configured template name or name@version")
+	cmd.Flags().StringArrayVar(&opts.sets, "set", nil, "template parameter key=value (repeatable)")
 	return cmd
 }
 
@@ -1395,6 +1427,9 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) (
 	if opts.local && opts.visibility != "" {
 		return errors.New("--visibility applies only to remote initialization; omit it with --local")
 	}
+	if opts.template == "" && len(opts.sets) != 0 {
+		return errors.New("--set requires --template")
+	}
 	cfg, err := config.Load(a.ConfigPath)
 	if err != nil {
 		return err
@@ -1404,6 +1439,14 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) (
 		return err
 	}
 	report.provider = alias + " · namespace " + selected.Namespace
+	var templatePlan *templating.Plan
+	if opts.template != "" {
+		plan, err := a.prepareTemplate(cmd, cfg, opts.template, opts.sets)
+		if err != nil {
+			return err
+		}
+		templatePlan = &plan
+	}
 	transport, err := InitTransport(selected, opts.transport, a.ConfigPath)
 	if err != nil {
 		return err
@@ -1411,6 +1454,9 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) (
 	report.transport = transport
 	if !opts.local {
 		report.remoteSteps(transport == "https", selected.Type == "gitea" || selected.Type == "forgejo")
+	}
+	if templatePlan != nil {
+		report.addTemplateStep()
 	}
 	if err := a.Git.Available(); err != nil {
 		return err
@@ -1475,6 +1521,13 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) (
 			return partial("initialize git", destination, "not created", "inspect the destination and retry after correcting git", err)
 		}
 		report.succeeded()
+		if templatePlan != nil {
+			report.begin("Materialize template")
+			if err := materializeTemplate(destination, templatePlan); err != nil {
+				return partial("materialize template", destination, "not created", "inspect the preserved destination and retry with a clean destination", err)
+			}
+			report.succeeded()
+		}
 		report.begin("Set repository-local identity")
 		if err := a.Git.SetIdentity(cmd.Context(), destination, selected.GitName, selected.GitEmail); err != nil {
 			return partial("set repository-local identity", destination, "not created", "set local user.name and user.email, then create the initial commit", err)
@@ -1534,6 +1587,16 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) (
 	}
 	report.succeeded()
 	report.local = "clone preserved at " + destination
+	if templatePlan != nil {
+		report.begin("Materialize template")
+		if err := gitnative.RequireUnbornHEAD(cmd.Context(), destination); err != nil {
+			return partial("validate cloned repository history", destination, "created at "+cloneURL, "inspect the created remote; template initialization requires an unborn HEAD", err)
+		}
+		if err := materializeTemplate(destination, templatePlan); err != nil {
+			return partial("materialize template", destination, "created at "+cloneURL, "inspect the preserved clone and retry after correcting local filesystem state", err)
+		}
+		report.succeeded()
+	}
 	report.begin("Set repository-local identity")
 	if err := a.Git.SetIdentity(cmd.Context(), destination, selected.GitName, selected.GitEmail); err != nil {
 		return partial("set repository-local identity", destination, "created at "+cloneURL, "set local user.name and user.email, then create the initial commit", err)
