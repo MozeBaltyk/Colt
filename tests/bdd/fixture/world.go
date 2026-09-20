@@ -37,6 +37,7 @@ type World struct {
 	Credentials           credential.Store
 	FallbackCredentials   *credential.FileStore
 	ReadToken             func() (string, error)
+	ReadPassword          func() (string, error)
 	ConfirmPlaintext      func() (bool, error)
 	Interactive           bool
 	Noninteractive        bool
@@ -69,6 +70,7 @@ type World struct {
 	HelperInput         string
 	SSHState            map[string][]byte
 	SSHAgent            string
+	Host                *FakeHost
 	ExplicitTransport   string
 	SelectedTransport   string
 }
@@ -128,6 +130,7 @@ func (w *World) Reset(t *testing.T) {
 	w.Credentials = credential.NewMemoryStore()
 	w.FallbackCredentials = nil
 	w.ReadToken = nil
+	w.ReadPassword = nil
 	w.ConfirmPlaintext = nil
 	w.Interactive = false
 	w.Noninteractive = false
@@ -154,6 +157,7 @@ func (w *World) Reset(t *testing.T) {
 	w.HelperOperation, w.HelperInput = "", ""
 	w.SSHState = nil
 	w.SSHAgent = ""
+	w.Host = NewFakeHost()
 	w.NewClient = func(p config.Provider, token string) (provider.Client, error) {
 		w.NewClientCalls = append(w.NewClientCalls, NewClientCall{Provider: p, Token: token})
 		return w.Client, nil
@@ -190,9 +194,11 @@ func (w *World) BuildApp() {
 		Credentials:           w.Credentials,
 		FallbackCredentials:   w.FallbackCredentials,
 		ReadToken:             w.ReadToken,
+		ReadPassword:          w.ReadPassword,
 		ConfirmPlaintext:      w.ConfirmPlaintext,
 		IsTerminal:            func() bool { return w.Interactive },
 		AuthorizeGitHubDevice: w.AuthorizeGitHubDevice,
+		Host:                  w.Host,
 	}
 }
 

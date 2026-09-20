@@ -37,7 +37,7 @@ Code and released behavior do not become available merely because they are speci
 | M1 | Environment provider authentication (GitHub, GitLab, Gitea, Forgejo) and blank initialization | Implemented except the unavailable-secure-backend consent flow (`@unimplemented`); Git credential-helper and credential-free HTTPS, SSH transport semantics, status credential-source reporting, re-login advice, and no-echo secret-entry acceptance are active; Gitea/Forgejo have real container-backed vertical tests; provider-side revocation is implemented; production native persistence is `integration`-gated |
 | M2 | Project lifecycle | Implemented — core list, clone, transport, minimum release, clone path-race confinement, and hostile repository-local Git configuration rejection are active |
 | M3 | Parameterized template initialization | Planned |
-| M7 | Run/deploy — self-hosted Gitea/Forgejo via systemd + podman | Planned |
+| M7 | Run/deploy — self-hosted Gitea/Forgejo via systemd + podman | Orchestration implemented but destructive live acceptance not yet run; TLS termination, administrator/token creation, and provider onboarding remain external/manual |
 | M4 | Declarative workspace reconciliation | Planned |
 | M5 | Project health | Planned |
 | M6 | Analyzer | Bounded future intent |

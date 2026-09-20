@@ -42,6 +42,7 @@ func TestBDD(t *testing.T) {
 			steps.RegisterAuthSteps(ctx, w)
 			steps.RegisterLifecycleSteps(ctx, w)
 			steps.RegisterCoreGitSteps(ctx, w)
+			steps.RegisterRunSteps(ctx, w)
 		},
 		Options: &godog.Options{
 			Format:      "pretty",

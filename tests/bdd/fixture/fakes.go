@@ -3,6 +3,7 @@ package fixture
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,154 @@ import (
 	gitnative "github.com/MozeBaltyk/Colt/internal/git"
 	"github.com/MozeBaltyk/Colt/internal/provider"
 )
+
+// FakeHost records all host mutations in memory. It never invokes systemctl,
+// podman, sudo, or writes outside the test process.
+type FakeHost struct {
+	GOOS      string
+	UID       int
+	Missing   map[string]bool
+	Existing  map[string]bool
+	Files     map[string]string
+	Modes     map[string]fs.FileMode
+	Commands  []string
+	Mutations []string
+	Resources map[string]bool
+	Labels    map[string]string
+}
+
+func NewFakeHost() *FakeHost {
+	return &FakeHost{GOOS: "linux", Labels: map[string]string{}, Missing: map[string]bool{}, Existing: map[string]bool{}, Files: map[string]string{}, Modes: map[string]fs.FileMode{}, Resources: map[string]bool{}}
+}
+
+type fakeExitError struct{ code int }
+
+func (e fakeExitError) Error() string { return "exit status" }
+func (e fakeExitError) ExitCode() int { return e.code }
+
+func (f *FakeHost) OS() string { return f.GOOS }
+func (f *FakeHost) EUID() int  { return f.UID }
+func (f *FakeHost) LookPath(name string) (string, error) {
+	if f.Missing[name] {
+		return "", fmt.Errorf("missing %s", name)
+	}
+	return "/usr/bin/" + name, nil
+}
+func (f *FakeHost) Exists(path string) (bool, error) { return f.Existing[path], nil }
+func (f *FakeHost) MkdirAll(path string, mode fs.FileMode) error {
+	f.Mutations = append(f.Mutations, "mkdir-all:"+path)
+	f.Modes[path] = mode
+	f.Existing[path] = true
+	return nil
+}
+func (f *FakeHost) Mkdir(path string, mode fs.FileMode) error {
+	f.Mutations = append(f.Mutations, "mkdir:"+path)
+	if f.Existing[path] {
+		return fs.ErrExist
+	}
+	f.Modes[path] = mode
+	f.Existing[path] = true
+	return nil
+}
+func (f *FakeHost) WriteFile(path string, data []byte, mode fs.FileMode) error {
+	f.Mutations = append(f.Mutations, "write:"+path)
+	f.Files[path], f.Modes[path] = string(data), mode
+	f.Existing[path] = true
+	return nil
+}
+func (f *FakeHost) Chown(path string, _, _ int) error {
+	f.Mutations = append(f.Mutations, "chown:"+path)
+	return nil
+}
+func (f *FakeHost) ReplaceFile(path string, data []byte, mode fs.FileMode) error {
+	return f.WriteFile(path, data, mode)
+}
+func (f *FakeHost) WaitReady(ctx context.Context, _, _, _ string) error {
+	if _, ok := ctx.Deadline(); !ok {
+		return fmt.Errorf("readiness must be bounded")
+	}
+	return ctx.Err()
+}
+func (f *FakeHost) Run(_ context.Context, name string, args ...string) error {
+	call := strings.Join(append([]string{name}, args...), " ")
+	f.Mutations = append(f.Mutations, "run:"+call)
+	f.Commands = append(f.Commands, call)
+	if strings.HasSuffix(name, "/systemctl") && len(args) > 1 && (args[0] == "enable" || args[0] == "start") {
+		unit := args[len(args)-1]
+		if strings.HasPrefix(unit, "container-") {
+			container := strings.TrimSuffix(strings.TrimPrefix(unit, "container-"), ".service")
+			content := f.Files[filepath.Join("/etc/systemd/system", unit)]
+			owner := strings.TrimPrefix(strings.SplitN(content, "\n", 2)[0], "# colt-owner=")
+			if !f.Resources["container:"+container] {
+				f.Resources["container:"+container] = true
+				f.Labels["container:"+container] = owner
+			}
+		}
+	}
+	if strings.HasSuffix(name, "/podman") && len(args) >= 3 {
+		if args[0] == "rm" {
+			f.Resources["container:"+args[len(args)-1]] = false
+			return nil
+		}
+		key := args[0] + ":" + args[len(args)-1]
+		if args[1] == "create" {
+			if f.Resources[key] {
+				return nil
+			}
+			f.Resources[key] = true
+			if len(args) == 5 {
+				f.Labels[key] = strings.TrimPrefix(args[3], "org.colt.deployment=")
+			}
+		} else if args[1] == "rm" {
+			f.Resources[key] = false
+		}
+	}
+	return nil
+}
+func (f *FakeHost) RunOutput(_ context.Context, name string, args ...string) (string, error) {
+	call := strings.Join(append([]string{name}, args...), " ")
+	if len(args) == 5 && args[1] == "inspect" && strings.Contains(args[3], "org.colt.deployment") {
+		return f.Labels[args[0]+":"+args[4]] + "|" + args[4], nil
+	}
+	if strings.Contains(call, "--property=SystemState") {
+		return "running", nil
+	}
+	if strings.Contains(call, "podman info") {
+		return "false", nil
+	}
+	if strings.HasSuffix(name, "/podman") && len(args) == 3 && args[1] == "exists" {
+		if f.Resources[args[0]+":"+args[2]] {
+			return "", nil
+		}
+		return "", fakeExitError{1}
+	}
+	if strings.Contains(call, "systemctl show") {
+		return "active", nil
+	}
+	if strings.Contains(call, "podman volume inspect") {
+		fields := strings.Fields(call)
+		return filepath.Join("/var/lib/containers/storage/volumes", fields[len(fields)-1], "_data"), nil
+	}
+	return "", nil
+}
+func (f *FakeHost) ReadFile(path string) ([]byte, error) { return []byte(f.Files[path]), nil }
+func (f *FakeHost) Remove(path string) error {
+	f.Mutations = append(f.Mutations, "remove:"+path)
+	delete(f.Files, path)
+	f.Existing[path] = false
+	return nil
+}
+func (f *FakeHost) RemoveAll(path string) error {
+	f.Mutations = append(f.Mutations, "remove-all:"+path)
+	for file := range f.Files {
+		if file == path || strings.HasPrefix(file, path+"/") {
+			delete(f.Files, file)
+			f.Existing[file] = false
+		}
+	}
+	f.Existing[path] = false
+	return nil
+}
 
 // FakeGit records calls; with Real=true it delegates to native git.
 type FakeGit struct {

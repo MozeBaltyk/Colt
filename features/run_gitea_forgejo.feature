@@ -1,10 +1,12 @@
-Feature: Run / deploy a permanent Gitea or Forgejo server
+@orchestration
+Feature: Deterministic orchestration of a Gitea or Forgejo deployment
    Provisions systemd-managed podman containers for self-hosted
    Gitea/Forgejo. Host-level; orthogonal to provider API auth.
    M7 prerequisite for M4 local-provider sync (Colt mirror / colt sync).
-   Planned — scenarios do not represent current command availability.
+   These scenarios use an in-memory host, not real Podman or systemd.
+   Resource and activation assertions describe simulated orchestration only.
 
-   @planned @RUN-001 @RUN-002 @RUN-003 @RUN-011 @RUN-012
+   @RUN-001 @RUN-002 @RUN-003 @RUN-004
    Scenario: Deploy gitea with defaults
     Given podman and systemd are available on the host
     And no existing deployment named "personal"
@@ -17,52 +19,56 @@ Feature: Run / deploy a permanent Gitea or Forgejo server
     And the podman network personal-net exists
     And volumes personal-data, personal-config, personal-db exist
     And all three units are enabled and active
-    And the database unit declares an engine-appropriate health command
-    And the app unit waits for the database to become healthy
     And the env file /etc/colt/run/personal/env has mode 0600
     And no password appears in any unit file as a literal
 
-   @planned @RUN-005
-   Scenario: Prompt for password when omitted and stdin is a terminal
-    Given stdin is a terminal
-    And the prompt reads "App password for personal:"
-    When I run `colt run gitea personal` and enter "S3cret!"
-    Then the deployment succeeds and the env file contains GITEA_PASSWORD=S3cret!
+   @RUN-011 @RUN-012
+   Scenario: Gitea startup is health gated
+    Given podman and systemd are available on the host
+    And no existing deployment named "personal"
+    When I run `colt run gitea personal --password S3cret!`
+    Then the database unit declares an engine-appropriate health command
+    And the app unit waits for the database to become healthy
 
-   @planned @RUN-005
-   Scenario: Noninteractive mode without password fails
+   @RUN-005
+   Scenario: Generate application key when omitted on a terminal
+    Given stdin is a terminal
+    When I run `colt run gitea personal`
+    Then a private application key is generated
+
+   @RUN-005
+   Scenario: Noninteractive mode generates an application key
     Given standard input is not a terminal
     When I run `colt run gitea personal`
-    Then the command fails with a missing-password error
-    And no unit files are created
+    Then a private application key is generated
 
-   @planned @RUN-006 @RUN-004
+   @RUN-006 @RUN-004
    Scenario: --replace redeploys an existing deployment
     Given a deployment named "personal" is active
-    When I run `colt run gitea personal --replace --password N3w!`
+    When I run `colt run gitea personal --replace`
     Then the old app container is stopped and removed
-    And new units are written with the new password
+    And replacement preserves the application key
     And the deployment is active
 
-   @planned @RUN-006
+   @RUN-006
    Scenario: Deploy without --replace on existing name fails safely
     Given a deployment named "personal" is active
     When I run `colt run gitea personal --password X`
     Then the command fails
     And the prior deployment remains active unchanged
 
-   @planned @RUN-009
+   @RUN-009
    Scenario: Override app image
     When I run `colt run gitea personal --password X --image docker.io/gitea/gitea:1.21.4-rootless`
-    Then container-personal-app.service contains --image docker.io/gitea/gitea:1.21.4-rootless
+    Then container-personal-app.service uses image docker.io/gitea/gitea:1.21.4-rootless
 
-   @planned @RUN-007
+   @RUN-007
    Scenario: Status reports deployment state
     Given a deployment named "personal" is active
     When I run `colt run status personal`
     Then output contains "active", the image ref, ports 3000 and 2222, and volume paths
 
-   @planned @RUN-008
+   @RUN-008
    Scenario: Stop and start cycle preserves data
     Given a deployment named "personal" is active
     When I run `colt run stop personal`
@@ -71,7 +77,7 @@ Feature: Run / deploy a permanent Gitea or Forgejo server
     Then the app unit is active again
     And named volumes are intact
 
-   @planned @RUN-008
+   @RUN-008
    Scenario: rm removes units and containers but keeps volumes
     Given a deployment named "personal" is active
     When I run `colt run rm personal`
@@ -79,13 +85,13 @@ Feature: Run / deploy a permanent Gitea or Forgejo server
     And containers are removed
     And volumes personal-data, personal-config, personal-db still exist
 
-   @planned @RUN-008
+   @RUN-008
    Scenario: rm --volumes removes everything
     Given a deployment named "personal" is active
     When I run `colt run rm personal --volumes`
     Then volumes personal-data, personal-config, personal-db are removed
 
-   @planned @RUN-010
+   @RUN-010
    Scenario: Missing podman fails at the lowest layer
     Given podman is not on PATH
     When I run `colt run gitea personal --password X`
@@ -93,14 +99,36 @@ Feature: Run / deploy a permanent Gitea or Forgejo server
     And the error names podman as the missing runtime
     And no units are created
 
-   @planned @forgejo @RUN-001
+   @forgejo @RUN-001 @RUN-011 @RUN-012
    Scenario: Deploy forgejo uses postgres
-    Given podman and systemd are available
+    Given podman and systemd are available on the host
     When I run `colt run forgejo personal --password X`
     Then container-personal-db.service uses the postgres image
     And the env file sets DB_TYPE=postgres
+    And the database unit declares an engine-appropriate health command
+    And the app unit waits for the database to become healthy
 
-   @planned @RUN-013
+   @RUN-014
+   Scenario Outline: Advertise an externally terminated HTTPS URL
+    Given podman and systemd are available on the host
+    And no existing deployment named "personal"
+    When I run `colt run <type> personal --password X --external-url https://git.example.com`
+    Then the <type> deployment advertises https://git.example.com/ while listening over container HTTP
+    And output contains the browser URL and a shell-safe <type> onboarding template
+    And no token or administrator password is printed
+
+    Examples:
+      | type    |
+      | gitea   |
+      | forgejo |
+
+   @RUN-014
+   Scenario: Invalid external URL fails before host mutation
+    When I run `colt run gitea personal --password X --external-url http://git.example.com`
+    Then the command fails with an invalid-external-URL error
+    And no units, networks, or volumes are created
+
+   @RUN-013
    Scenario: Non-root deployment fails before host mutation
     Given the current user is not root
     When I run `colt run gitea personal --password X`

@@ -31,10 +31,12 @@ type App struct {
 	FallbackCredentials   *credential.FileStore
 	ReadToken             func() (string, error)
 	ConfirmPlaintext      func() (bool, error)
+	ReadPassword          func() (string, error)
 	IsTerminal            func() bool
 	IsOutputTerminal      func(io.Writer) bool
 	AuthorizeGitHubDevice func(context.Context, io.Writer) (string, error)
 	SaveConfig            func(string, config.Config) error
+	Host                  HostOperations
 	pathErr               error
 }
 
@@ -52,6 +54,7 @@ func New() *App {
 		AuthorizeGitHubDevice: func(ctx context.Context, out io.Writer) (string, error) {
 			return provider.AuthorizeGitHubDevice(ctx, nil, out)
 		},
+		Host:    nativeHost{},
 		pathErr: err,
 	}
 }
@@ -76,7 +79,7 @@ func (a *App) Root() *cobra.Command {
 	}
 	root.PersistentFlags().Bool("noninteractive", false, "disable interactive prompts and authorization flows")
 	root.PersistentFlags().BoolP("verbose", "v", false, "print additional non-secret diagnostics")
-	root.AddCommand(a.authCommand(), a.initCommand(), a.listCommand(), a.cloneCommand(), a.releaseCommand(), a.gitCredentialCommand())
+	root.AddCommand(a.authCommand(), a.initCommand(), a.listCommand(), a.cloneCommand(), a.releaseCommand(), a.runCommand(), a.gitCredentialCommand())
 	return root
 }
 
