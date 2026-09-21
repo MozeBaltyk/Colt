@@ -80,7 +80,7 @@ func (a *App) Root() *cobra.Command {
 	}
 	root.PersistentFlags().Bool("noninteractive", false, "disable interactive prompts and authorization flows")
 	root.PersistentFlags().BoolP("verbose", "v", false, "print additional non-secret diagnostics")
-	root.AddCommand(a.authCommand(), a.initCommand(), a.templateCommand(), a.listCommand(), a.cloneCommand(), a.releaseCommand(), a.workspaceStatusCommand(), a.syncCommand(), a.mirrorCommand(), a.runCommand(), a.gitCredentialCommand())
+	root.AddCommand(a.authCommand(), a.initCommand(), a.templateCommand(), a.listCommand(), a.cloneCommand(), a.releaseCommand(), a.workspaceStatusCommand(), a.syncCommand(), a.mirrorCommand(), a.checkCommand(), a.runCommand(), a.gitCredentialCommand())
 	return root
 }
 
@@ -763,6 +763,13 @@ func resolvedCredentialSource(p config.Provider) string {
 }
 
 func matchingOrigin(cfg config.Config, origin string) (alias, transport, project string) {
+	alias, transport, project, _ = matchingOriginResult(cfg, origin)
+	return
+}
+
+func matchingOriginResult(cfg config.Config, origin string) (alias, transport, project string, ambiguous bool) {
+	type match struct{ alias, transport, project string }
+	var matches []match
 	for candidate, p := range cfg.Providers {
 		actual, ok := cleanHTTPSRepository(origin, p)
 		detected := "https"
@@ -773,12 +780,28 @@ func matchingOrigin(cfg config.Config, origin string) (alias, transport, project
 		if !ok {
 			continue
 		}
-		if alias != "" {
-			return "", "", ""
-		}
-		alias, transport, project = candidate, detected, actual
+		matches = append(matches, match{candidate, detected, actual})
 	}
-	return
+	if len(matches) == 1 {
+		m := matches[0]
+		return m.alias, m.transport, m.project, false
+	}
+	if len(matches) > 1 {
+		var selected *match
+		for i := range matches {
+			if cfg.Providers[matches[i].alias].Default {
+				if selected != nil {
+					return "", "", "", true
+				}
+				selected = &matches[i]
+			}
+		}
+		if selected != nil {
+			return selected.alias, selected.transport, selected.project, false
+		}
+		return "", "", "", true
+	}
+	return "", "", "", false
 }
 
 func authState(err error) string {

@@ -2587,6 +2587,9 @@ type fakeGit struct {
 	lsRemoteErr           error
 	lsRemoteTokenEnvNames []string
 	cloneHook             func(string) error
+	health                gitnative.HealthState
+	healthErr             error
+	healthFunc            func(string) (gitnative.HealthState, error)
 }
 
 func (g *fakeGit) Available() error { g.calls = append(g.calls, "available"); return g.availableErr }
@@ -2660,6 +2663,13 @@ func (g *fakeGit) ValidateRepoConfig(context.Context, string) error {
 	g.calls = append(g.calls, "validate-config")
 	return nil
 }
+func (g *fakeGit) Health(_ context.Context, dir string) (gitnative.HealthState, error) {
+	g.calls = append(g.calls, "health")
+	if g.healthFunc != nil {
+		return g.healthFunc(dir)
+	}
+	return g.health, g.healthErr
+}
 
 type fakeClient struct {
 	account         string
@@ -2669,17 +2679,27 @@ type fakeClient struct {
 	found, created  *provider.Repository
 	listRepos       []provider.Repository
 	gets, creates   int
+	lists           int
 	visibility      string
 	revokeErr       error
 	revokes         int
+	getRepos        map[string]*provider.Repository
+	getErrors       map[string]error
 }
 
 func (f *fakeClient) Authenticate(context.Context) (string, error) { return f.account, f.authErr }
-func (f *fakeClient) Get(context.Context, string) (*provider.Repository, error) {
+func (f *fakeClient) Get(_ context.Context, project string) (*provider.Repository, error) {
 	f.gets++
+	if err := f.getErrors[project]; err != nil {
+		return nil, err
+	}
+	if repository := f.getRepos[project]; repository != nil {
+		return repository, nil
+	}
 	return f.found, f.getErr
 }
 func (f *fakeClient) List(context.Context) ([]provider.Repository, error) {
+	f.lists++
 	return f.listRepos, f.listErr
 }
 func (f *fakeClient) Create(_ context.Context, _ string, visibility ...string) (*provider.Repository, error) {

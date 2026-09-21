@@ -86,6 +86,22 @@ func TestBlackbox(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid health configuration exits two", func(t *testing.T) {
+		dir, configPath := blackboxSandbox(t)
+		if err := os.WriteFile(configPath, []byte("providers: {}\npolicy:\n  repository:\n    require: []\n    default_branch: main\n    allowed_visibility: [private]\n    unknown: true\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), fixture.CommandTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, binary, "check")
+		cmd.Dir, cmd.Env = dir, blackboxEnv(filepath.Join(dir, "home"), configPath)
+		output, err := cmd.CombinedOutput()
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 || strings.Contains(string(output), "unknown: true") {
+			t.Fatalf("error=%v output=%q", err, output)
+		}
+	})
+
 	t.Run("manual login without a tty fails without persistence", func(t *testing.T) {
 		dir, configPath := blackboxSandbox(t)
 		ctx, cancel := context.WithTimeout(context.Background(), fixture.CommandTimeout)

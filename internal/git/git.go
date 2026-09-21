@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -28,6 +29,12 @@ type Runner interface {
 	CreateTag(context.Context, string, string, string, string) error
 	ValidateTag(context.Context, string, string) error
 	ValidateRepoConfig(context.Context, string) error
+	Health(context.Context, string) (HealthState, error)
+}
+
+type HealthState struct {
+	Name, Email, Origin string
+	Clean               bool
 }
 
 type Native struct{}
@@ -511,6 +518,153 @@ func (Native) ValidateRepoConfig(ctx context.Context, dir string) error {
 		}
 	}
 	return nil
+}
+
+// Health performs only isolated, read-only repository inspection. Local config
+// is rejected before any command that could consult its behavioral settings.
+func (Native) Health(ctx context.Context, dir string) (HealthState, error) {
+	if err := validateHealthRepoConfig(ctx, dir); err != nil {
+		return HealthState{}, err
+	}
+	read := func(key string) (string, error) {
+		out, present, err := healthGitOutput(ctx, dir, "config", "--local", "--no-includes", "--get", key)
+		if err != nil {
+			return "", err
+		}
+		if !present {
+			return "", nil
+		}
+		return strings.TrimSuffix(out, "\n"), nil
+	}
+	name, err := read("user.name")
+	if err != nil {
+		return HealthState{}, err
+	}
+	email, err := read("user.email")
+	if err != nil {
+		return HealthState{}, err
+	}
+	origin, err := read("remote.origin.url")
+	if err != nil {
+		return HealthState{}, err
+	}
+	index := &healthIndexWriter{}
+	if err := healthGitStream(ctx, dir, index, "--no-optional-locks", "ls-files", "--stage", "-z"); err != nil {
+		return HealthState{}, err
+	}
+	if index.submodule {
+		return HealthState{}, errors.New("native git health inspection cannot safely inspect submodules")
+	}
+	status := &healthDirtyWriter{}
+	if err := healthGitStream(ctx, dir, status,
+		"-c", "core.hooksPath="+os.DevNull,
+		"-c", "core.fsmonitor=false",
+		"-c", "credential.helper=",
+		"-c", "diff.external=",
+		"-c", "submodule.recurse=false",
+		"--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"); err != nil {
+		return HealthState{}, err
+	}
+	return HealthState{Name: name, Email: email, Origin: origin, Clean: !status.dirty}, nil
+}
+
+const healthConfigDeny = `^(include(if\..*)?\.path|core\.(sshcommand|fsmonitor|askpass|gitproxy|hookspath|worktree|attributesfile|excludesfile)|credential(\..*)?\.helper|gpg\.program|url\..*\.(insteadof|pushinsteadof)|remote\..*\.proxy|http\..*proxy|protocol\..*\.allow|diff\..*\.(command|textconv)|filter\..*\.(process|clean|smudge)|submodule\..*\.(update|command))$`
+
+func validateHealthRepoConfig(ctx context.Context, dir string) error {
+	out, present, err := healthGitOutput(ctx, dir, "config", "--local", "--no-includes", "--name-only", "--get-regexp", healthConfigDeny)
+	if err != nil {
+		return err
+	}
+	if present {
+		key := strings.Fields(out)
+		if len(key) != 0 {
+			return fmt.Errorf("unsafe repository-local Git configuration rejected: %.256s", key[0])
+		}
+	}
+	return nil
+}
+
+func healthGitOutput(ctx context.Context, dir string, args ...string) (string, bool, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = gitEnv([]string{"GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_EXTERNAL_DIFF=", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull})
+	var out bytes.Buffer
+	stdout := &limitedWriter{w: &out, remaining: 64 << 10}
+	cmd.Stdout = stdout
+	cmd.Stderr = &limitedWriter{remaining: 4 << 10}
+	err := cmd.Run()
+	if stdout.truncated {
+		return "", false, errors.New("native git health inspection output exceeded its limit")
+	}
+	if err == nil {
+		return out.String(), true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && args[0] == "config" {
+		return "", false, nil
+	}
+	return "", false, errors.New("native git health inspection failed")
+}
+
+func healthGitStream(ctx context.Context, dir string, stdout interface{ Write([]byte) (int, error) }, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = gitEnv([]string{"GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_EXTERNAL_DIFF=", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull})
+	cmd.Stdout = stdout
+	cmd.Stderr = &limitedWriter{remaining: 4 << 10}
+	if err := cmd.Run(); err != nil {
+		return errors.New("native git health inspection failed")
+	}
+	return nil
+}
+
+type healthDirtyWriter struct{ dirty bool }
+
+func (w *healthDirtyWriter) Write(p []byte) (int, error) {
+	w.dirty = w.dirty || len(p) != 0
+	return len(p), nil
+}
+
+type healthIndexWriter struct {
+	prefix    [7]byte
+	n         int
+	submodule bool
+}
+
+func (w *healthIndexWriter) Write(p []byte) (int, error) {
+	for _, b := range p {
+		if b == 0 {
+			w.n = 0
+			continue
+		}
+		if w.n < len(w.prefix) {
+			w.prefix[w.n] = b
+			w.n++
+			if w.n == len(w.prefix) && string(w.prefix[:]) == "160000 " {
+				w.submodule = true
+			}
+		}
+	}
+	return len(p), nil
+}
+
+type limitedWriter struct {
+	w         *bytes.Buffer
+	remaining int
+	truncated bool
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	if len(p) > w.remaining {
+		w.truncated = true
+		p = p[:w.remaining]
+	}
+	if w.w != nil {
+		_, _ = w.w.Write(p)
+	}
+	w.remaining -= len(p)
+	return n, nil
 }
 
 func isColtCredentialHelper(value string) bool {

@@ -8,17 +8,15 @@ M4 (workspace manifest, provider resolution).
 
 | # | Action | Where | Status |
 |:--|:---|:---|:--:|
-| 1 | `colt check [--all]` | `cmd/colt/` | ❌ planned |
-| 2 | Health policy schema & validation | `internal/` | ❌ planned |
-| 3 | Diagnostic checks (identity, origin, remote, branch, cleanliness, files, visibility) | `internal/` | ❌ planned |
-| 4 | BDD scenarios | `features/project_health.feature` | ❌ planned |
+| 1 | `colt check [--all]` | `cmd/colt/` | ✅ implemented |
+| 2 | Health policy schema & validation | `internal/` | ✅ implemented |
+| 3 | Diagnostic checks (identity, origin, remote, branch, cleanliness, files, visibility) | `internal/` | ✅ implemented |
+| 4 | BDD scenarios | `features/project_health.feature` | ✅ fake-backed |
 
-## Left to do (order)
+## Deferred
 
-1. **Policy parser** — strict YAML, documented fields only.
-2. **Check engine** — read-only diagnostics, bounded output, redaction.
-3. **Exit codes** — 0 healthy, 1 policy drift, 2 operational error.
-4. **Tests** — unit + BDD.
+1. Auto-remediation.
+2. Opt-in live-provider acceptance; current BDD coverage is fake-backed.
 
 ## Acceptance
 

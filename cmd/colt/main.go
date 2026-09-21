@@ -17,6 +17,6 @@ func main() {
 		if !app.ErrorReported(err) {
 			fmt.Fprintln(os.Stderr, err)
 		}
-		os.Exit(1)
+		os.Exit(app.ExitCode(err))
 	}
 }

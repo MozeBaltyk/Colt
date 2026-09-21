@@ -26,10 +26,12 @@ type RevocationOptions struct {
 }
 
 type Repository struct {
-	Name      string
-	Namespace string
-	CloneURL  string
-	SSHURL    string
+	Name          string
+	Namespace     string
+	CloneURL      string
+	SSHURL        string
+	DefaultBranch string
+	Visibility    string
 }
 
 type Client interface {
@@ -163,10 +165,14 @@ type repositoryResponse struct {
 		Login    string `json:"login"`
 		Username string `json:"username"`
 	} `json:"owner"`
-	CloneURL     string `json:"clone_url"`
-	SSHURL       string `json:"ssh_url"`
-	HTTPURL      string `json:"http_url_to_repo"`
-	SSHURLToRepo string `json:"ssh_url_to_repo"`
+	CloneURL      string `json:"clone_url"`
+	SSHURL        string `json:"ssh_url"`
+	HTTPURL       string `json:"http_url_to_repo"`
+	SSHURLToRepo  string `json:"ssh_url_to_repo"`
+	DefaultBranch string `json:"default_branch"`
+	Visibility    string `json:"visibility"`
+	Private       *bool  `json:"private"`
+	Internal      *bool  `json:"internal"`
 }
 
 func (c *client) get(ctx context.Context, path string) (*Repository, error) {
@@ -269,7 +275,22 @@ func (c *client) repository(result repositoryResponse) (*Repository, error) {
 	if ssh == "" {
 		ssh = result.SSHURLToRepo
 	}
-	return &Repository{Name: result.Name, Namespace: result.FullName, CloneURL: clone, SSHURL: ssh}, nil
+	if result.DefaultBranch != "" && !config.ValidBranch(result.DefaultBranch) {
+		return nil, errors.New("provider returned an invalid default branch")
+	}
+	if result.Visibility == "" && result.Internal != nil && *result.Internal {
+		result.Visibility = "internal"
+	} else if result.Visibility == "" && result.Private != nil {
+		if *result.Private {
+			result.Visibility = "private"
+		} else {
+			result.Visibility = "public"
+		}
+	}
+	if result.Visibility != "" && result.Visibility != "private" && result.Visibility != "internal" && result.Visibility != "public" {
+		return nil, errors.New("provider returned an invalid repository visibility")
+	}
+	return &Repository{Name: result.Name, Namespace: result.FullName, CloneURL: clone, SSHURL: ssh, DefaultBranch: result.DefaultBranch, Visibility: result.Visibility}, nil
 }
 
 func (c *client) request(ctx context.Context, method, path string, body any, result any) error {

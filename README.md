@@ -32,6 +32,7 @@ colt release <version> [--provider <alias>] [--transport https|ssh]
 colt status
 colt sync [--dry-run]
 colt mirror <source-provider> <target-provider> [--namespace <namespace>] [--replace]
+colt check [--all]
 ```
 
 Configuration uses Go's `os.UserConfigDir()`. On Linux, this is
@@ -102,8 +103,12 @@ Milestone 3 parameterized data-only templates are available. Milestone 4 workspa
 repositories use `<namespace>/<project>` beneath the current directory; omitted
 `include` selects all exact-namespace repositories, while `include: []` selects none.
 Mirror `--replace` force-pushes mirrored refs but never deletes the provider repository.
-Later planned work adds diagnostic project
-health (M5), and a read-only analyzer (M6). Colt is not a wrapper or replacement
+Project health is available through `colt check [--all]` with an optional top-level
+`policy.repository` configuration containing `require`, `default_branch`, and
+`allowed_visibility`. The command is diagnostic only and returns 0 when healthy,
+1 for findings, and 2 for configuration or operational failures. Its acceptance
+coverage is fake-provider-backed; it does not claim live provider coverage.
+Later planned work adds a read-only analyzer (M6). Colt is not a wrapper or replacement
 command surface for `gh` or `glab`.
 
 ## Specifications
@@ -114,7 +119,7 @@ command surface for `gh` or `glab`.
 - [M2: project lifecycle](docs/specs/02-project-lifecycle.md)
 - [M3: template initialization](docs/specs/03-template-init.md)
 - [M4: workspace reconciliation](docs/specs/04-workspace.md)
-- [Planned M5: project health](docs/specs/05-project-health.md)
+- [M5: project health](docs/specs/05-project-health.md)
 - [Planned M6: analyzer](docs/specs/06-analyzer.md)
 - [Roadmap](docs/specs/90-roadmap.md)
 - [Acceptance specifications](features/)

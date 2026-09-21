@@ -1,50 +1,37 @@
-Feature: Planned project health diagnostics
-  Milestone 5 behavior is specified but not implemented or released.
+Feature: Project health diagnostics
 
-  @planned @HEALTH-CHECK-001
+  @HEALTH-CHECK-001
   Scenario Outline: Check repository health at the requested scope
-    Given health policy is valid for the current repository and managed workspace
-    When I run `<command>`
-    Then Colt checks <scope> for local identity, expected origin and provider, remote existence and default branch, worktree cleanliness, required README and LICENSE files, and visibility
+    Given a healthy repository and managed workspace with project health policy
+    When I run the health command `<command>`
+    Then every selected repository is checked through Git and the provider API
+    And the health check has no findings and exit code 0
 
     Examples:
-      | command          | scope                              |
-      | colt check       | the current repository             |
-      | colt check --all | every managed workspace repository |
+      | command          |
+      | colt check       |
+      | colt check --all |
 
-  @planned @HEALTH-POLICY-001
-  Scenario Outline: Reject unsafe health policy or path access
-    Given data-only policy is limited to require, default_branch, and allowed_visibility
-    And it <violation>
-    When I run `colt check`
-    Then policy validation or repository-root-relative no-follow access fails closed
-    And no file outside the repository is read or mutated
+  @HEALTH-POLICY-001
+  Scenario: Reject unknown health policy before repository access
+    Given health policy contains an unknown field
+    When I run the health command `colt check`
+    Then health configuration fails with exit code 2 before Git or provider access
 
-    Examples:
-      | violation                                                                   |
-      | contains an unknown field                                                   |
-      | has an absolute required-file path                                          |
-      | has a traversing required-file path                                         |
-      | has a clean required-file path whose ancestor is swapped to an escaping symlink between validation and the actual read |
-
-  @planned @HEALTH-OUTPUT-001
-  Scenario Outline: Return CI-compatible health status
+  @HEALTH-OUTPUT-001
+  Scenario Outline: Return deterministic CI-compatible health status
     Given a health check produces <result>
-    When the check completes
-    Then findings are reported deterministically
-    And the exit status is <status>
+    When I run the health command `colt check`
+    Then health findings are sorted and the exit code is <status>
 
     Examples:
-      | result                             | status |
-      | no findings                        | 0      |
-      | policy or drift findings           | 1      |
-      | an operational or configuration error | 2  |
+      | result            | status |
+      | no findings       | 0      |
+      | drift findings    | 1      |
+      | operational error | 2      |
 
-  @planned @HEALTH-SAFETY-001
-  Scenario: Diagnose without execution, mutation, or disclosure
-    Given hooks, repository files, credential environment values, provider response bodies, and child-process output are available
-    When I run `colt check`
-    Then Colt does not execute or auto-fix repository content
-    And no source, provider, or configuration state is changed
-    And output contains only allowlisted metadata and findings with bounded redacted diagnostics
-    And it omits credential values, provider response bodies, repository file contents, and raw child-process output
+  @HEALTH-SAFETY-001
+  Scenario: Diagnose hostile repository configuration without mutation or disclosure
+    Given a health repository has executable Git configuration and secret-bearing inputs
+    When I run the health command `colt check`
+    Then health inspection executes nothing, preserves repository, provider, and configuration state, and emits only bounded redacted findings

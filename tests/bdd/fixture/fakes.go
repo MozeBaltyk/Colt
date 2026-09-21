@@ -231,6 +231,8 @@ type FakeGit struct {
 	MirrorCloneErr map[string]error
 	MirrorDirs     []string
 	MirrorForce    []bool
+	HealthState    gitnative.HealthState
+	HealthErr      error
 }
 
 func (f *FakeGit) Available() error {
@@ -411,6 +413,14 @@ func (f *FakeGit) ValidateRepoConfig(ctx context.Context, dir string) error {
 	// Always enforce against real repository-local config: a fake worktree has no
 	// repository, so Native returns nil there and only rejects a real hostile repo.
 	return gitnative.Native{}.ValidateRepoConfig(ctx, dir)
+}
+
+func (f *FakeGit) Health(ctx context.Context, dir string) (gitnative.HealthState, error) {
+	f.Operations = append(f.Operations, "health")
+	if f.HealthErr != nil || !f.Real {
+		return f.HealthState, f.HealthErr
+	}
+	return gitnative.Native{}.Health(ctx, dir)
 }
 
 type FakeClient struct {

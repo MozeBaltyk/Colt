@@ -23,9 +23,9 @@ Colt owns configuration, workflow, and provider integration. Provider HTTP APIs 
 
 When documents differ, use this order:
 
-1.  Active normative requirements in [shared core](00-core.md), [project initialization](01-project-init.md), [project lifecycle](02-project-lifecycle.md), [templates](03-template-init.md), and [workspace reconciliation](04-workspace.md).
+1.  Active normative requirements in [shared core](00-core.md), [project initialization](01-project-init.md), [project lifecycle](02-project-lifecycle.md), [templates](03-template-init.md), [workspace reconciliation](04-workspace.md), and [project health](05-project-health.md).
 2.  Active-MVP [Gherkin acceptance specifications](../../features/), excluding scenarios explicitly tagged `@planned` or `@unimplemented`.
-3.  Planned capability specifications and their `@planned` scenarios: [project health](05-project-health.md) and [analyzer](06-analyzer.md).
+3.  Planned capability specifications and their `@planned` scenarios: [analyzer](06-analyzer.md).
 4.  [Roadmap](90-roadmap.md).
 
 Code and released behavior do not become available merely because they are specified here. When an active normative document changes behavior covered by an existing acceptance specification, that acceptance specification must be updated before the change is considered internally consistent.
@@ -39,5 +39,5 @@ Code and released behavior do not become available merely because they are speci
 | M3 | Parameterized template initialization | Implemented — named, versioned, SHA-256-pinned, data-only templates with bounded safe materialization |
 | M7 | Run/deploy — self-hosted Gitea/Forgejo via systemd + podman | Implemented and manually live-validated for both products, including persistence and lifecycle; the automated destructive lane remains opt-in, while TLS termination, administrator/token creation, and provider onboarding remain external/manual |
 | M4 | Declarative workspace reconciliation | Implemented — workspace status/sync/dry-run and one-shot mirror; live provider sync/mirror acceptance remains integration-gated |
-| M5 | Project health | Planned |
+| M5 | Project health | Implemented — deterministic read-only policy checks; acceptance is fake-provider-backed |
 | M6 | Analyzer | Bounded future intent |

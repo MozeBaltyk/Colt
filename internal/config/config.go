@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/MozeBaltyk/Colt/internal/credential"
 	"gopkg.in/yaml.v3"
@@ -20,6 +21,17 @@ type Config struct {
 	Providers map[string]Provider `yaml:"providers"`
 	Templates map[string]Template `yaml:"templates,omitempty"`
 	Workspace *Workspace          `yaml:"workspace,omitempty"`
+	Policy    *Policy             `yaml:"policy,omitempty"`
+}
+
+type Policy struct {
+	Repository RepositoryPolicy `yaml:"repository"`
+}
+
+type RepositoryPolicy struct {
+	Require           []string `yaml:"require"`
+	DefaultBranch     string   `yaml:"default_branch"`
+	AllowedVisibility []string `yaml:"allowed_visibility"`
 }
 
 type Workspace struct {
@@ -77,6 +89,9 @@ const (
 	MaxWorkspaceSelections   = 128
 	MaxWorkspaceIncludes     = 4096
 	MaxProviderRepositories  = 10000
+	MaxPolicyRequiredFiles   = 256
+	MaxPolicyPathLength      = 1024
+	MaxPolicyPathDepth       = 32
 )
 
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
@@ -120,6 +135,9 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 	if err := validateWorkspaceYAML(document); err != nil {
+		return Config{}, fmt.Errorf("parse config: %w", err)
+	}
+	if err := validatePolicyYAML(document); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 	var cfg Config
@@ -333,6 +351,39 @@ func validateWorkspaceYAML(document *yaml.Node) error {
 	return nil
 }
 
+func validatePolicyYAML(document *yaml.Node) error {
+	if document == nil || len(document.Content) == 0 || document.Content[0].Kind != yaml.MappingNode {
+		return nil
+	}
+	policy := mappingValue(document.Content[0], "policy")
+	if policy == nil {
+		return nil
+	}
+	if policy.Kind != yaml.MappingNode {
+		return errors.New("policy must be a mapping")
+	}
+	repository := mappingValue(policy, "repository")
+	if repository == nil || repository.Kind != yaml.MappingNode {
+		return errors.New("policy repository must be a mapping")
+	}
+	for _, field := range []string{"require", "allowed_visibility"} {
+		value := mappingValue(repository, field)
+		if value == nil || value.Kind != yaml.SequenceNode {
+			return fmt.Errorf("policy repository %s must be a sequence", field)
+		}
+		for _, item := range value.Content {
+			if item.Tag != "!!str" {
+				return fmt.Errorf("policy repository %s values must be strings", field)
+			}
+		}
+	}
+	branch := mappingValue(repository, "default_branch")
+	if branch == nil || branch.Tag != "!!str" {
+		return errors.New("policy repository default_branch must be a string")
+	}
+	return nil
+}
+
 func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
 	if mapping == nil || mapping.Kind != yaml.MappingNode {
 		return nil
@@ -359,6 +410,9 @@ func (c Config) Validate() error {
 		return errors.New("invalid config: multiple providers are marked default")
 	}
 	if err := c.validateWorkspace(); err != nil {
+		return err
+	}
+	if err := c.validatePolicy(); err != nil {
 		return err
 	}
 	for name, template := range c.Templates {
@@ -398,6 +452,61 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func (c Config) validatePolicy() error {
+	if c.Policy == nil {
+		return nil
+	}
+	p := &c.Policy.Repository
+	if len(p.Require) > MaxPolicyRequiredFiles {
+		return fmt.Errorf("invalid policy: at most %d required files are allowed", MaxPolicyRequiredFiles)
+	}
+	seen := map[string]bool{}
+	for _, path := range p.Require {
+		parts := strings.Split(path, "/")
+		if path == "" || len(path) > MaxPolicyPathLength || len(parts) > MaxPolicyPathDepth || filepath.IsAbs(path) || strings.ContainsAny(path, "\\\x00\r\n") || filepath.ToSlash(filepath.Clean(filepath.FromSlash(path))) != path {
+			return fmt.Errorf("invalid policy required path %q: must be a clean repository-relative slash path", path)
+		}
+		for _, part := range parts {
+			if part == "" || part == "." || part == ".." || strings.EqualFold(part, ".git") || strings.IndexFunc(part, unicode.IsControl) >= 0 {
+				return fmt.Errorf("invalid policy required path %q: contains an unsafe segment", path)
+			}
+		}
+		if seen[path] {
+			return fmt.Errorf("invalid policy: duplicate required path %q", path)
+		}
+		seen[path] = true
+	}
+	if !ValidBranch(p.DefaultBranch) {
+		return errors.New("invalid policy: default_branch is not a valid branch name")
+	}
+	if len(p.AllowedVisibility) == 0 || len(p.AllowedVisibility) > 3 {
+		return errors.New("invalid policy: allowed_visibility must contain one to three values")
+	}
+	seen = map[string]bool{}
+	for _, visibility := range p.AllowedVisibility {
+		if visibility != "private" && visibility != "internal" && visibility != "public" {
+			return fmt.Errorf("invalid policy: unsupported visibility %q", visibility)
+		}
+		if seen[visibility] {
+			return fmt.Errorf("invalid policy: duplicate allowed visibility %q", visibility)
+		}
+		seen[visibility] = true
+	}
+	return nil
+}
+
+func ValidBranch(branch string) bool {
+	if branch == "" || len(branch) > 255 || branch == "@" || strings.HasPrefix(branch, "-") || strings.HasPrefix(branch, ".") || strings.HasSuffix(branch, ".") || strings.HasSuffix(branch, "/") || strings.Contains(branch, "..") || strings.Contains(branch, "@{") || strings.ContainsAny(branch, " ~^:?*[\\") || strings.IndexFunc(branch, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return false
+	}
+	for _, part := range strings.Split(branch, "/") {
+		if part == "" || strings.HasPrefix(part, ".") || strings.HasSuffix(strings.ToLower(part), ".lock") {
+			return false
+		}
+	}
+	return true
 }
 
 func (c Config) validateWorkspace() error {
