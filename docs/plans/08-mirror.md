@@ -10,18 +10,15 @@ M2 (list/clone/release), M7 (local providers for target).
 
 | # | Action | Where | Status |
 |:--|:---|:---|:--:|
-| 1 | `colt mirror <source> <target> [--namespace]` CLI | `cmd/colt/` | ❌ planned |
-| 2 | List source repos, clone to temp, create on target, push | `internal/` | ❌ planned |
-| 3 | `--replace` flag for overwriting existing target repos | `cmd/colt/` | ❌ planned |
-| 4 | Independent failure summary | `internal/` | ❌ planned |
-| 5 | BDD scenarios | `features/workspace_reconciliation.feature` | ❌ planned |
+| 1 | `colt mirror <source> <target> [--namespace]` CLI | `internal/app/` | ✅ complete |
+| 2 | List source repos, clone to temp, create target, push all refs | `internal/` | ✅ complete |
+| 3 | `--replace` force-mirror refs onto an existing target | `internal/app/` | ✅ complete |
+| 4 | Independent failure summary | `internal/app/` | ✅ complete |
+| 5 | BDD scenarios | `features/workspace_reconciliation.feature` | ✅ fake-backed |
 
-## Left to do (order)
+## Remaining gated coverage
 
-1. **List** — source provider namespace listing.
-2. **Clone + push** — temp dir per repo, create on target, push all branches/tags.
-3. **Cleanup** — remove temp dirs, report partial failures.
-4. **Tests** — unit + BDD.
+Run the live provider/container lane only against an approved disposable Gitea or Forgejo deployment. The default suite never deploys or mutates a host service.
 
 ## Acceptance
 

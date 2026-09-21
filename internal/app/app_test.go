@@ -2616,6 +2616,14 @@ func (g *fakeGit) Clone(_ context.Context, url, destination, _, _, _ string) err
 	}
 	return nil
 }
+func (g *fakeGit) MirrorClone(ctx context.Context, url, destination, alias, project, _ string, _ []string) error {
+	g.calls = append(g.calls, "mirror-clone:"+url)
+	return g.Clone(ctx, url, destination, "", alias, project)
+}
+func (g *fakeGit) MirrorPush(_ context.Context, _, url, _, project string, force bool, _ string, _ []string) error {
+	g.calls = append(g.calls, fmt.Sprintf("mirror-push:%s:%s:%t", url, project, force))
+	return g.pushErr
+}
 func (g *fakeGit) SetIdentity(context.Context, string, string, string) error {
 	g.calls = append(g.calls, "identity")
 	return nil

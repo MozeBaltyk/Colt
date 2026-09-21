@@ -30,6 +30,70 @@ func TestCORE_PROVIDER_001ConfigPathOverride(t *testing.T) {
 	}
 }
 
+func TestWORKSPACE_MANIFEST_001StrictAndBounded(t *testing.T) {
+	base := "providers:\n  work:\n    type: gitlab\n    host: gitlab.com\n    base_url: https://gitlab.com\n    namespace: team/tools\n    visibility: private\n    git_name: Colt User\n    git_email: colt@example.com\nworkspace:\n  repositories:\n    - provider: work\n      namespace: team/tools\n"
+	for name, suffix := range map[string]string{
+		"unknown field":  "      surprise: true\n",
+		"duplicate key":  "      provider: work\n",
+		"anchor":         "      include: &names [api]\n",
+		"alias":          "      include: &names [api]\n    - provider: work\n      namespace: team/tools\n      include: *names\n",
+		"merge":          "      <<: {include: [api]}\n",
+		"custom tag":     "      include: !command [api]\n",
+		"multiple docs":  "---\nproviders: {}\n",
+		"traversal name": "      include: [../outside]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(base+suffix), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatalf("unsafe YAML accepted: %s", suffix)
+			}
+		})
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(base+"      include: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil || cfg.Workspace == nil || cfg.Workspace.Repositories[0].Include == nil || len(*cfg.Workspace.Repositories[0].Include) != 0 {
+		t.Fatalf("explicit empty include was not preserved: %#v, %v", cfg.Workspace, err)
+	}
+}
+
+func TestWORKSPACE_MANIFEST_001RejectsUnknownProviderAndDuplicatePath(t *testing.T) {
+	p := validProvider("gitlab")
+	p.Namespace = "team"
+	includes := []string{"api"}
+	cfg := Config{Providers: map[string]Provider{"one": p, "two": p}, Workspace: &Workspace{Repositories: []RepositorySelection{
+		{Provider: "one", Namespace: "team", Include: &includes},
+		{Provider: "two", Namespace: "team", Include: &includes},
+	}}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate derived path") {
+		t.Fatalf("duplicate path error = %v", err)
+	}
+	cfg.Workspace.Repositories = []RepositorySelection{{Provider: "missing", Namespace: "team"}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "unknown provider") {
+		t.Fatalf("unknown provider error = %v", err)
+	}
+}
+
+func TestWORKSPACE_MANIFEST_001YAMLResourceLimits(t *testing.T) {
+	deep := strings.Repeat("- ", maxYAMLDepth+1) + "value\n"
+	if err := validateDataYAML([]byte(deep)); err == nil || !strings.Contains(err.Error(), "depth") {
+		t.Fatalf("deep YAML error = %v", err)
+	}
+	large := "items:\n" + strings.Repeat("  - value\n", maxYAMLCollectionEntries+1)
+	if err := validateDataYAML([]byte(large)); err == nil || !strings.Contains(err.Error(), "collection") {
+		t.Fatalf("large collection error = %v", err)
+	}
+	second := "providers: {}\n---\n" + strings.Repeat("- ", maxYAMLDepth+1) + "value\n"
+	if err := validateDataYAML([]byte(second)); err == nil || !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Fatalf("second document error = %v", err)
+	}
+}
+
 func TestCORE_PROVIDER_001DefaultConfigPath(t *testing.T) {
 	t.Setenv("COLT_CONFIG", "")
 	base, err := os.UserConfigDir()

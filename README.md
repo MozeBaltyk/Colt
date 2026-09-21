@@ -4,7 +4,7 @@
 
 Colt aims to be a provider-independent project manager for Git repositories.
 
-With one CLI, you can connect to multiple Git hosting providers, clone repositories, work with an entire namespace, initialize projects from your own templates, and eventually mirror projects between providers.
+With one CLI, you can connect to multiple Git hosting providers, clone repositories, reconcile a declared workspace, initialize projects from your own templates, and mirror projects between providers.
 
 Colt talks directly to supported Git hosting providers through their HTTP APIs for hosting operations, while leaving repository operations to native `git`. GitHub, GitLab, Gitea, and Forgejo are currently supported.
 
@@ -29,6 +29,9 @@ colt template show <name>[@<version>]
 colt list [--provider <alias> | --all]
 colt clone <repository> [--provider <alias>] [--transport https|ssh]
 colt release <version> [--provider <alias>] [--transport https|ssh]
+colt status
+colt sync [--dry-run]
+colt mirror <source-provider> <target-provider> [--namespace <namespace>] [--replace]
 ```
 
 Configuration uses Go's `os.UserConfigDir()`. On Linux, this is
@@ -94,8 +97,12 @@ Colt-to-Gitea and Colt-to-Forgejo initialization and push paths are exercised in
 Milestone 2 core list/clone/release primitives are available with authoritative
 transport validation, partial-release reporting, race-safe clone destination
 confinement, and hostile repository-local Git configuration rejection.
-Milestone 3 parameterized data-only templates are available. Later planned work adds
-declarative workspace `status`/`sync` (M4), diagnostic project
+Milestone 3 parameterized data-only templates are available. Milestone 4 workspace
+`status`, `sync`, dry-run, and one-shot provider mirroring are available. Workspace
+repositories use `<namespace>/<project>` beneath the current directory; omitted
+`include` selects all exact-namespace repositories, while `include: []` selects none.
+Mirror `--replace` force-pushes mirrored refs but never deletes the provider repository.
+Later planned work adds diagnostic project
 health (M5), and a read-only analyzer (M6). Colt is not a wrapper or replacement
 command surface for `gh` or `glab`.
 
@@ -106,7 +113,7 @@ command surface for `gh` or `glab`.
 - [First MVP: blank project initialization](docs/specs/01-project-init.md)
 - [M2: project lifecycle](docs/specs/02-project-lifecycle.md)
 - [M3: template initialization](docs/specs/03-template-init.md)
-- [Planned M4: workspace reconciliation](docs/specs/04-workspace.md)
+- [M4: workspace reconciliation](docs/specs/04-workspace.md)
 - [Planned M5: project health](docs/specs/05-project-health.md)
 - [Planned M6: analyzer](docs/specs/06-analyzer.md)
 - [Roadmap](docs/specs/90-roadmap.md)

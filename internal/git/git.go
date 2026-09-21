@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -16,6 +17,8 @@ type Runner interface {
 	LsRemote(context.Context, string, string, string, string, []string) error
 	Init(context.Context, string) error
 	Clone(context.Context, string, string, string, string, string) error
+	MirrorClone(context.Context, string, string, string, string, string, []string) error
+	MirrorPush(context.Context, string, string, string, string, bool, string, []string) error
 	SetIdentity(context.Context, string, string, string) error
 	Commit(context.Context, string) (string, error)
 	AddOrigin(context.Context, string, string) error
@@ -110,6 +113,78 @@ func (n Native) Clone(ctx context.Context, cloneURL, destination, username, alia
 			return fmt.Errorf("Git credential helper not found: %w", err)
 		}
 		return fmt.Errorf("native git clone failed: %w", err)
+	}
+	return nil
+}
+
+func (n Native) MirrorClone(ctx context.Context, cloneURL, destination, alias, project, activeTokenEnv string, tokenEnvNames []string) error {
+	args := []string{"clone", "--mirror", "--", cloneURL, destination}
+	env := []string{"GIT_TERMINAL_PROMPT=0"}
+	ssh := false
+	if strings.HasPrefix(cloneURL, "https://") {
+		namespace, err := repositoryNamespace(cloneURL, project)
+		if err != nil {
+			return err
+		}
+		helper, err := transientCredentialHelper(alias, project, namespace)
+		if err != nil {
+			return err
+		}
+		args = append([]string{"-c", "http.followRedirects=false", "-c", "credential.helper=", "-c", "credential.helper=" + helper, "-c", "credential.useHttpPath=true"}, args...)
+		if ca := os.Getenv("SSL_CERT_FILE"); ca != "" {
+			args = append([]string{"-c", "http.sslCAInfo=" + ca}, args...)
+		}
+	} else if strings.HasPrefix(cloneURL, "git@") {
+		ssh = true
+		env = append(env, "GIT_SSH_COMMAND=ssh -oBatchMode=yes -oStrictHostKeyChecking=yes")
+	} else {
+		return errors.New("unsupported Git transport")
+	}
+	excluded := tokenEnvNames
+	if !ssh {
+		excluded = tokenEnvNamesExcept(tokenEnvNames, activeTokenEnv)
+	}
+	commandEnv := gitEnvWithout(env, excluded)
+	if err := n.runWithEnv(ctx, "", commandEnv, args...); err != nil {
+		return fmt.Errorf("native git mirror clone failed: %w", err)
+	}
+	return nil
+}
+
+func (n Native) MirrorPush(ctx context.Context, dir, targetURL, alias, project string, force bool, activeTokenEnv string, tokenEnvNames []string) error {
+	args := []string{"-c", "core.hooksPath=" + os.DevNull, "push", "--mirror"}
+	if force {
+		args = append(args, "--force")
+	}
+	args = append(args, "--", targetURL)
+	env := []string{"GIT_TERMINAL_PROMPT=0"}
+	ssh := false
+	if strings.HasPrefix(targetURL, "https://") {
+		namespace, err := repositoryNamespace(targetURL, project)
+		if err != nil {
+			return err
+		}
+		helper, err := transientCredentialHelper(alias, project, namespace)
+		if err != nil {
+			return err
+		}
+		args = append([]string{"-c", "http.followRedirects=false", "-c", "credential.helper=", "-c", "credential.helper=" + helper, "-c", "credential.useHttpPath=true"}, args...)
+		if ca := os.Getenv("SSL_CERT_FILE"); ca != "" {
+			args = append([]string{"-c", "http.sslCAInfo=" + ca}, args...)
+		}
+	} else if strings.HasPrefix(targetURL, "git@") {
+		ssh = true
+		env = append(env, "GIT_SSH_COMMAND=ssh -oBatchMode=yes -oStrictHostKeyChecking=yes")
+	} else {
+		return errors.New("unsupported Git transport")
+	}
+	excluded := tokenEnvNames
+	if !ssh {
+		excluded = tokenEnvNamesExcept(tokenEnvNames, activeTokenEnv)
+	}
+	commandEnv := gitEnvWithout(env, excluded)
+	if err := n.runWithEnv(ctx, dir, commandEnv, args...); err != nil {
+		return fmt.Errorf("native git mirror push failed: %w", err)
 	}
 	return nil
 }
@@ -239,16 +314,56 @@ func credentialHelper(alias, project string) (string, error) {
 	return "!colt git-credential --provider " + alias + " --repository " + project, nil
 }
 
-func transientCredentialHelper(alias, project string) (string, error) {
+func transientCredentialHelper(alias, project string, namespace ...string) (string, error) {
 	if _, err := credentialHelper(alias, project); err != nil {
 		return "", err
+	}
+	suffix := ""
+	if len(namespace) > 1 {
+		return "", errors.New("refusing ambiguous namespace scope for Git credential helper")
+	}
+	if len(namespace) == 1 && namespace[0] != "" {
+		for _, part := range strings.Split(namespace[0], "/") {
+			if !SafeIdentifier(part) || part == "." || part == ".." {
+				return "", errors.New("refusing unsafe namespace scope for Git credential helper")
+			}
+		}
+		suffix = " --namespace " + namespace[0]
 	}
 	executable, err := os.Executable()
 	if err != nil {
 		return "", errors.New("locate Colt executable for Git credential helper")
 	}
 	quoted := "'" + strings.ReplaceAll(executable, "'", `'"'"'`) + "'"
-	return "!" + quoted + " git-credential --provider " + alias + " --repository " + project, nil
+	return "!" + quoted + " git-credential --provider " + alias + " --repository " + project + suffix, nil
+}
+
+func repositoryNamespace(raw, project string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("refusing unsafe HTTPS repository URL")
+	}
+	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+	if len(parts) < 2 || parts[len(parts)-1] != project+".git" {
+		return "", errors.New("repository URL does not match credential scope")
+	}
+	namespace := strings.Join(parts[:len(parts)-1], "/")
+	for _, part := range parts[:len(parts)-1] {
+		if !SafeIdentifier(part) || part == "." || part == ".." {
+			return "", errors.New("repository URL has an unsafe namespace")
+		}
+	}
+	return namespace, nil
+}
+
+func tokenEnvNamesExcept(names []string, keep string) []string {
+	excluded := make([]string, 0, len(names))
+	for _, name := range names {
+		if name != keep && !(runtime.GOOS == "windows" && strings.EqualFold(name, keep)) {
+			excluded = append(excluded, name)
+		}
+	}
+	return excluded
 }
 
 func (n Native) configureCredentialScope(ctx context.Context, dir, cloneURL, username string) error {

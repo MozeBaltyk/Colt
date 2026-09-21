@@ -2,7 +2,6 @@ package provider
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,19 +26,7 @@ func (forgejoAdapter) get(ctx context.Context, c *client, project string) (*Repo
 }
 
 func (forgejoAdapter) list(ctx context.Context, c *client) ([]Repository, error) {
-	var results []repositoryResponse
-	if err := c.request(ctx, http.MethodGet, "/api/v1/user/repos", nil, &results); err != nil {
-		return nil, fmt.Errorf("list repositories: %w", err)
-	}
-	repos := make([]Repository, 0, len(results))
-	for _, r := range results {
-		repo, err := c.repository(r)
-		if err != nil {
-			return nil, err
-		}
-		repos = append(repos, *repo)
-	}
-	return repos, nil
+	return c.listRepositories(ctx, "/api/v1/user/repos", "limit")
 }
 
 func (forgejoAdapter) create(ctx context.Context, c *client, project, visibility string) (*Repository, error) {

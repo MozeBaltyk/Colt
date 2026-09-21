@@ -26,8 +26,10 @@ type RevocationOptions struct {
 }
 
 type Repository struct {
-	CloneURL string
-	SSHURL   string
+	Name      string
+	Namespace string
+	CloneURL  string
+	SSHURL    string
 }
 
 type Client interface {
@@ -154,6 +156,13 @@ func (c *client) authenticate(ctx context.Context, path string) (string, error) 
 }
 
 type repositoryResponse struct {
+	Name          string `json:"name"`
+	FullName      string `json:"full_name"`
+	PathNamespace string `json:"path_with_namespace"`
+	Owner         struct {
+		Login    string `json:"login"`
+		Username string `json:"username"`
+	} `json:"owner"`
 	CloneURL     string `json:"clone_url"`
 	SSHURL       string `json:"ssh_url"`
 	HTTPURL      string `json:"http_url_to_repo"`
@@ -170,6 +179,35 @@ func (c *client) get(ctx context.Context, path string) (*Repository, error) {
 		return nil, fmt.Errorf("check repository: %w", err)
 	}
 	return c.repository(result)
+}
+
+func (c *client) listRepositories(ctx context.Context, path, pageSizeParameter string) ([]Repository, error) {
+	const pageSize = 100
+	repositories := make([]Repository, 0)
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	for page := 1; ; page++ {
+		var results []repositoryResponse
+		target := fmt.Sprintf("%s%s%s=%d&page=%d", path, separator, pageSizeParameter, pageSize, page)
+		if err := c.request(ctx, http.MethodGet, target, nil, &results); err != nil {
+			return nil, fmt.Errorf("list repositories: %w", err)
+		}
+		if len(repositories)+len(results) > config.MaxProviderRepositories {
+			return nil, fmt.Errorf("provider returned more than %d repositories", config.MaxProviderRepositories)
+		}
+		for _, result := range results {
+			repository, err := c.repository(result)
+			if err != nil {
+				return nil, err
+			}
+			repositories = append(repositories, *repository)
+		}
+		if len(results) < pageSize {
+			return repositories, nil
+		}
+	}
 }
 
 func (c *client) create(ctx context.Context, path string, body any) (*Repository, error) {
@@ -193,12 +231,45 @@ func (c *client) repository(result repositoryResponse) (*Repository, error) {
 		if !strings.EqualFold(u.Host, c.settings.Host) {
 			return nil, errors.New("provider returned a clone URL for a different host")
 		}
+		path := strings.TrimPrefix(u.Path, "/")
+		if !strings.HasSuffix(path, ".git") {
+			return nil, errors.New("provider returned an unsafe clone URL; expected repository .git path")
+		}
+		path = strings.TrimSuffix(path, ".git")
+		parts := strings.Split(path, "/")
+		if len(parts) < 2 || !config.ValidProjectName(parts[len(parts)-1]) {
+			return nil, errors.New("provider returned an invalid repository identity")
+		}
+		name, namespace := parts[len(parts)-1], strings.Join(parts[:len(parts)-1], "/")
+		for _, part := range parts[:len(parts)-1] {
+			if !config.ValidProjectName(part) {
+				return nil, errors.New("provider returned an invalid repository namespace")
+			}
+		}
+		metadataPath := result.FullName
+		if result.PathNamespace != "" {
+			metadataPath = result.PathNamespace
+		}
+		if metadataPath != "" && metadataPath != namespace+"/"+name {
+			return nil, errors.New("provider returned inconsistent repository identity")
+		}
+		if result.Name != "" && result.Name != name {
+			return nil, errors.New("provider returned inconsistent repository name")
+		}
+		owner := result.Owner.Login
+		if owner == "" {
+			owner = result.Owner.Username
+		}
+		if owner != "" && c.settings.Type != "gitlab" && !strings.EqualFold(owner, namespace) {
+			return nil, errors.New("provider returned inconsistent repository owner")
+		}
+		result.Name, result.FullName = name, namespace
 	}
 	ssh := result.SSHURL
 	if ssh == "" {
 		ssh = result.SSHURLToRepo
 	}
-	return &Repository{CloneURL: clone, SSHURL: ssh}, nil
+	return &Repository{Name: result.Name, Namespace: result.FullName, CloneURL: clone, SSHURL: ssh}, nil
 }
 
 func (c *client) request(ctx context.Context, method, path string, body any, result any) error {

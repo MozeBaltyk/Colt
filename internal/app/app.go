@@ -80,7 +80,7 @@ func (a *App) Root() *cobra.Command {
 	}
 	root.PersistentFlags().Bool("noninteractive", false, "disable interactive prompts and authorization flows")
 	root.PersistentFlags().BoolP("verbose", "v", false, "print additional non-secret diagnostics")
-	root.AddCommand(a.authCommand(), a.initCommand(), a.templateCommand(), a.listCommand(), a.cloneCommand(), a.releaseCommand(), a.runCommand(), a.gitCredentialCommand())
+	root.AddCommand(a.authCommand(), a.initCommand(), a.templateCommand(), a.listCommand(), a.cloneCommand(), a.releaseCommand(), a.workspaceStatusCommand(), a.syncCommand(), a.mirrorCommand(), a.runCommand(), a.gitCredentialCommand())
 	return root
 }
 
@@ -171,6 +171,7 @@ func readInteractiveLine(reader *bufio.Reader) (string, error) {
 func (a *App) gitCredentialCommand() *cobra.Command {
 	providerAlias := ""
 	repository := ""
+	namespace := ""
 	cmd := &cobra.Command{
 		Use:    "git-credential <get|store|erase>",
 		Short:  "Serve credentials to Git",
@@ -192,7 +193,7 @@ func (a *App) gitCredentialCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p, ok := credentialProvider(cfg, request, providerAlias, repository)
+			p, ok := credentialProvider(cfg, request, providerAlias, repository, namespace)
 			if !ok {
 				return nil
 			}
@@ -221,8 +222,10 @@ func (a *App) gitCredentialCommand() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&providerAlias, "provider", "", "provider alias")
 	cmd.Flags().StringVar(&repository, "repository", "", "repository name")
+	cmd.Flags().StringVar(&namespace, "namespace", "", "repository namespace")
 	_ = cmd.Flags().MarkHidden("provider")
 	_ = cmd.Flags().MarkHidden("repository")
+	_ = cmd.Flags().MarkHidden("namespace")
 	return cmd
 }
 
@@ -249,7 +252,7 @@ func readGitCredential(r io.Reader) (map[string]string, error) {
 	return request, nil
 }
 
-func credentialProvider(cfg config.Config, request map[string]string, alias, repository string) (config.Provider, bool) {
+func credentialProvider(cfg config.Config, request map[string]string, alias, repository, namespace string) (config.Provider, bool) {
 	if request["protocol"] != "https" || request["host"] == "" || request["path"] == "" {
 		return config.Provider{}, false
 	}
@@ -258,6 +261,18 @@ func credentialProvider(cfg config.Config, request map[string]string, alias, rep
 		p, ok := cfg.Providers[alias]
 		if !ok || repository == "" {
 			return config.Provider{}, false
+		}
+		if namespace != "" {
+			parts := strings.Split(namespace, "/")
+			if p.Type != "gitlab" && len(parts) != 1 {
+				return config.Provider{}, false
+			}
+			for _, part := range parts {
+				if !gitnative.SafeIdentifier(part) || part == "." || part == ".." {
+					return config.Provider{}, false
+				}
+			}
+			p.Namespace = namespace
 		}
 		actual, ok := cleanHTTPSRepository(raw, p)
 		return p, ok && actual == repository
@@ -291,12 +306,7 @@ func cleanHTTPSRepository(raw string, p config.Provider) (string, bool) {
 }
 
 func namespaceMatches(actual, configured []string, providerType string) bool {
-	for i := range actual {
-		if actual[i] != configured[i] && (providerType != "github" || !strings.EqualFold(actual[i], configured[i])) {
-			return false
-		}
-	}
-	return true
+	return len(actual) == len(configured) && config.NamespaceEqual(strings.Join(actual, "/"), strings.Join(configured, "/"), providerType)
 }
 
 type authOptions struct {

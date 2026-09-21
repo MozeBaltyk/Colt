@@ -116,6 +116,49 @@ test -z "$GIT_CONFIG_COUNT$GIT_CONFIG_KEY_0$GIT_CONFIG_VALUE_0" || exit 3
 	}
 }
 
+func TestMirrorCloneAndPushUseAllRefsAndTransientCredentials(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-backed fake git is Unix-only")
+	}
+	bin := t.TempDir()
+	script := filepath.Join(bin, "git")
+	log := filepath.Join(t.TempDir(), "args")
+	contents := `#!/bin/sh
+printf '%s\n' "$*" >> "$MIRROR_LOG"
+case "$*" in
+  *"clone --mirror"*) test "$SOURCE_TOKEN" = source-secret && test -z "${TARGET_TOKEN+x}" || exit 11 ;;
+  *"push --mirror"*) test "$TARGET_TOKEN" = target-secret && test -z "${SOURCE_TOKEN+x}" || exit 12 ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(contents), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("MIRROR_LOG", log)
+	t.Setenv("SOURCE_TOKEN", "source-secret")
+	t.Setenv("TARGET_TOKEN", "target-secret")
+	native := Native{}
+	url := "https://example.test/team/demo.git"
+	staging := filepath.Join(t.TempDir(), "staged.git")
+	if err := native.MirrorClone(context.Background(), url, staging, "source", "demo", "SOURCE_TOKEN", []string{"SOURCE_TOKEN", "TARGET_TOKEN"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.MirrorPush(context.Background(), staging, url, "target", "demo", true, "TARGET_TOKEN", []string{"SOURCE_TOKEN", "TARGET_TOKEN"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "clone --mirror -- "+url+" "+staging) || !strings.Contains(text, "push --mirror --force -- "+url) || !strings.Contains(text, "--namespace team") {
+		t.Fatalf("mirror Git arguments = %q", text)
+	}
+}
+
 func TestCORE_CREDENTIAL_002InheritedGitExecPathCannotStealPushCredential(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-backed credential helper is Unix-only")

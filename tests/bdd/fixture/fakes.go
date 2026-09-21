@@ -212,21 +212,25 @@ func (f *FakeHost) RemoveAll(path string) error {
 
 // FakeGit records calls; with Real=true it delegates to native git.
 type FakeGit struct {
-	Real         bool
-	AvailableErr error
-	PushErr      error
-	Origins      []string
-	Pushes       int
-	PushURL      string
-	Helpers      int
-	Operations   []string
-	OriginURL    string
-	OriginErr    error
-	LsRemoteErr  error
-	ProbeBounded bool
-	ProbeAlias   string
-	ProbeProject string
-	CloneHook    func(string) error
+	Real           bool
+	AvailableErr   error
+	PushErr        error
+	Origins        []string
+	Pushes         int
+	PushURL        string
+	Helpers        int
+	Operations     []string
+	OriginURL      string
+	OriginErr      error
+	LsRemoteErr    error
+	ProbeBounded   bool
+	ProbeAlias     string
+	ProbeProject   string
+	CloneHook      func(string) error
+	CloneErrors    map[string]error
+	MirrorCloneErr map[string]error
+	MirrorDirs     []string
+	MirrorForce    []bool
 }
 
 func (f *FakeGit) Available() error {
@@ -268,6 +272,9 @@ func (f *FakeGit) Init(ctx context.Context, dir string) error {
 
 func (f *FakeGit) Clone(ctx context.Context, url, dir, username, alias, project string) error {
 	f.Operations = append(f.Operations, "clone")
+	if err := f.CloneErrors[project]; err != nil {
+		return err
+	}
 	if f.Real {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
@@ -295,6 +302,26 @@ func (f *FakeGit) Clone(ctx context.Context, url, dir, username, alias, project 
 	if f.CloneHook != nil {
 		return f.CloneHook(dir)
 	}
+	return nil
+}
+
+func (f *FakeGit) MirrorClone(ctx context.Context, url, dir, alias, project, _ string, _ []string) error {
+	f.Operations = append(f.Operations, "mirror-clone:"+project)
+	f.MirrorDirs = append(f.MirrorDirs, dir)
+	if err := f.MirrorCloneErr[project]; err != nil {
+		return err
+	}
+	return f.Clone(ctx, url, dir, "", alias, project)
+}
+
+func (f *FakeGit) MirrorPush(_ context.Context, _ /* dir */, url, _, project string, force bool, _ string, _ []string) error {
+	f.Operations = append(f.Operations, fmt.Sprintf("mirror-push:%s:%t", project, force))
+	f.MirrorForce = append(f.MirrorForce, force)
+	if f.PushErr != nil {
+		return f.PushErr
+	}
+	f.Pushes++
+	f.PushURL = url
 	return nil
 }
 
@@ -400,6 +427,10 @@ type FakeClient struct {
 	RevokeErr  error
 	Calls      []string
 	Events     *[]string
+	GetRepos   map[string]*provider.Repository
+	GetErrors  map[string]error
+	CreateFunc func(string) (*provider.Repository, error)
+	ListHook   func() error
 }
 
 func (f *FakeClient) Authenticate(context.Context) (string, error) {
@@ -415,6 +446,12 @@ func (f *FakeClient) Authenticate(context.Context) (string, error) {
 
 func (f *FakeClient) Get(_ context.Context, project string) (*provider.Repository, error) {
 	f.Calls = append(f.Calls, "Get:"+project)
+	if err := f.GetErrors[project]; err != nil {
+		return nil, err
+	}
+	if repository, ok := f.GetRepos[project]; ok {
+		return repository, nil
+	}
 	if f.GetErr != nil {
 		return nil, f.GetErr
 	}
@@ -423,6 +460,11 @@ func (f *FakeClient) Get(_ context.Context, project string) (*provider.Repositor
 
 func (f *FakeClient) List(_ context.Context) ([]provider.Repository, error) {
 	f.Calls = append(f.Calls, "List")
+	if f.ListHook != nil {
+		if err := f.ListHook(); err != nil {
+			return nil, err
+		}
+	}
 	if f.ListErr != nil {
 		return nil, f.ListErr
 	}
@@ -436,6 +478,9 @@ func (f *FakeClient) Create(_ context.Context, project string, visibility ...str
 	}
 	if f.CreateErr != nil {
 		return nil, f.CreateErr
+	}
+	if f.CreateFunc != nil {
+		return f.CreateFunc(project)
 	}
 	return f.CreateRepo, nil
 }

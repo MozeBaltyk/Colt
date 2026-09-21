@@ -58,9 +58,20 @@ func validateCloneDestination(root *os.Root, name string) (bool, os.FileMode, er
 }
 
 func installClone(root *os.Root, source, destination string) (retErr error) {
+	return installCloneWithExisting(root, source, destination, true)
+}
+
+func installCloneAbsent(root *os.Root, source, destination string) (retErr error) {
+	return installCloneWithExisting(root, source, destination, false)
+}
+
+func installCloneWithExisting(root *os.Root, source, destination string, allowExisting bool) (retErr error) {
 	existed, destinationMode, err := validateCloneDestination(root, destination)
 	if err != nil {
 		return err
+	}
+	if existed && !allowExisting {
+		return errors.New("install clone: destination appeared during reconciliation")
 	}
 	sourceRoot, err := os.OpenRoot(source)
 	if err != nil {

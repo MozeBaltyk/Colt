@@ -19,6 +19,17 @@ type Config struct {
 	Transport string              `yaml:"transport,omitempty"`
 	Providers map[string]Provider `yaml:"providers"`
 	Templates map[string]Template `yaml:"templates,omitempty"`
+	Workspace *Workspace          `yaml:"workspace,omitempty"`
+}
+
+type Workspace struct {
+	Repositories []RepositorySelection `yaml:"repositories"`
+}
+
+type RepositorySelection struct {
+	Provider  string    `yaml:"provider"`
+	Namespace string    `yaml:"namespace"`
+	Include   *[]string `yaml:"include,omitempty"`
 }
 
 type Template struct {
@@ -59,7 +70,14 @@ type Auth struct {
 	CredentialID string `yaml:"credential_id,omitempty"`
 }
 
-const maxConfigSize = 1 << 20
+const (
+	maxConfigSize            = 1 << 20
+	maxYAMLDepth             = 32
+	maxYAMLCollectionEntries = 10000
+	MaxWorkspaceSelections   = 128
+	MaxWorkspaceIncludes     = 4096
+	MaxProviderRepositories  = 10000
+)
 
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
 var envRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -94,7 +112,14 @@ func Load(path string) (Config, error) {
 	if len(data) > maxConfigSize {
 		return Config{}, fmt.Errorf("config exceeds maximum size of %d bytes", maxConfigSize)
 	}
-	if err := validateTemplateYAML(data); err != nil {
+	document, err := parseDataYAML(data)
+	if err != nil {
+		return Config{}, fmt.Errorf("parse config: %w", err)
+	}
+	if err := validateTemplateYAML(document); err != nil {
+		return Config{}, fmt.Errorf("parse config: %w", err)
+	}
+	if err := validateWorkspaceYAML(document); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 	var cfg Config
@@ -132,10 +157,79 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-func validateTemplateYAML(data []byte) error {
+func validateDataYAML(data []byte) error {
+	_, err := parseDataYAML(data)
+	return err
+}
+
+func parseDataYAML(data []byte) (*yaml.Node, error) {
 	var document yaml.Node
-	if err := yaml.Unmarshal(data, &document); err != nil || len(document.Content) == 0 {
-		return err
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	if err := dec.Decode(&document); errors.Is(err, io.EOF) {
+		return &document, nil
+	} else if err != nil {
+		return nil, err
+	}
+	entries := 0
+	var walk func(*yaml.Node, int) error
+	walk = func(node *yaml.Node, depth int) error {
+		if depth > maxYAMLDepth {
+			return fmt.Errorf("YAML exceeds maximum depth of %d", maxYAMLDepth)
+		}
+		if node.Alias != nil || node.Kind == yaml.AliasNode || node.Anchor != "" {
+			return errors.New("YAML aliases and anchors are not allowed")
+		}
+		allowedTag := node.Tag == "" || node.Tag == "!!map" || node.Tag == "!!seq" || node.Tag == "!!str" || node.Tag == "!!bool" || node.Tag == "!!null" || node.Tag == "!!int" || node.Tag == "!!float" || node.Tag == "!!timestamp"
+		if !allowedTag {
+			return fmt.Errorf("custom YAML tag %q is not allowed", node.Tag)
+		}
+		if node.Kind == yaml.MappingNode {
+			if len(node.Content)%2 != 0 {
+				return errors.New("malformed YAML mapping")
+			}
+			entries += len(node.Content) / 2
+			seen := make(map[string]bool, len(node.Content)/2)
+			for i := 0; i < len(node.Content); i += 2 {
+				key := node.Content[i]
+				if key.Kind != yaml.ScalarNode || key.Tag != "!!str" {
+					return errors.New("YAML mapping keys must be strings")
+				}
+				if key.Value == "<<" {
+					return errors.New("YAML merge keys are not allowed")
+				}
+				if seen[key.Value] {
+					return fmt.Errorf("duplicate YAML key %q", key.Value)
+				}
+				seen[key.Value] = true
+			}
+		} else if node.Kind == yaml.SequenceNode {
+			entries += len(node.Content)
+		}
+		if entries > maxYAMLCollectionEntries {
+			return fmt.Errorf("YAML exceeds maximum collection size of %d", maxYAMLCollectionEntries)
+		}
+		for _, child := range node.Content {
+			if err := walk(child, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := walk(&document, 0); err != nil {
+		return nil, err
+	}
+	var extra yaml.Node
+	if err := dec.Decode(&extra); err == nil {
+		return nil, errors.New("multiple YAML documents are not allowed")
+	} else if !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return &document, nil
+}
+
+func validateTemplateYAML(document *yaml.Node) error {
+	if document == nil || len(document.Content) == 0 {
+		return nil
 	}
 	root := document.Content[0]
 	if root.Kind != yaml.MappingNode {
@@ -194,6 +288,51 @@ func validateTemplateYAML(data []byte) error {
 	return nil
 }
 
+func validateWorkspaceYAML(document *yaml.Node) error {
+	if document == nil || len(document.Content) == 0 {
+		return nil
+	}
+	root := document.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil
+	}
+	workspace := mappingValue(root, "workspace")
+	if workspace == nil {
+		return nil
+	}
+	if workspace.Kind != yaml.MappingNode {
+		return errors.New("workspace must be a mapping")
+	}
+	repositories := mappingValue(workspace, "repositories")
+	if repositories == nil || repositories.Kind != yaml.SequenceNode {
+		return errors.New("workspace repositories must be a sequence")
+	}
+	for i, selection := range repositories.Content {
+		if selection.Kind != yaml.MappingNode {
+			return fmt.Errorf("workspace repository %d must be a mapping", i+1)
+		}
+		for _, field := range []string{"provider", "namespace"} {
+			value := mappingValue(selection, field)
+			if value == nil || value.Tag != "!!str" {
+				return fmt.Errorf("workspace repository %d %s must be a string", i+1, field)
+			}
+		}
+		include := mappingValue(selection, "include")
+		if include == nil {
+			continue
+		}
+		if include.Kind != yaml.SequenceNode {
+			return fmt.Errorf("workspace repository %d include must be a sequence", i+1)
+		}
+		for _, project := range include.Content {
+			if project.Tag != "!!str" {
+				return fmt.Errorf("workspace repository %d include values must be strings", i+1)
+			}
+		}
+	}
+	return nil
+}
+
 func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
 	if mapping == nil || mapping.Kind != yaml.MappingNode {
 		return nil
@@ -218,6 +357,9 @@ func (c Config) Validate() error {
 	}
 	if defaults > 1 {
 		return errors.New("invalid config: multiple providers are marked default")
+	}
+	if err := c.validateWorkspace(); err != nil {
+		return err
 	}
 	for name, template := range c.Templates {
 		if !nameRE.MatchString(name) || name == "." || name == ".." || strings.Contains(name, "@") {
@@ -256,6 +398,73 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func (c Config) validateWorkspace() error {
+	if c.Workspace == nil {
+		return nil
+	}
+	if len(c.Workspace.Repositories) > MaxWorkspaceSelections {
+		return fmt.Errorf("invalid workspace: at most %d repository selections are allowed", MaxWorkspaceSelections)
+	}
+	totalIncludes := 0
+	paths := map[string]bool{}
+	for i, selection := range c.Workspace.Repositories {
+		p, ok := c.Providers[selection.Provider]
+		if !ok {
+			return fmt.Errorf("invalid workspace repository %d: unknown provider alias %q", i+1, selection.Provider)
+		}
+		parts := strings.Split(selection.Namespace, "/")
+		if selection.Namespace == "" || p.Type != "gitlab" && len(parts) != 1 {
+			return fmt.Errorf("invalid workspace repository %d: namespace is required and nested namespaces are supported only by GitLab", i+1)
+		}
+		for _, part := range parts {
+			if !namespacePartRE.MatchString(part) || part == "." || part == ".." {
+				return fmt.Errorf("invalid workspace repository %d: namespace must contain safe non-empty path segments", i+1)
+			}
+		}
+		if !NamespaceEqual(selection.Namespace, p.Namespace, p.Type) {
+			return fmt.Errorf("invalid workspace repository %d: namespace %q is incompatible with provider %q namespace %q", i+1, selection.Namespace, selection.Provider, p.Namespace)
+		}
+		if selection.Include == nil {
+			continue
+		}
+		totalIncludes += len(*selection.Include)
+		if totalIncludes > MaxWorkspaceIncludes {
+			return fmt.Errorf("invalid workspace: at most %d included repositories are allowed", MaxWorkspaceIncludes)
+		}
+		included := map[string]bool{}
+		for _, project := range *selection.Include {
+			if !ValidProjectName(project) {
+				return fmt.Errorf("invalid workspace repository %d include %q: invalid repository name", i+1, project)
+			}
+			canonical := project
+			if p.Type != "gitlab" {
+				canonical = strings.ToLower(project)
+			}
+			if included[canonical] {
+				return fmt.Errorf("invalid workspace repository %d: duplicate include %q", i+1, project)
+			}
+			included[canonical] = true
+			path := filepath.Join(filepath.FromSlash(selection.Namespace), project)
+			if path == "." || filepath.IsAbs(path) || !filepath.IsLocal(path) || filepath.Clean(path) != path {
+				return fmt.Errorf("invalid workspace repository %d: derived path %q escapes the workspace root", i+1, path)
+			}
+			path = strings.ToLower(filepath.ToSlash(path))
+			if paths[path] {
+				return fmt.Errorf("invalid workspace repository %d: duplicate derived path %q", i+1, path)
+			}
+			paths[path] = true
+		}
+	}
+	return nil
+}
+
+func NamespaceEqual(a, b, providerType string) bool {
+	if providerType == "gitlab" {
+		return a == b
+	}
+	return strings.EqualFold(a, b)
 }
 
 func (c Config) ResolveTemplate(ref string) (string, string, TemplateVersion, error) {

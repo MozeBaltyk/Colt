@@ -36,19 +36,7 @@ func (githubAdapter) get(ctx context.Context, c *client, project string) (*Repos
 }
 
 func (githubAdapter) list(ctx context.Context, c *client) ([]Repository, error) {
-	var results []repositoryResponse
-	if err := c.request(ctx, http.MethodGet, "/user/repos", nil, &results); err != nil {
-		return nil, fmt.Errorf("list repositories: %w", err)
-	}
-	repos := make([]Repository, 0, len(results))
-	for _, r := range results {
-		repo, err := c.repository(r)
-		if err != nil {
-			return nil, err
-		}
-		repos = append(repos, *repo)
-	}
-	return repos, nil
+	return c.listRepositories(ctx, "/user/repos", "per_page")
 }
 
 func (githubAdapter) create(ctx context.Context, c *client, project, visibility string) (*Repository, error) {
