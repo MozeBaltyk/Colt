@@ -1069,6 +1069,7 @@ func TestCORE_GIT_005_006_007CredentialHelperProtocol(t *testing.T) {
 		name, operation, input, want string
 	}{
 		{"match", "get", "protocol=https\nhost=github.com\npath=team/demo.git\n\n", "username=x-access-token\npassword=helper-secret\n\n"},
+		{"repeated field tolerated", "get", "protocol=https\nhost=github.com\nhost=github.com\npath=team/demo.git\n\n", "username=x-access-token\npassword=helper-secret\n\n"},
 		{"wrong protocol", "get", "protocol=http\nhost=github.com\npath=team/demo.git\n\n", ""},
 		{"wrong host", "get", "protocol=https\nhost=evil.example\npath=team/demo.git\npassword=do-not-log\n\n", ""},
 		{"wrong repository", "get", "protocol=https\nhost=github.com\npath=other/demo.git\n\n", ""},

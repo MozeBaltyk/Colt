@@ -277,9 +277,9 @@ func readGitCredential(r io.Reader) (map[string]string, error) {
 		if !ok || key == "" {
 			return nil, errors.New("invalid Git credential request")
 		}
-		if _, exists := request[key]; exists {
-			return nil, errors.New("invalid Git credential request: duplicate field")
-		}
+		// Git's own credential parser tolerates repeated fields (last value
+		// wins); match it so real Git invocations that emit a duplicated field
+		// are not rejected.
 		request[key] = value
 	}
 	if err := scanner.Err(); err != nil {
