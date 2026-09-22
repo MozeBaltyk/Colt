@@ -16,6 +16,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: extractions/setup-just@v3
+      - uses: azure/setup-helm@v4
+      - name: Verify
+        run: just test
       - name: Build binaries
         run: |
           mkdir -p dist
