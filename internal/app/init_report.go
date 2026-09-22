@@ -211,7 +211,11 @@ func initCause(err error, transport, step string) (string, string) {
 	case strings.Contains(text, "could not resolve host") || strings.Contains(text, "connection refused") || strings.Contains(text, "connection timed out") || strings.Contains(text, "network is unreachable") || strings.Contains(text, "no route to host") || strings.Contains(text, "remote hung up"):
 		return "connectivity failure", "check provider connectivity, then retry the failed operation"
 	default:
-		return "unknown failure", "inspect the preserved state and retry after correcting the reported operation"
+		detail := strings.ReplaceAll(strings.TrimSpace(evidence.String()), "\n", "; ")
+		if len(detail) > 300 {
+			detail = detail[:300] + "…"
+		}
+		return "unknown failure", "inspect the preserved state and retry after correcting the reported operation (" + detail + ")"
 	}
 }
 
