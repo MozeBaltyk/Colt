@@ -985,6 +985,33 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		}
 		return nil
 	})
+	ctx.Step(`^one provider has repositories in more than one namespace$`, func() error {
+		w.Providers = map[string]config.Provider{"work": fixture.WithTokenEnv(fixture.StdProvider("github", "example-namespace"), fixture.TokenEnv)}
+		w.Providers["work"] = fixture.WithDefault(w.Providers["work"], true)
+		w.Client.ListRepos = []provider.Repository{
+			{Name: "keep", Namespace: "example-namespace", CloneURL: "https://github.com/example-namespace/keep.git"},
+			{Name: "other", Namespace: "other-org", CloneURL: "https://github.com/other-org/other.git"},
+		}
+		return w.SaveConfig()
+	})
+	ctx.Step(`^only repositories in the requested namespace are returned$`, func() error {
+		if w.RunErr != nil || !strings.Contains(w.Out, "github.com/example-namespace/keep.git") {
+			return fmt.Errorf("namespace listing incomplete: %q %v", w.Out, w.RunErr)
+		}
+		return nil
+	})
+	ctx.Step(`^repositories in other namespaces are excluded$`, func() error {
+		if strings.Contains(w.Out, "github.com/other-org") {
+			return fmt.Errorf("other-org repositories leaked into listing: %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^the command fails because --namespace cannot be combined with --all$`, func() error {
+		if w.RunErr == nil || !strings.Contains(w.RunErr.Error(), "--namespace cannot be combined with --all") {
+			return fmt.Errorf("expected namespace/all conflict, got %v", w.RunErr)
+		}
+		return nil
+	})
 
 	// clone steps
 	ctx.Step(`^the selected-provider metadata resolves "([^"]*)" to a clean authoritative URL$`, func(url string) error {

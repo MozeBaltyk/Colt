@@ -5,7 +5,7 @@
 ## Repository Operations
 
 ``` text
-colt list [--provider <alias> | --all]
+colt list [--provider <alias> | --all] [--namespace <namespace>]
 colt clone <repository> [--provider <alias>] [--transport https|ssh]
 ```
 
@@ -13,7 +13,7 @@ Lifecycle provides the list and clone primitives later consumed by [workspace re
 
 | ID                    | Planned requirement                                                                                                                                                                                                                                                                                               | Acceptance specification                                                |
 |:----------------------|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:------------------------------------------------------------------------|
-| `LIFECYCLE-LIST-001`  | `colt list` **MUST** return deterministic repository results for one provider selected by normal resolution unless `--all` explicitly requests every configured provider. With `--all`, independent provider failures **MUST** be reported without losing successful results.                                     | [`project_lifecycle.feature`](../../features/project_lifecycle.feature) |
+| `LIFECYCLE-LIST-001`  | `colt list` **MUST** return deterministic repository results for one provider selected by normal resolution unless `--all` explicitly requests every configured provider. `--namespace` **MUST** scope the listing to exactly that provider namespace (a bounded group listing for GitLab, a client-side filter for account-scoped providers) and **MUST NOT** be combined with `--all`. With `--all`, independent provider failures **MUST** be reported without losing successful results. | [`project_lifecycle.feature`](../../features/project_lifecycle.feature) |
 | `LIFECYCLE-CLONE-001` | `colt clone` **MUST** resolve the provider and repository unambiguously, use an authoritative clone target from selected-provider metadata (HTTPS or SSH, selected per `CORE-GIT-009` with product default HTTPS), keep the persistent remote URL credential-free, configure the repository-local Colt credential helper for HTTPS clones (so subsequent ordinary `git fetch`/`pull`/`push` authenticate without re-entering credentials), leave SSH key management to the user's existing SSH environment, and refuse an unrelated or non-empty destination. The effective clone target **MUST** still match the selected provider, host, namespace, and repository, and existing authority/host validation MUST NOT be weakened. For the initial Colt-driven clone, HTTPS credentials MAY be supplied process-safely without embedding them in the clone URL. | [`project_lifecycle.feature`](../../features/project_lifecycle.feature) |
 
 ### Clone Nuances

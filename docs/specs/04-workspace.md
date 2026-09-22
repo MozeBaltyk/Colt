@@ -51,14 +51,14 @@ Top-level `colt status` is workspace status; `colt auth status` is provider conf
 |:--------|:----------|:------|:-------------|
 | `colt clone` | provider → local | single repo | Clone one repo from a provider, configure credential helper |
 | `colt sync` | provider → local | manifest-driven | Clone missing repos from a declared workspace manifest; idempotent; never prunes or rewrites |
-| `colt mirror` | provider → provider | namespace | Copy all repos from a source provider namespace to a target provider; one-way copy, not continuous sync |
+| `colt mirror` | provider → provider | namespace / one repo | Copy repos from a source provider namespace (or a single repository with `--repository`) to a target provider; one-way copy, not continuous sync |
 
 ### Mirror (M7 prerequisite)
 
-`colt mirror` copies a namespace from one provider to another. It is useful with M7 local providers: mirror from GitHub/GitLab to your local Gitea/Forgejo instance. `--replace` force-pushes the source mirror's refs to an existing target repository; it does not delete/recreate the provider repository or modify unrelated provider state.
+`colt mirror` copies a source namespace from one provider to another. It is useful with M7 local providers: mirror from GitHub/GitLab to your local Gitea/Forgejo instance. `--namespace` overrides the source namespace; `--target-namespace` writes into a different namespace on the target provider (defaults to the target provider's configured namespace); `--repository` mirrors a single repository instead of the whole source namespace. `--replace` force-pushes the source mirror's refs to an existing target repository; it does not delete/recreate the provider repository or modify unrelated provider state.
 
 ``` text
-colt mirror <source-provider> <target-provider> [--namespace <namespace>]
+colt mirror <source-provider> <target-provider> [--namespace <namespace>] [--target-namespace <namespace>] [--repository <project>] [--replace]
 ```
 
 | ID                    | Requirement                                                                                                                                                                                                                                                                                                           | Acceptance specification                                    |
@@ -68,5 +68,7 @@ colt mirror <source-provider> <target-provider> [--namespace <namespace>]
 | `MIRROR-003`        | `colt mirror` **MUST NOT** overwrite an existing repository on the target provider unless `--replace` is supplied. Without `--replace`, an existing target repository MUST fail safely.                                                                                                                              | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
 | `MIRROR-004`        | The mirror **MUST** be one-way: source and target remain independent after mirroring. `colt mirror` is not a continuous sync — subsequent changes on the source are not reflected on the target unless `colt mirror` is run again.                                                                                      | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
 | `MIRROR-005`        | Remote URLs on the target **MUST** be credential-free. The target provider's remote URL **MUST** be used, not the source provider's URL.                                                                                                                                                                           | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
+| `MIRROR-006`        | `--target-namespace` **MUST** redirect repository creation and push to a validated namespace on the target provider, defaulting to the target provider's configured namespace when omitted. It **MUST NOT** weaken target-side host/namespace/repository validation.                                                  | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
+| `MIRROR-007`        | `--repository <project>` **MUST** mirror exactly one repository from the source namespace and **MUST** fail actionably if no listed source repository matches. The source and target names **MUST** be matched case-insensitively so a target provider that normalizes names (for example GitLab lowercasing) still verifies. | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
 
 Status and sync inspect and install through an opened `os.Root`, without following workspace path links. Clone data is prepared in a private temporary directory and descriptor-relatively installed only after Git and credential-helper setup succeeds. Destructive pruning and bulk fetch/update remain deferred.

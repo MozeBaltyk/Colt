@@ -19,6 +19,7 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	var target *fixture.FakeClient
 	var mirrorCount int
 	var mirrorFailure, targetExists bool
+	var mirrorTargetNamespace string
 
 	repository := func(p config.Provider, name string) provider.Repository {
 		return provider.Repository{Name: name, Namespace: p.Namespace, CloneURL: "https://" + p.Host + "/" + p.Namespace + "/" + name + ".git", SSHURL: "git@" + p.Host + ":" + p.Namespace + "/" + name + ".git"}
@@ -78,8 +79,12 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 				target.GetErrors[r.Name] = provider.ErrNotFound
 			}
 		}
+		targetNamespace := local.Namespace
+		if mirrorTargetNamespace != "" {
+			targetNamespace = mirrorTargetNamespace
+		}
 		target.CreateFunc = func(project string) (*provider.Repository, error) {
-			r := repository(local, project)
+			r := provider.Repository{Name: project, Namespace: targetNamespace, CloneURL: "https://code.example/" + targetNamespace + "/" + project + ".git", SSHURL: "git@code.example:" + targetNamespace + "/" + project + ".git"}
 			return &r, nil
 		}
 		w.NewClient = func(p config.Provider, _ string) (provider.Client, error) {
@@ -452,6 +457,45 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 			return err
 		}
 		w.Run("colt mirror " + sourceAlias + " " + targetAlias + " --replace")
+		return nil
+	})
+	ctx.Step(`^I execute `+"`"+`colt mirror ([^ ]+) ([^ ]+) --target-namespace ([^ ]+)`+"`"+`$`, func(sourceAlias, targetAlias, namespace string) error {
+		mirrorTargetNamespace = namespace
+		if err := configureMirror(sourceAlias, sourceAlias, targetAlias); err != nil {
+			return err
+		}
+		w.Run("colt mirror " + sourceAlias + " " + targetAlias + " --target-namespace " + namespace)
+		return nil
+	})
+	ctx.Step(`^I execute `+"`"+`colt mirror ([^ ]+) ([^ ]+) --repository ([^ ]+)`+"`"+`$`, func(sourceAlias, targetAlias, project string) error {
+		if err := configureMirror(sourceAlias, sourceAlias, targetAlias); err != nil {
+			return err
+		}
+		w.Run("colt mirror " + sourceAlias + " " + targetAlias + " --repository " + project)
+		return nil
+	})
+	ctx.Step(`^the target repository is created in namespace other-group$`, func() error {
+		if w.RunErr != nil || target == nil || !target.Called("Create") {
+			return fmt.Errorf("target-namespace mirror did not create: %v target=%v", w.RunErr, target)
+		}
+		return nil
+	})
+	ctx.Step(`^the mirror push targets the other-group namespace$`, func() error {
+		if !strings.Contains(w.Git.PushURL, "other-group") {
+			return fmt.Errorf("push URL %q lacks target namespace", w.Git.PushURL)
+		}
+		return nil
+	})
+	ctx.Step(`^only repository repo2 is mirrored$`, func() error {
+		if w.RunErr != nil || w.Git.Pushes != 1 || !strings.Contains(w.Git.PushURL, "repo2") {
+			return fmt.Errorf("single-repo mirror incomplete: %v pushes=%d url=%q", w.RunErr, w.Git.Pushes, w.Git.PushURL)
+		}
+		return nil
+	})
+	ctx.Step(`^the other repositories are not mirrored$`, func() error {
+		if strings.Contains(w.Git.PushURL, "repo1") || strings.Contains(w.Git.PushURL, "repo3") {
+			return fmt.Errorf("unexpected extra mirror pushes: %q", w.Git.PushURL)
+		}
 		return nil
 	})
 }

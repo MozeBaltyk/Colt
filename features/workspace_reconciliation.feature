@@ -124,3 +124,19 @@ Feature: Declarative workspace reconciliation
       Then the target remote URL contains no credentials
       And the target provider URL is used
       And the source provider URL is not retained as the target push remote
+
+    @MIRROR-006
+    Scenario: Mirror --target-namespace redirects creation to another namespace
+      Given a configured fake local Gitea or Forgejo target
+      And the source provider namespace has repository "demo"
+      When I execute `colt mirror github local --target-namespace other-group`
+      Then the target repository is created in namespace other-group
+      And the mirror push targets the other-group namespace
+
+    @MIRROR-007
+    Scenario: Mirror --repository mirrors only the named repository
+      Given a configured fake local Gitea or Forgejo target
+      And the source provider namespace has three repositories
+      When I execute `colt mirror github local --repository repo2`
+      Then only repository repo2 is mirrored
+      And the other repositories are not mirrored

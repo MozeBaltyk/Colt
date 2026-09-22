@@ -15,6 +15,19 @@ Feature: Project lifecycle
     Then complete results from successful providers are returned in deterministic order
     And the independent provider failure is reported
 
+  @LIFECYCLE-LIST-001
+  Scenario: List only the requested namespace
+    Given one provider has repositories in more than one namespace
+    When I run `colt list --namespace example-namespace`
+    Then only repositories in the requested namespace are returned
+    And repositories in other namespaces are excluded
+
+  @LIFECYCLE-LIST-001
+  Scenario: List namespace rejects --all
+    Given one provider is selected by normal provider resolution
+    When I run `colt list --all --namespace example-namespace`
+    Then the command fails because --namespace cannot be combined with --all
+
   @LIFECYCLE-CLONE-001 @LIFECYCLE-CLONE-002 @LIFECYCLE-CLONE-003 @LIFECYCLE-CLONE-004 @LIFECYCLE-CLONE-006
   Scenario: Clone one unambiguous HTTPS repository safely
     Given selected-provider metadata resolves "api" to a clean authoritative URL on its configured authority without userinfo, query, or fragment

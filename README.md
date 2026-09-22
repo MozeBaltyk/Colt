@@ -26,12 +26,12 @@ colt init <project> [--local] [--provider <alias>] [--destination <path>]
 colt init <project> --template <name>[@<version>] [--set <key>=<value>]... [--local] [--provider <alias>]
 colt template list
 colt template show <name>[@<version>]
-colt list [--provider <alias> | --all]
+colt list [--provider <alias> | --all] [--namespace <namespace>]
 colt clone <repository> [--provider <alias>] [--transport https|ssh]
 colt release <version> [--provider <alias>] [--transport https|ssh]
 colt status
 colt sync [--dry-run]
-colt mirror <source-provider> <target-provider> [--namespace <namespace>] [--replace]
+colt mirror <source-provider> <target-provider> [--namespace <namespace>] [--target-namespace <namespace>] [--repository <project>] [--replace]
 colt check [--all]
 ```
 
@@ -102,7 +102,9 @@ Milestone 3 parameterized data-only templates are available. Milestone 4 workspa
 `status`, `sync`, dry-run, and one-shot provider mirroring are available. Workspace
 repositories use `<namespace>/<project>` beneath the current directory; omitted
 `include` selects all exact-namespace repositories, while `include: []` selects none.
-Mirror `--replace` force-pushes mirrored refs but never deletes the provider repository.
+Mirror `--target-namespace` writes into a different namespace on the target provider
+and `--repository` mirrors a single repository instead of the whole namespace;
+`--replace` force-pushes mirrored refs but never deletes the provider repository.
 Project health is available through `colt check [--all]` with an optional top-level
 `policy.repository` configuration containing `require`, `default_branch`, and
 `allowed_visibility`. The command is diagnostic only and returns 0 when healthy,
