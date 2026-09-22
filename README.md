@@ -1,127 +1,241 @@
 # Colt
 
-> One CLI companion for all your Git projects, across providers and throughout their lifecycle.
+**One CLI for all your Git projects — across providers, through their whole lifecycle.**
 
-Colt aims to be a provider-independent project manager for Git repositories.
+Colt is a provider-independent companion for Git repositories. It talks to GitHub.com, GitLab, Gitea, and Forgejo through their HTTP APIs for *hosting* operations (auth, repos, releases), and leaves all *repository* work to your native `git`. Clone, initialize from templates, reconcile a declared workspace, mirror between providers, run health checks — or stand up your own self-hosted Gitea/Forgejo server.
 
-With one CLI, you can connect to multiple Git hosting providers, clone repositories, reconcile a declared workspace, initialize projects from your own templates, and mirror projects between providers.
+- **Provider-neutral** — the same commands for GitHub, GitLab, Gitea, and Forgejo.
+- **Native `git` under the hood** — Colt never reimplements Git; it orchestrates it.
+- **No wrappers** — never invokes `gh`, `glab`, or `curl`, and never touches your global Git identity.
+- **Credentials stay safe** — tokens live in your OS keychain/credential store (or a referenced env var), never in URLs or `.git/config`.
 
-Colt talks directly to supported Git hosting providers through their HTTP APIs for hosting operations, while leaving repository operations to native `git`. GitHub, GitLab, Gitea, and Forgejo are currently supported.
+---
 
-The project is being built progressively. Some of the core functionality is already implemented, some M1 requirements are still marked `@unimplemented`, and the rest is organized into planned milestones.
+## Install
 
-## First MVP
+Prebuilt binaries for Linux, macOS, and Windows (amd64/arm64) are published on [GitHub Releases](https://github.com/MozeBaltyk/Colt/releases).
 
-The first MVP configures and authenticates GitHub.com, GitLab.com, self-hosted
-GitLab, and self-hosted Gitea providers, then initializes a blank project:
+```bash
+# latest release → ~/.local/bin (override with COLT_INSTALL_DIR)
+curl -fsSL https://raw.githubusercontent.com/MozeBaltyk/Colt/main/install.sh | bash
 
-```text
-colt auth login <github|gitlab|gitea|forgejo> <alias> \
-  --namespace <namespace> --git-name <name> --git-email <email> \
-  [--host <host>] [--base-url <https-url>] [--visibility <visibility>] \
-  [--token-env <environment-variable>] [--default] [--replace]
+# pin a version
+curl -fsSL https://raw.githubusercontent.com/MozeBaltyk/Colt/main/install.sh | bash -s -- v0.1.0
+```
+
+Or build from source (Go 1.27+):
+
+```bash
+CGO_ENABLED=0 go build -o colt ./cmd/colt
+```
+
+> Tip: a CGO-enabled build enables the macOS Keychain backend; without CGO you still get the cross-platform credential store and (on Linux) a consent-gated plaintext fallback.
+
+---
+
+## Quick start
+
+```bash
+# 1. Connect a provider. Example: your personal GitHub account.
+colt auth login github personal \
+  --namespace octocat \
+  --git-name "Octo Cat" \
+  --git-email octo@example.com \
+  --default
+
+# 2. Initialize a project (creates the remote, clones it locally, pushes an initial commit).
+colt init my-new-project
+
+# 3. See what's configured.
 colt auth status
-colt auth logout <alias>
-colt init <project> [--local] [--provider <alias>] [--destination <path>]
-colt init <project> --template <name>[@<version>] [--set <key>=<value>]... [--local] [--provider <alias>]
+colt list
+```
+
+`colt init` puts the remote under `<cwd>/<namespace>/<project>` and configures everything for you. To work locally without a remote:
+
+```bash
+colt init demo --local
+```
+
+---
+
+## Providers & configuration
+
+Configuration lives at `~/.config/colt/config.yaml` on Linux (respecting `$XDG_CONFIG_HOME`), and `COLT_CONFIG` overrides the whole path. `colt auth login` writes it for you, but you can hand-edit it too:
+
+```yaml
+providers:
+  personal:                      # alias you use in every command
+    type: github
+    host: github.com
+    base_url: https://api.github.com
+    namespace: octocat           # owner / org / group
+    visibility: private
+    git_name: Octo Cat
+    git_email: octo@example.com
+    transport: https             # https (default) or ssh
+    auth:
+      source: env                # or: stored
+      token_env: GITHUB_TOKEN
+    default: true                # used when --provider is omitted
+```
+
+**When do you need an alias?** Provider resolution is always, in order: explicit `--provider <alias>` → the `default:` provider → the only provider → otherwise error. Most commands take `--provider` so you can pick on the fly.
+
+**Credential sources.** `env` reads from the named variable (no fallthrough). `stored` keeps the token in your OS secure store (`keyring`/`git-credential`-style backends), falling back to a separate, consent-warned `credentials` plaintext file only when no secure backend exists. Secrets are never written into `config.yaml` or git config — only a non-secret credential ID is stored.
+
+**Git transport.** `https` authenticates through a credential helper that calls `colt` itself (keep `colt` on `PATH`). `ssh` uses your existing SSH agent/keys — Colt never reads private keys.
+
+**Custom CA (self-hosted HTTPS).** For GitLab/Gitea/Forgejo with a private CA, either set `SSL_CERT_FILE=<ca-bundle>` or pass `--ca-cert <ca-bundle>` (a global flag on every command):
+
+```bash
+colt --ca-cert ~/ca.crt list
+```
+
+---
+
+## Commands
+
+### Providers — `colt auth`
+
+```bash
+colt auth login <github|gitlab|gitea|forgejo> <alias> \
+  --namespace <owner|group> --git-name <name> --git-email <email> \
+  [--host <host>] [--base-url <url>] [--visibility <private|public>] \
+  [--token-env <var> | --credential stored] [--transport https|ssh] \
+  [--default] [--replace]
+
+colt auth status [alias] [--repository <project>] [--offline]
+colt auth logout <alias> [--revoke]
+```
+
+- `auth login` validates the credential against the provider before saving.
+- `auth status` shows every configured provider plus connection/transport checks.
+- `auth logout` removes the stored credential; `--revoke` also attempts provider-side revocation.
+
+### Initialize — `colt init`
+
+```bash
+colt init <project> [--provider <alias>] [--transport https|ssh]
+colt init <project> --local
+colt init <project> --template <name>[@<version>] [--set key=value]...
+colt init <project> --destination <path>
+```
+
+`--local` creates only the local repo. `--template` materializes a configured template scaffold. `--destination` overrides the clone path.
+
+### Templates — `colt template`
+
+```bash
 colt template list
 colt template show <name>[@<version>]
-colt list [--provider <alias> | --all] [--namespace <namespace>]
+```
+
+Templates are local, versioned directory sources (`{{parameter}}` substitution, exact `sha256:` digests). See [M3 spec](docs/specs/03-template-init.md).
+
+### List & clone — `colt list` / `colt clone`
+
+```bash
+colt list [--provider <alias> | --all] [--namespace <owner|group>]
 colt clone <repository> [--provider <alias>] [--transport https|ssh]
+```
+
+`list --namespace` scopes to one owner/group (for GitLab this targets that group directly, avoiding huge listings).
+
+### Releases — `colt release`
+
+```bash
 colt release <version> [--provider <alias>] [--transport https|ssh]
-colt status
-colt sync [--dry-run]
-colt mirror <source-provider> <target-provider> [--namespace <namespace>] [--target-namespace <namespace>] [--repository <project>] [--replace]
+```
+
+Creates a local tag, pushes it, then creates the provider release.
+
+### Workspace — `colt status` / `colt sync`
+
+Declare the repos you want checked out under `workspace:` in `config.yaml`:
+
+```yaml
+workspace:
+  repositories:
+    - provider: personal
+      namespace: octocat
+      # include: [api, web]   # optional; omit = every repo in the namespace
+    - provider: work
+      namespace: platform/tools
+```
+
+```bash
+colt status          # what's present, missing, absent, or mismatched
+colt sync [--dry-run] # clone exactly what's missing (never prunes or rewrites)
+```
+
+### Mirror — `colt mirror`
+
+One-way copy of a namespace (or a single repo) from one provider to another — handy for GitHub/GitLab → your own Gitea/Forgejo.
+
+```bash
+colt mirror <source-alias> <target-alias> \
+  [--namespace <source-ns>] [--target-namespace <target-ns>] \
+  [--repository <name>] [--replace]
+```
+
+- `--namespace` overrides the source namespace; `--target-namespace` overrides where it lands.
+- `--repository` mirrors a single repo instead of the whole namespace.
+- `--replace` force-pushes onto existing target repos (never deletes them); without it, an existing target repo fails safely.
+- Mirroring is one-way and not a continuous sync — re-run to pick up new changes.
+
+### Health — `colt check`
+
+```bash
 colt check [--all]
 ```
 
-Configuration uses Go's `os.UserConfigDir()`. On Linux, this is
-`$XDG_CONFIG_HOME/colt/config.yaml` when `XDG_CONFIG_HOME` is set, otherwise
-`~/.config/colt/config.yaml`. `COLT_CONFIG` overrides the complete path.
-Environment tokens remain in the referenced environment variables and are
-never copied. A configured `--token-env` that is missing or empty fails without
-falling through. Only when no explicit token variable was configured and no
-conventional token resolves does `auth login` prompt without echoing,
-authenticate the token, and store it in the native OS credential facility. If
-that facility is unavailable, Colt writes the separate `credentials` plaintext
-file only after an explicit warning and confirmation; non-interactive commands
-fail rather than prompt or silently fall back. Plaintext fallback is currently
-disabled on Windows pending user-only ACL validation. Provider config contains
-only the non-secret credential ID.
+Diagnostic-only checks for every selected repository. Configure expectations under `policy.repository`:
 
-`--namespace` is the repository owner in provider-native terms: a GitHub, Gitea, or Forgejo user/organization (for example `octocat` or `acme`) or a GitLab group/subgroup full path (for example `platform/tools`).
+```yaml
+policy:
+  repository:
+    require: [main]            # branches that must exist
+    default_branch: main
+    allowed_visibility: [private, internal]
+```
 
-With `--local`, Colt initializes Git directly and creates an initial commit.
-Otherwise it creates the remote through the provider API, clones it under
-`<user-home>/<namespace>/<project>`, applies repository-local identity, and
-pushes the initial commit. `--destination <path>` overrides that complete remote
-clone path; a relative path is resolved from the current directory and its
-parent must already exist. The flag is rejected with `--local`, whose current
-directory behavior is unchanged. Existing non-empty, file, and symlink
-destinations are always refused.
+Exit codes: `0` healthy, `1` findings, `2` configuration/operational error.
 
-Configured templates are local, named, versioned directory sources with an explicit default version and canonical `sha256:` content pin. Relative sources resolve from the config file directory. `template list` and `template show` inspect metadata only. Initialization validates the whole bounded source before mutation, ignores source `.git` metadata, rejects links and special files, and performs only exact `{{parameter}}` substitution in file contents and paths. Parameters must be declared as `required: true`, have a string `default`, or default to an empty string. See the [template specification](docs/specs/03-template-init.md) for the minimal YAML schema and digest format.
+### Self-hosted server — `colt run`
 
-Provider resolution is always provider-neutral, in this exact order:
+Deploy and manage your own Gitea or Forgejo server as a systemd unit (rootless):
 
-1. explicit `--provider <alias>`;
-2. the configured default provider;
-3. the only configured provider of any type;
-4. otherwise, fail and require an explicit or configured default provider.
+```bash
+colt run gitea internal --external-url https://git.example.com
+colt run status
+colt run start internal
+colt run stop internal
+colt run rm internal [--volumes]
+```
 
-Credentials resolve from an explicit environment variable with no fallthrough,
-otherwise from the conventional variable, native secure storage, then an
-already-created consented plaintext fallback. macOS Keychain support requires a
-CGO-enabled build; Windows Credential Manager remains supported without the
-Windows plaintext fallback.
-`auth logout` removes the selected stored credential from both local stores,
-preserving config, environment, SSH state, and unrelated credentials. With
-`--revoke`, Colt also attempts provider-side revocation first, reporting remote
-supported / unsupported / failed independently of the local removal outcome.
-Colt never requires `gh`, `glab`, or `curl`, and never changes global Git identity.
-Provider-independent ownership is called a **namespace**.
+---
 
-HTTPS repositories use a Git credential helper that invokes `colt` by name.
-Keep the trusted Colt executable on `PATH`; an absolute helper path is not used
-because portable shell-safe quoting across Git's supported platforms is not available.
+## Development
 
-## Planned Milestones
+```bash
+just test              # unit + acceptance (BDD) suites
+just test-bdd          # deterministic fake-backed acceptance only
+just test-integration  # real Gitea/Forgejo vertical slices (needs podman/docker)
+just compile           # build bin/colt
+```
 
-Milestone 1 includes environment and manual-token authentication, secure
-persistence with consent-only plaintext fallback, local-only logout, blank
-initialization, and HTTPS Git transport. Provider-side revocation is
-implemented, reporting remote supported/unsupported/failed independently of
-local credential removal. Production native persistence acceptance is gated
-behind the `integration` lane, characterized by a native OS keyring round-trip
-test that skips when no native credential facility is available. The real
-Colt-to-Gitea and Colt-to-Forgejo initialization and push paths are exercised in container-backed CI.
-Milestone 2 core list/clone/release primitives are available with authoritative
-transport validation, partial-release reporting, race-safe clone destination
-confinement, and hostile repository-local Git configuration rejection.
-Milestone 3 parameterized data-only templates are available. Milestone 4 workspace
-`status`, `sync`, dry-run, and one-shot provider mirroring are available. Workspace
-repositories use `<namespace>/<project>` beneath the current directory; omitted
-`include` selects all exact-namespace repositories, while `include: []` selects none.
-Mirror `--target-namespace` writes into a different namespace on the target provider
-and `--repository` mirrors a single repository instead of the whole namespace;
-`--replace` force-pushes mirrored refs but never deletes the provider repository.
-Project health is available through `colt check [--all]` with an optional top-level
-`policy.repository` configuration containing `require`, `default_branch`, and
-`allowed_visibility`. The command is diagnostic only and returns 0 when healthy,
-1 for findings, and 2 for configuration or operational failures. Its acceptance
-coverage is fake-provider-backed; it does not claim live provider coverage.
-Later planned work adds a read-only analyzer (M6). Colt is not a wrapper or replacement
-command surface for `gh` or `glab`.
+Releases are cut by pushing a `v*` tag — [the release workflow](.github/workflows/release.yml) runs the full test suite, cross-compiles binaries, and publishes them to GitHub Releases. CI runs unit + BDD + race + black-box checks on every push/PR.
 
-## Specifications
+---
 
-- [Product definition and specification order](docs/specs/product.md)
-- [Shared active-MVP requirements](docs/specs/00-core.md)
-- [First MVP: blank project initialization](docs/specs/01-project-init.md)
-- [M2: project lifecycle](docs/specs/02-project-lifecycle.md)
-- [M3: template initialization](docs/specs/03-template-init.md)
-- [M4: workspace reconciliation](docs/specs/04-workspace.md)
-- [M5: project health](docs/specs/05-project-health.md)
-- [Planned M6: analyzer](docs/specs/06-analyzer.md)
-- [Roadmap](docs/specs/90-roadmap.md)
+## Docs & specs
+
+- [Product definition](docs/specs/product.md) · [Roadmap](docs/specs/90-roadmap.md)
+- [Shared core](docs/specs/00-core.md) · [Init](docs/specs/01-project-init.md) · [Lifecycle](docs/specs/02-project-lifecycle.md)
+- [Templates](docs/specs/03-template-init.md) · [Workspace](docs/specs/04-workspace.md) · [Health](docs/specs/05-project-health.md)
 - [Acceptance specifications](features/)
+
+---
+
+Colt supports GitHub.com, self-hosted GitLab, Gitea, and Forgejo. It is not a wrapper around `gh`/`glab`, and it never changes your global Git identity.
