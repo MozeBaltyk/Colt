@@ -206,6 +206,8 @@ func initCause(err error, transport, step string) (string, string) {
 		return "SSH host-key verification failed", "verify the provider host key through a trusted channel, update known_hosts safely, then retry"
 	case (step == "Resolve provider API credential" || step == "Authenticate provider API" || step == "Look up remote repository" || step == "Create remote repository") && (strings.Contains(text, "bad credentials") || strings.Contains(text, "authentication failed") || strings.Contains(text, "authentication required") || strings.Contains(text, "http 401")):
 		return "provider authentication rejected", "run 'colt auth status' and re-authenticate the selected provider if its credential is rejected"
+	case strings.Contains(text, "certificate") || strings.Contains(text, "self-signed") || strings.Contains(text, "tls") || strings.Contains(text, "ssl"):
+		return "TLS certificate verification failed", "trust the provider's CA bundle — set SSL_CERT_FILE to its CA file or pass --ca-cert — then retry"
 	case strings.Contains(text, "could not resolve host") || strings.Contains(text, "connection refused") || strings.Contains(text, "connection timed out") || strings.Contains(text, "network is unreachable") || strings.Contains(text, "no route to host") || strings.Contains(text, "remote hung up"):
 		return "connectivity failure", "check provider connectivity, then retry the failed operation"
 	default:

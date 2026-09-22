@@ -511,7 +511,7 @@ func (w *giteaWorld) start() error {
 }
 
 func (w *giteaWorld) initialize(project string) error {
-	cmd := exec.Command(w.binary, "init", project)
+	cmd := exec.Command(w.binary, "init", project, "--ca-cert", w.ca)
 	cmd.Dir = w.dir
 	output, err := cmd.CombinedOutput()
 	w.output = string(output)
@@ -647,7 +647,7 @@ func (w *forgejoWorld) start() error {
 }
 
 func (w *forgejoWorld) initialize(project string) error {
-	cmd := exec.Command(w.binary, "init", project)
+	cmd := exec.Command(w.binary, "init", project, "--ca-cert", w.ca)
 	cmd.Dir = w.dir
 	output, err := cmd.CombinedOutput()
 	w.output = string(output)

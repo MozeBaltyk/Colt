@@ -80,8 +80,44 @@ func (a *App) Root() *cobra.Command {
 	}
 	root.PersistentFlags().Bool("noninteractive", false, "disable interactive prompts and authorization flows")
 	root.PersistentFlags().BoolP("verbose", "v", false, "print additional non-secret diagnostics")
+	root.PersistentFlags().String("ca-cert", "", "trust this CA bundle for HTTPS (overrides SSL_CERT_FILE)")
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		ca, err := cmd.Flags().GetString("ca-cert")
+		if err != nil {
+			return err
+		}
+		if err := applyCABundle(ca); err != nil {
+			return fmt.Errorf("invalid --ca-cert: %w", err)
+		}
+		return nil
+	}
 	root.AddCommand(a.authCommand(), a.initCommand(), a.templateCommand(), a.listCommand(), a.cloneCommand(), a.releaseCommand(), a.workspaceStatusCommand(), a.syncCommand(), a.mirrorCommand(), a.checkCommand(), a.runCommand(), a.gitCredentialCommand())
 	return root
+}
+
+// applyCABundle validates a --ca-cert path and stores it in SSL_CERT_FILE so
+// both the provider API client (Go's crypto/x509 honors SSL_CERT_FILE on Unix)
+// and the native Git layer (which forwards it as http.sslCAInfo) trust the CA.
+// An empty path leaves any existing SSL_CERT_FILE untouched.
+func applyCABundle(path string) error {
+	if path == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("CA bundle must be a regular file")
+	}
+	if strings.ContainsAny(abs, "\r\n") {
+		return errors.New("CA bundle path must not contain line breaks")
+	}
+	return os.Setenv("SSL_CERT_FILE", abs)
 }
 
 func verbose(cmd *cobra.Command) bool {

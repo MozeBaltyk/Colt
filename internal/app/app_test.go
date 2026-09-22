@@ -1351,6 +1351,7 @@ func TestINIT_011CauseClassification(t *testing.T) {
 		{"Host key verification failed", "SSH host-key verification failed", "known_hosts", "ssh", "Push initial commit"},
 		{"HTTP 401: Bad credentials", "provider authentication rejected", "re-authenticate", "https", "Authenticate provider API"},
 		{"fatal: unable to access: Could not resolve host", "connectivity failure", "connectivity", "https", "Push initial commit"},
+		{"fatal: server certificate verification failed. CAfile: none", "TLS certificate verification failed", "CA bundle", "https", "Clone remote repository"},
 		{"push rejected for an unspecified reason", "unknown failure", "preserved state", "", "Push initial commit"},
 	} {
 		cause, advice := initCause(errors.New(tc.evidence), tc.transport, tc.step)
@@ -1361,6 +1362,29 @@ func TestINIT_011CauseClassification(t *testing.T) {
 	cause, advice := initCause(errors.New("absolute transient helper returned exit 1"), "https", "Push initial commit")
 	if cause != "unknown failure" || strings.Contains(strings.ToLower(advice), "path") {
 		t.Fatalf("unsupported PATH claim: cause=%q advice=%q", cause, advice)
+	}
+}
+
+func TestApplyCABundle(t *testing.T) {
+	if err := applyCABundle(""); err != nil {
+		t.Fatalf("empty CA bundle: %v", err)
+	}
+	dir := t.TempDir()
+	ca := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(ca, []byte("cert"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyCABundle(ca); err != nil {
+		t.Fatalf("valid bundle: %v", err)
+	}
+	if got := os.Getenv("SSL_CERT_FILE"); got != ca {
+		t.Fatalf("SSL_CERT_FILE = %q, want %q", got, ca)
+	}
+	if err := applyCABundle(filepath.Join(dir, "missing.pem")); err == nil {
+		t.Fatal("missing bundle accepted")
+	}
+	if err := applyCABundle(dir); err == nil {
+		t.Fatal("directory accepted as CA bundle")
 	}
 }
 
