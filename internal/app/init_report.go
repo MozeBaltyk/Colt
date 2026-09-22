@@ -213,7 +213,7 @@ func initCause(err error, transport, step string) (string, string) {
 	default:
 		detail := strings.ReplaceAll(strings.TrimSpace(evidence.String()), "\n", "; ")
 		if len(detail) > 300 {
-			detail = detail[:300] + "…"
+			detail = "…" + detail[len(detail)-300:]
 		}
 		return "unknown failure", "inspect the preserved state and retry after correcting the reported operation (" + detail + ")"
 	}
