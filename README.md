@@ -225,7 +225,52 @@ just test-integration  # real Gitea/Forgejo vertical slices (needs podman/docker
 just compile           # build bin/colt
 ```
 
-Releases are cut by pushing a `v*` tag — [the release workflow](.github/workflows/release.yml) runs the full test suite, cross-compiles binaries, and publishes them to GitHub Releases. CI runs unit + BDD + race + black-box checks on every push/PR.
+CI runs unit + BDD + race + black-box checks on every push/PR.
+
+### Releasing a new version
+
+Versions are [semver](https://semver.org) tags of the form `v<major>.<minor>.<patch>`. The version comes from the tag (injected into the binary at release time), so there is nothing to edit in the code before releasing — just tag and push.
+
+1. Make sure `main` is green and everything you want to ship is committed and pushed:
+
+   ```bash
+   git push origin main
+   ```
+
+2. Tag the commit you want to release (usually `HEAD`):
+
+   ```bash
+   git tag -a v0.2.0 -m "v0.2.0"
+   git push origin v0.2.0
+   ```
+
+3. Pushing the tag triggers [the release workflow](.github/workflows/release.yml). It runs the full test suite (`just test`) as a gate, then cross-compiles `colt` for Linux/macOS/Windows (amd64/arm64), generates SHA-256 checksums, and publishes them as a GitHub Release.
+
+4. Watch it finish:
+
+   ```bash
+   gh run watch
+   ```
+
+5. Verify:
+
+   ```bash
+   gh release view v0.2.0
+   curl -fsSL https://raw.githubusercontent.com/MozeBaltyk/Colt/main/install.sh | bash -s -- v0.2.0
+   colt --version          # → colt version v0.2.0
+   ```
+
+Notes:
+
+- Tags must start with `v` (`on: push: tags: ['v*']`).
+- A failed release publishes nothing — fix the failure and re-tag.
+- Release tags do **not** re-run the CI matrix (CI is branch/PR only).
+- To re-do a tag you pushed by mistake, delete it first, then re-create:
+
+  ```bash
+  git push --delete origin v0.2.0
+  git tag -d v0.2.0
+  ```
 
 ---
 
