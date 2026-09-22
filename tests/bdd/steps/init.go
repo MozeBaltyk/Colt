@@ -20,6 +20,23 @@ import (
 	"github.com/cucumber/godog"
 )
 
+// buildEnv returns the process environment without the sandbox proxy variables.
+// The in-scenario helper build must not inherit the refuse-all sandbox proxy
+// (http://127.0.0.1:1), otherwise "go build" cannot reach the module cache or
+// the default Go proxy on a cold CI cache.
+func buildEnv() []string {
+	var env []string
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		switch name {
+		case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy":
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
+}
+
 func remoteProjectDir(w *fixture.World) string {
 	for _, p := range w.Providers {
 		return filepath.Join(w.Dir, filepath.FromSlash(p.Namespace), "demo")
@@ -729,6 +746,7 @@ func RegisterInitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		buildCtx, cancelBuild := context.WithTimeout(context.Background(), fixture.CommandTimeout)
 		defer cancelBuild()
 		build := exec.CommandContext(buildCtx, "go", "build", "-o", binary, "../../cmd/colt")
+		build.Env = buildEnv()
 		if output, err := build.CombinedOutput(); err != nil {
 			return fmt.Errorf("build Colt helper: %v: %s", err, output)
 		}
