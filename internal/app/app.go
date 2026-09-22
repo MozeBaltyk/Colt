@@ -19,6 +19,7 @@ import (
 	gitnative "github.com/MozeBaltyk/Colt/internal/git"
 	"github.com/MozeBaltyk/Colt/internal/provider"
 	templating "github.com/MozeBaltyk/Colt/internal/template"
+	"github.com/MozeBaltyk/Colt/internal/version"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -74,6 +75,7 @@ func (a *App) Root() *cobra.Command {
 	root := &cobra.Command{
 		Use:               "colt",
 		Short:             "Initialize provider-independent Git projects",
+		Version:           version.Version,
 		SilenceUsage:      true,
 		SilenceErrors:     true,
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},

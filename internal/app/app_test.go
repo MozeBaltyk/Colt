@@ -1389,6 +1389,20 @@ func TestApplyCABundle(t *testing.T) {
 	}
 }
 
+func TestRootVersionFlag(t *testing.T) {
+	a := &App{ConfigPath: filepath.Join(t.TempDir(), "config.yaml")}
+	var out bytes.Buffer
+	cmd := a.Root()
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--version"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("version: %v", err)
+	}
+	if !strings.Contains(out.String(), "version devel") {
+		t.Fatalf("version output = %q", out.String())
+	}
+}
+
 func TestINIT_011CloneFailureMarksLaterStepsSkipped(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
