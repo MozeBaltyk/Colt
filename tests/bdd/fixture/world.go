@@ -114,6 +114,23 @@ func UnsetCredentialEnv() error {
 	return unsetErr
 }
 
+// BuildEnv returns the process environment without the sandbox proxy variables.
+// Subprocesses that must reach the module cache or the default Go proxy (for
+// example, building the colt helper binary inside a scenario) must not inherit
+// the refuse-all sandbox proxy (http://127.0.0.1:1).
+func BuildEnv() []string {
+	var env []string
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		switch name {
+		case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy":
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
+}
+
 func (w *World) Reset(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()

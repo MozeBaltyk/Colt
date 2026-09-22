@@ -34,6 +34,7 @@ func RegisterCoreGitSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	buildBinary := func() error {
 		bin := filepath.Join(w.Dir, "colt")
 		build := exec.Command("go", "build", "-o", bin, "../../cmd/colt")
+		build.Env = fixture.BuildEnv()
 		if out, err := build.CombinedOutput(); err != nil {
 			return fmt.Errorf("build colt helper: %v: %s", err, out)
 		}

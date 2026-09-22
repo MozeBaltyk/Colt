@@ -237,6 +237,7 @@ func RegisterLifecycleSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	ctx.Step(`^I run ordinary "git fetch" without invoking Colt$`, func() error {
 		binary := filepath.Join(w.Dir, "colt")
 		build := exec.Command("go", "build", "-o", binary, "../../cmd/colt")
+		build.Env = fixture.BuildEnv()
 		if output, err := build.CombinedOutput(); err != nil {
 			return fmt.Errorf("build helper: %v: %s", err, output)
 		}
