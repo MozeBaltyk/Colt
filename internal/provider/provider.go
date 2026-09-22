@@ -159,6 +159,7 @@ func (c *client) authenticate(ctx context.Context, path string) (string, error) 
 
 type repositoryResponse struct {
 	Name          string `json:"name"`
+	Path          string `json:"path"`
 	FullName      string `json:"full_name"`
 	PathNamespace string `json:"path_with_namespace"`
 	Owner         struct {
@@ -244,7 +245,7 @@ func (c *client) repository(result repositoryResponse) (*Repository, error) {
 		path = strings.TrimSuffix(path, ".git")
 		parts := strings.Split(path, "/")
 		if len(parts) < 2 || !config.ValidProjectName(parts[len(parts)-1]) {
-			return nil, errors.New("provider returned an invalid repository identity")
+			return nil, fmt.Errorf("provider returned an invalid repository identity for %q", clone)
 		}
 		name, namespace := parts[len(parts)-1], strings.Join(parts[:len(parts)-1], "/")
 		for _, part := range parts[:len(parts)-1] {
@@ -259,7 +260,11 @@ func (c *client) repository(result repositoryResponse) (*Repository, error) {
 		if metadataPath != "" && metadataPath != namespace+"/"+name {
 			return nil, errors.New("provider returned inconsistent repository identity")
 		}
-		if result.Name != "" && result.Name != name {
+		slug := result.Name
+		if c.settings.Type == "gitlab" && result.Path != "" {
+			slug = result.Path
+		}
+		if slug != "" && slug != name {
 			return nil, errors.New("provider returned inconsistent repository name")
 		}
 		owner := result.Owner.Login

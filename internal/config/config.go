@@ -95,6 +95,7 @@ const (
 )
 
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
+var projectNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$`)
 var envRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var namespacePartRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 var parameterRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
@@ -755,5 +756,5 @@ func Save(path string, cfg Config) error {
 }
 
 func ValidProjectName(name string) bool {
-	return nameRE.MatchString(name) && name != "." && name != ".." && name != ".git"
+	return projectNameRE.MatchString(name) && name != "." && name != ".." && name != ".git"
 }

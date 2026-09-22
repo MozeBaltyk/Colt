@@ -221,3 +221,66 @@ func TestMIRROR_001_005ConflictAndReplace(t *testing.T) {
 		t.Fatal("credential leaked into Git arguments")
 	}
 }
+
+func TestMIRROR_002TargetNamespaceAndRepositoryFilter(t *testing.T) {
+	root := t.TempDir()
+	source, target := workspaceProvider("github", "source"), workspaceProvider("gitlab", "target")
+	path := filepath.Join(root, "config.yaml")
+	writeWorkspaceConfig(t, path, map[string]config.Provider{"source": source, "target": target})
+	sourceClient := &fakeClient{listRepos: []provider.Repository{
+		workspaceRepo(source.Host, source.Namespace, "keep"),
+		workspaceRepo(source.Host, source.Namespace, "skip"),
+	}}
+	targetClient := &mirrorTarget{provider: target}
+	runner := &fakeGit{}
+	a := testApp(path, root, runner, sourceClient)
+	var resolvedTarget config.Provider
+	a.NewClient = func(p config.Provider, _ string) (provider.Client, error) {
+		if p.Type == target.Type {
+			resolvedTarget = p
+			targetClient.provider = p
+			return targetClient, nil
+		}
+		return sourceClient, nil
+	}
+	output, err := execute(t, a, "mirror", "source", "target", "--repository", "keep", "--target-namespace", "other/group")
+	if err != nil || !strings.Contains(output, "mirrored keep") || strings.Contains(output, "mirrored skip") {
+		t.Fatalf("mirror=%q err=%v", output, err)
+	}
+	if resolvedTarget.Namespace != "other/group" {
+		t.Fatalf("target namespace = %q", resolvedTarget.Namespace)
+	}
+	if _, err := execute(t, a, "mirror", "source", "target", "--repository", "missing"); err == nil {
+		t.Fatalf("missing repository filter should error")
+	}
+}
+
+type caseFoldTarget struct {
+	mirrorTarget
+}
+
+func (c *caseFoldTarget) Create(_ context.Context, project string, _ ...string) (*provider.Repository, error) {
+	r := workspaceRepo(c.provider.Host, c.provider.Namespace, strings.ToLower(project))
+	return &r, nil
+}
+
+func TestMIRROR_003TargetNameMatchingIsCaseInsensitive(t *testing.T) {
+	root := t.TempDir()
+	source, target := workspaceProvider("github", "source"), workspaceProvider("gitlab", "target")
+	path := filepath.Join(root, "config.yaml")
+	writeWorkspaceConfig(t, path, map[string]config.Provider{"source": source, "target": target})
+	sourceClient := &fakeClient{listRepos: []provider.Repository{workspaceRepo(source.Host, source.Namespace, "Deployment")}}
+	targetClient := &caseFoldTarget{mirrorTarget{provider: target}}
+	runner := &fakeGit{}
+	a := testApp(path, root, runner, sourceClient)
+	a.NewClient = func(p config.Provider, _ string) (provider.Client, error) {
+		if p.Type == target.Type {
+			return targetClient, nil
+		}
+		return sourceClient, nil
+	}
+	output, err := execute(t, a, "mirror", "source", "target")
+	if err != nil || !strings.Contains(output, "mirrored Deployment") {
+		t.Fatalf("mirror=%q err=%v", output, err)
+	}
+}

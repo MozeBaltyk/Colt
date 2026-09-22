@@ -132,6 +132,32 @@ func TestCORE_PROVIDER_003GitLabConfiguredBaseAndSafeNamespace(t *testing.T) {
 	}
 }
 
+func TestGitLabListAcceptsDisplayNameDifferingFromPath(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v4/namespaces/team/sub":
+			fmt.Fprint(w, `{"id":42,"kind":"group","full_path":"team/sub"}`)
+		case "/api/v4/groups/42/projects":
+			fmt.Fprintf(w, `[{"name":"My Project","path":"my-project","path_with_namespace":"team/sub/my-project","http_url_to_repo":%q}]`, server.URL+"/team/sub/my-project.git")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := New(testSettings("gitlab", server.URL), "lab-token", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repos, err := client.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() = %v", err)
+	}
+	if len(repos) != 1 || repos[0].Name != "my-project" || repos[0].Namespace != "team/sub" {
+		t.Fatalf("List() = %#v", repos)
+	}
+}
+
 func TestCreateVisibilityOverridePayloadForEveryProvider(t *testing.T) {
 	for _, kind := range []string{"github", "gitlab", "gitea", "forgejo"} {
 		t.Run(kind, func(t *testing.T) {

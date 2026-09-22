@@ -1012,19 +1012,22 @@ func TestINIT_007SSHRemoteWorkflowUsesNoHTTPAuthentication(t *testing.T) {
 func TestCORE_GIT_003SSHRepositoryValidationIsExact(t *testing.T) {
 	p := appProvider()
 	for _, tc := range []struct {
-		url  string
-		want bool
+		url, project string
+		want         bool
 	}{
-		{"git@gitlab.com:team/demo.git", true},
-		{"alice@gitlab.com:team/demo.git", false},
-		{"git@evil.example:team/demo.git", false},
-		{"git@gitlab.com:other/demo.git", false},
-		{"git@gitlab.com:team/other.git", true},
-		{"git@gitlab.com:team/demo", false},
-		{"ssh://git@gitlab.com/team/demo.git", false},
+		{"git@gitlab.com:team/demo.git", "demo", true},
+		{"alice@gitlab.com:team/demo.git", "", false},
+		{"git@evil.example:team/demo.git", "", false},
+		{"git@gitlab.com:other/demo.git", "", false},
+		{"git@gitlab.com:team/other.git", "other", true},
+		{"git@gitlab.com:team/demo", "", false},
+		{"ssh://git@gitlab.com/team/demo.git", "demo", true},
+		{"ssh://git@gitlab.com:2222/team/demo.git", "demo", true},
+		{"ssh://alice@gitlab.com/team/demo.git", "", false},
+		{"ssh://git@evil.example/team/demo.git", "", false},
 	} {
 		project, ok := cleanSSHRepository(tc.url, p)
-		if ok != tc.want || ok && project != strings.TrimSuffix(strings.TrimPrefix(tc.url, "git@gitlab.com:team/"), ".git") {
+		if ok != tc.want || ok && project != tc.project {
 			t.Fatalf("cleanSSHRepository(%q) = %q, %v", tc.url, project, ok)
 		}
 	}
@@ -2509,6 +2512,65 @@ func TestLIST_004NoProvidersConfiguredFails(t *testing.T) {
 	_, err := execute(t, testApp(path, "", &fakeGit{}, &fakeClient{}), "list")
 	if err == nil {
 		t.Fatal("expected error for no providers")
+	}
+}
+
+func TestLIST_005NamespaceOverridesProviderNamespace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	p := storedProvider("personal")
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": p}}); err != nil {
+		t.Fatal(err)
+	}
+	store := &recordingStore{credentials: map[string]credential.Credential{
+		"github.com/personal": {Kind: "bearer_token", Secret: "secret"},
+	}}
+	client := &fakeClient{listRepos: []provider.Repository{{CloneURL: "https://github.com/user/demo.git"}}}
+	var got config.Provider
+	_, err := execute(t, &App{ConfigPath: path, Credentials: store, Git: &fakeGit{}, NewClient: func(p config.Provider, _ string) (provider.Client, error) {
+		got = p
+		return client, nil
+	}}, "list", "--namespace", "other")
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	if got.Namespace != "other" {
+		t.Fatalf("namespace = %q", got.Namespace)
+	}
+}
+
+func TestLIST_006NamespaceRejectsAll(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": storedProvider("personal")}}); err != nil {
+		t.Fatal(err)
+	}
+	store := &recordingStore{credentials: map[string]credential.Credential{
+		"github.com/personal": {Kind: "bearer_token", Secret: "secret"},
+	}}
+	_, err := execute(t, &App{ConfigPath: path, Credentials: store, Git: &fakeGit{}, NewClient: func(config.Provider, string) (provider.Client, error) { return &fakeClient{}, nil }}, "list", "--all", "--namespace", "other")
+	if err == nil || !strings.Contains(err.Error(), "--namespace cannot be combined with --all") {
+		t.Fatalf("expected namespace/all conflict, got %v", err)
+	}
+}
+
+func TestLIST_007NamespaceFiltersListing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	p := storedProvider("personal")
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"personal": p}}); err != nil {
+		t.Fatal(err)
+	}
+	store := &recordingStore{credentials: map[string]credential.Credential{
+		"github.com/personal": {Kind: "bearer_token", Secret: "secret"},
+	}}
+	client := &fakeClient{listRepos: []provider.Repository{
+		{Name: "keep", Namespace: "keep", CloneURL: "https://github.com/keep/keep.git"},
+		{Name: "skip", Namespace: "skip", CloneURL: "https://github.com/skip/skip.git"},
+	}}
+	output, err := execute(t, &App{ConfigPath: path, Credentials: store, Git: &fakeGit{}, NewClient: func(config.Provider, string) (provider.Client, error) { return client, nil }}, "list", "--namespace", "keep")
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	if !strings.Contains(output, "github.com/keep/keep.git") || strings.Contains(output, "github.com/skip/skip.git") {
+		t.Fatalf("filtered output = %q", output)
 	}
 }
 

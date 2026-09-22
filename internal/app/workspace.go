@@ -262,7 +262,7 @@ func repositoryIdentity(repository provider.Repository, p config.Provider) (stri
 		urlProvider := p
 		urlProvider.Namespace = namespace
 		if sshName, valid := cleanSSHRepository(repository.SSHURL, urlProvider); !valid || sshName != name {
-			return "", "", errors.New("unexpected SSH clone target")
+			return "", "", fmt.Errorf("unexpected SSH clone target %q", repository.SSHURL)
 		}
 	}
 	return name, namespace, nil
@@ -413,16 +413,20 @@ func ensureWorkspaceParents(root *os.Root, parent string) error {
 
 func (a *App) mirrorCommand() *cobra.Command {
 	namespace := ""
+	targetNamespace := ""
+	repoName := ""
 	replace := false
 	cmd := &cobra.Command{Use: "mirror <source-provider> <target-provider>", Short: "Mirror a provider namespace once", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
-		return a.mirror(cmd, args[0], args[1], namespace, replace)
+		return a.mirror(cmd, args[0], args[1], namespace, targetNamespace, repoName, replace)
 	}}
 	cmd.Flags().StringVar(&namespace, "namespace", "", "source namespace (defaults to the source provider namespace)")
+	cmd.Flags().StringVar(&targetNamespace, "target-namespace", "", "target namespace (defaults to the target provider namespace)")
+	cmd.Flags().StringVar(&repoName, "repository", "", "mirror only this repository name")
 	cmd.Flags().BoolVar(&replace, "replace", false, "force source refs onto existing target repositories")
 	return cmd
 }
 
-func (a *App) mirror(cmd *cobra.Command, sourceAlias, targetAlias, namespace string, replace bool) error {
+func (a *App) mirror(cmd *cobra.Command, sourceAlias, targetAlias, namespace, targetNamespace, repoName string, replace bool) error {
 	if sourceAlias == targetAlias {
 		return errors.New("source and target providers must be distinct")
 	}
@@ -444,6 +448,15 @@ func (a *App) mirror(cmd *cobra.Command, sourceAlias, targetAlias, namespace str
 	source.Namespace = namespace
 	if err := config.ValidateProvider(sourceAlias, source); err != nil {
 		return fmt.Errorf("invalid source namespace: %w", err)
+	}
+	if repoName != "" && !config.ValidProjectName(repoName) {
+		return errors.New("invalid --repository; use 1-255 letters, digits, '.', '_' or '-' and no path separators")
+	}
+	if targetNamespace != "" {
+		target.Namespace = targetNamespace
+		if err := config.ValidateProvider(targetAlias, target); err != nil {
+			return fmt.Errorf("invalid target namespace: %w", err)
+		}
 	}
 	sourceToken, _, err := config.Token(source, a.credentialStore())
 	if err != nil {
@@ -476,6 +489,7 @@ func (a *App) mirror(cmd *cobra.Command, sourceAlias, targetAlias, namespace str
 		return err
 	}
 	var failures []string
+	matched := 0
 	for _, repository := range repositories {
 		name, repoNamespace, validationErr := repositoryIdentity(repository, source)
 		if validationErr != nil {
@@ -485,12 +499,19 @@ func (a *App) mirror(cmd *cobra.Command, sourceAlias, targetAlias, namespace str
 		if !namespaceMatches(strings.Split(repoNamespace, "/"), strings.Split(namespace, "/"), source.Type) {
 			continue
 		}
+		if repoName != "" && name != repoName {
+			continue
+		}
+		matched++
 		if err := a.mirrorRepository(cmd.Context(), sourceAlias, targetAlias, name, source, target, repository, targetClient, replace, providerTokenEnvNames(cfg)); err != nil {
 			failures = append(failures, name+": "+err.Error())
 			fmt.Fprintf(cmd.OutOrStdout(), "failed %s: %v\n", name, err)
 			continue
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "mirrored %s\n", name)
+	}
+	if repoName != "" && matched == 0 {
+		return fmt.Errorf("repository %q not found in source namespace %q", repoName, namespace)
 	}
 	if len(failures) != 0 {
 		return fmt.Errorf("mirror incomplete: %d repositories failed", len(failures))
@@ -538,8 +559,11 @@ func (a *App) mirrorRepository(ctx context.Context, sourceAlias, targetAlias, pr
 		return errors.New("target provider returned no repository")
 	}
 	targetName, _, err := validatedRepository(*targetRepository, target)
-	if err != nil || targetName != project {
-		return errors.New("target provider returned an unexpected repository")
+	if err != nil {
+		return fmt.Errorf("target provider returned an invalid repository: %w", err)
+	}
+	if !strings.EqualFold(targetName, project) {
+		return fmt.Errorf("target provider returned repository %q for %q", targetName, project)
 	}
 	targetTransport := target.Transport
 	if targetTransport == "" {

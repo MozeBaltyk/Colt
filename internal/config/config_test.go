@@ -510,3 +510,12 @@ func TestTEMPLATE_SOURCE_001RejectsNonStringYAMLValues(t *testing.T) {
 		}
 	}
 }
+
+func TestValidProjectNameAllowsGitLabLengthUpTo255(t *testing.T) {
+	if !ValidProjectName("a" + strings.Repeat("b", 254)) {
+		t.Fatal("255-character project name rejected")
+	}
+	if ValidProjectName("a" + strings.Repeat("b", 255)) {
+		t.Fatal("256-character project name accepted")
+	}
+}

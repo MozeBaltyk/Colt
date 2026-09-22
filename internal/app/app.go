@@ -390,7 +390,7 @@ func (a *App) authCommand() *cobra.Command {
 					return errors.New("--offline and --repository cannot be used together; omit one")
 				}
 				if !config.ValidProjectName(repository) {
-					return errors.New("invalid --repository; use 1-100 letters, digits, '.', '_' or '-' and no path separators")
+					return errors.New("invalid --repository; use 1-255 letters, digits, '.', '_' or '-' and no path separators")
 				}
 			}
 			return a.providerStatus(cmd, args, repository)
@@ -1136,13 +1136,17 @@ func (a *App) initCommand() *cobra.Command {
 func (a *App) listCommand() *cobra.Command {
 	all := false
 	providerAlias := ""
+	namespace := ""
 	cmd := &cobra.Command{
-		Use:   "list [repository]",
+		Use:   "list",
 		Short: "List repositories from a provider",
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if a.pathErr != nil {
 				return a.pathErr
+			}
+			if namespace != "" && all {
+				return errors.New("--namespace cannot be combined with --all")
 			}
 			cfg, err := config.Load(a.ConfigPath)
 			if err != nil {
@@ -1170,6 +1174,12 @@ func (a *App) listCommand() *cobra.Command {
 			anyOK := false
 			for _, alias := range aliases {
 				p := cfg.Providers[alias]
+				if namespace != "" {
+					p.Namespace = namespace
+					if err := config.ValidateProvider(alias, p); err != nil {
+						return fmt.Errorf("invalid --namespace: %w", err)
+					}
+				}
 				token, _, err := config.Token(p, a.credentialStore())
 				if err != nil {
 					if all {
@@ -1194,6 +1204,15 @@ func (a *App) listCommand() *cobra.Command {
 					}
 					return err
 				}
+				if namespace != "" {
+					filtered := repos[:0]
+					for _, repo := range repos {
+						if namespaceMatches(strings.Split(repo.Namespace, "/"), strings.Split(namespace, "/"), p.Type) {
+							filtered = append(filtered, repo)
+						}
+					}
+					repos = filtered
+				}
 				sort.Slice(repos, func(i, j int) bool {
 					return repos[i].CloneURL < repos[j].CloneURL
 				})
@@ -1210,6 +1229,7 @@ func (a *App) listCommand() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "list repositories from every configured provider")
 	cmd.Flags().StringVar(&providerAlias, "provider", "", "provider alias")
+	cmd.Flags().StringVar(&namespace, "namespace", "", "namespace to list (defaults to the provider's configured namespace)")
 	return cmd
 }
 
@@ -1226,7 +1246,7 @@ func (a *App) cloneCommand() *cobra.Command {
 			}
 			project := args[0]
 			if !config.ValidProjectName(project) {
-				return errors.New("invalid project name; use 1-100 letters, digits, '.', '_' or '-' and no path separators")
+				return errors.New("invalid project name; use 1-255 letters, digits, '.', '_' or '-' and no path separators")
 			}
 			cfg, err := config.Load(a.ConfigPath)
 			if err != nil {
@@ -1449,7 +1469,7 @@ func (a *App) initialize(cmd *cobra.Command, project string, opts initOptions) (
 		return a.pathErr
 	}
 	if !config.ValidProjectName(project) {
-		return errors.New("invalid project name; use 1-100 letters, digits, '.', '_' or '-' and no path separators")
+		return errors.New("invalid project name; use 1-255 letters, digits, '.', '_' or '-' and no path separators")
 	}
 	if opts.local && opts.destination != "" {
 		return errors.New("--destination applies only to remote initialization; omit it with --local")
@@ -1780,12 +1800,24 @@ func validateWorkDir(path string) error {
 }
 
 func cleanSSHRepository(raw string, p config.Provider) (string, bool) {
-	prefix := "git@"
-	if !strings.HasPrefix(raw, prefix) {
-		return "", false
+	host, path := "", ""
+	if u, err := url.Parse(raw); err == nil && u.Scheme == "ssh" {
+		if u.User.Username() != "git" {
+			return "", false
+		}
+		host = u.Hostname()
+		path = strings.TrimPrefix(u.Path, "/")
+	} else {
+		if !strings.HasPrefix(raw, "git@") {
+			return "", false
+		}
+		authority, rest, ok := strings.Cut(strings.TrimPrefix(raw, "git@"), ":")
+		if !ok {
+			return "", false
+		}
+		host, path = authority, rest
 	}
-	authority, path, ok := strings.Cut(strings.TrimPrefix(raw, prefix), ":")
-	if !ok || !strings.EqualFold(authority, p.Host) {
+	if !strings.EqualFold(host, p.Host) {
 		return "", false
 	}
 	parts := strings.Split(path, "/")
