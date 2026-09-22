@@ -114,12 +114,13 @@ func UnsetCredentialEnv() error {
 	return unsetErr
 }
 
-// BuildEnv returns the process environment without the sandbox proxy variables.
-// Subprocesses that must reach the module cache or the default Go proxy (for
-// example, building the colt helper binary inside a scenario) must not inherit
-// the refuse-all sandbox proxy (http://127.0.0.1:1).
-func BuildEnv() []string {
-	var env []string
+// buildEnvCache captures the process environment before any scenario redirects
+// HOME or injects the sandbox proxy. Helper builds reuse it so "go build"
+// reaches the warm module/build caches and the default Go proxy instead of
+// downloading into the sandbox home — which is slow and breaks TempDir cleanup
+// on Go's read-only module-cache files.
+var buildEnvCache = func() []string {
+	env := make([]string, 0, len(os.Environ())+2)
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
 		switch name {
@@ -129,6 +130,14 @@ func BuildEnv() []string {
 		env = append(env, entry)
 	}
 	return env
+}()
+
+// BuildEnv returns a clean environment (the original process environment
+// without the sandbox proxy variables and sandbox HOME) for subprocesses that
+// must reach the real module cache or the default Go proxy — for example,
+// building the colt helper binary inside a scenario.
+func BuildEnv() []string {
+	return buildEnvCache
 }
 
 func (w *World) Reset(t *testing.T) {
