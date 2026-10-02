@@ -202,6 +202,14 @@ policy:
 
 Exit codes: `0` healthy, `1` findings, `2` configuration/operational error.
 
+### Analyze — `colt analyze`
+
+```bash
+colt analyze [path] [--format summary|json|yaml] [--output inventory.yaml]
+```
+
+Read-only inventory of a repository: identity, sanitized remote, and detected package ecosystems (from known manifest files). `--format yaml` prints the canonical `inventory.yaml`; `summary` and `json` are derived views over the same data. It never executes repository content or exposes secrets.
+
 ### Self-hosted server — `colt run`
 
 Deploy and manage your own Gitea or Forgejo server as a systemd unit (rootless):
@@ -289,7 +297,7 @@ Colt supports GitHub.com, self-hosted GitLab, Gitea, and Forgejo. It is not a wr
 
 ## Roadmaps
 
-### Shipped (v0.3.0)
+### Shipped
 
 - **Provider auth** — GitHub, GitLab, Gitea, Forgejo: env + stored credentials, GitHub Device Flow, provider-side revocation
 - **Project lifecycle** — `init`, `list`, `clone`, `release`
@@ -297,15 +305,16 @@ Colt supports GitHub.com, self-hosted GitLab, Gitea, and Forgejo. It is not a wr
 - **Workspace** — declared `workspace:` reconciliation: `status`, `sync`, one-shot `mirror`
 - **Health** — read-only policy checks (`colt check`)
 - **Self-hosted server** — `colt run` Gitea/Forgejo (systemd + podman, rootless)
+- **Analyzer (M6)** — read-only repository inventory (`colt analyze`) with derived `summary`/`json`/`yaml` reports; never executes repository content
 
 ### Planned — big milestones
 
-- **Analyzer (M6)** — read-only repository inventory (`inventory.yaml`) with derived reports; never executes repository content
 - **Provider expansion** — each new provider is its own independent adapter (never an alias); candidates on request
-- **JSON output & shell completion** — machine-readable output and native shell completion
+- **General JSON output** — machine-readable flags/commands beyond `colt analyze`
 - **Signed releases** — signed tags plus changelog/auto-generated release notes
 - **Workspace pruning & bulk sync** — destructive prune and bulk fetch/update
 - **Template hooks & more ecosystems** — executable template hooks, more language stacks
+- **Analyzer depth** — dependency-graph extraction and per-file content analysis
 - **Advanced credential management** — credential inventory, rotation, SSO/enterprise flows
 - **Long horizon** — GUI, plugin marketplace, arbitrary CI generation, repository hosting
 

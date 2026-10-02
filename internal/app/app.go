@@ -86,7 +86,7 @@ func (a *App) Root() *cobra.Command {
 		}
 		return nil
 	}
-	root.AddCommand(a.authCommand(), a.initCommand(), a.templateCommand(), a.listCommand(), a.cloneCommand(), a.releaseCommand(), a.workspaceStatusCommand(), a.syncCommand(), a.mirrorCommand(), a.checkCommand(), a.runCommand(), a.gitCredentialCommand())
+	root.AddCommand(a.authCommand(), a.initCommand(), a.templateCommand(), a.listCommand(), a.cloneCommand(), a.releaseCommand(), a.workspaceStatusCommand(), a.syncCommand(), a.mirrorCommand(), a.checkCommand(), a.analyzeCommand(), a.runCommand(), a.gitCredentialCommand())
 	return root
 }
 

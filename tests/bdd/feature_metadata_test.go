@@ -285,59 +285,10 @@ func validateTraceability(scenarios []featureScenario, specs map[string]specRequ
 		}
 	}
 
-	// 4. Milestone-state mismatches: planned M6 scenarios must stay planned.
-	for _, s := range scenarios {
-		status := "active"
-		for _, tag := range s.tags {
-			if tag == "@planned" {
-				status = "planned"
-			} else if tag == "@unimplemented" {
-				status = "unimplemented"
-			}
-		}
-		if status == "planned" {
-			continue
-		}
-		for _, rawTag := range s.tags {
-			tag := strings.TrimPrefix(rawTag, "@")
-			if !requirementTag.MatchString(tag) {
-				continue
-			}
-			info, ok := specs[tag]
-			if !ok {
-				continue
-			}
-			milestone := milestoneForSpec(info.specFile)
-			if milestone == "M6" && status != "planned" {
-				problems = append(problems, fmt.Sprintf("%s:%d %s: planned %s scenario missing @planned", s.file, s.line, s.name, tag))
-			}
-		}
-	}
-
 	if len(problems) != 0 {
 		return fmt.Errorf("traceability:\n%s", strings.Join(problems, "\n"))
 	}
 	return nil
-}
-
-func milestoneForSpec(specFile string) string {
-	base := filepath.Base(specFile)
-	switch base {
-	case "00-core.md", "01-project-init.md":
-		return "M1"
-	case "02-project-lifecycle.md":
-		return "M2"
-	case "03-template-init.md":
-		return "M3"
-	case "04-workspace.md":
-		return "M4"
-	case "05-project-health.md":
-		return "M5"
-	case "06-analyzer.md":
-		return "M6"
-	default:
-		return "M1"
-	}
 }
 
 func buildRequirementIndex(scenarios []featureScenario) map[string]requirementCoverage {

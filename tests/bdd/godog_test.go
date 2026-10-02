@@ -46,6 +46,7 @@ func TestBDD(t *testing.T) {
 			steps.RegisterTemplateSteps(ctx, w)
 			steps.RegisterWorkspaceSteps(ctx, w)
 			steps.RegisterHealthSteps(ctx, w)
+			steps.RegisterAnalyzerSteps(ctx, w)
 		},
 		Options: &godog.Options{
 			Format:      "pretty",
