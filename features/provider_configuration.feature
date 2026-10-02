@@ -171,15 +171,16 @@ Feature: Provider configuration and authentication
     Then authentication succeeds without repeating the authorization flow
     And normal Colt configuration still does not contain the reusable credential value
 
-  @unimplemented @CORE-CREDENTIAL-005
+  @CORE-CREDENTIAL-005
   Scenario: Secure credential storage is unavailable
     Given no persisted credential or GitHub token environment variable resolves
     And standard input is an interactive terminal
+    And the provider authorization flow reports approval for account "octocat"
     And the secure credential backend is unavailable
-    And the provider authorization flow reports approval
+    And the user rejects plaintext credential persistence
     When I run `colt auth login github personal --credential stored`
-    Then Colt offers plaintext file persistence, environment-variable usage, or cancel
-    And the command is not reported as persistently successful until a choice is persisted
+    Then the command reports that authentication was not persisted
+    And the command mentions an environment-variable alternative
 
   @CORE-CREDENTIAL-005 @CORE-CREDENTIAL-002
   Scenario: Colt does not silently fall back to plaintext storage

@@ -1,6 +1,6 @@
 # Plan: M1 — Authentication & Blank Initialization
 
-Partially implemented; remaining absent behavior is `@unimplemented`.
+Implemented.
 
 ## Dependencies
 

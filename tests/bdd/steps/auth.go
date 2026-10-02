@@ -1159,6 +1159,12 @@ func RegisterAuthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		}
 		return nil
 	})
+	ctx.Step(`^the command mentions an environment-variable alternative$`, func() error {
+		if w.RunErr == nil || !strings.Contains(w.RunErr.Error(), "environment variable") {
+			return fmt.Errorf("missing environment-variable alternative: %v", w.RunErr)
+		}
+		return nil
+	})
 	ctx.Step(`^exactly credential "([^"]*)" is deleted from the injected store$`, func(id string) error {
 		if w.Store == nil || w.Store.Gets != 0 || w.Store.Puts != 0 || w.Store.Deletes != 1 || len(w.Store.DeletedIDs) != 1 || w.Store.DeletedIDs[0] != id {
 			return fmt.Errorf("credential store calls = %#v", w.Store)
