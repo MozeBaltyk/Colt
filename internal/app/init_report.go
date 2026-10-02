@@ -188,6 +188,10 @@ func (e *partialError) Error() string {
 }
 func (e *partialError) Unwrap() error { return e.cause }
 
+func partial(step, local, remote, recovery string, cause error) error {
+	return &partialError{step: step, local: local, remote: remote, recovery: recovery, cause: cause}
+}
+
 func initCause(err error, transport, step string) (string, string) {
 	var evidence strings.Builder
 	for err != nil {
