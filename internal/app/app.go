@@ -67,12 +67,11 @@ func (a *App) credentialStore() credential.Store {
 
 func (a *App) Root() *cobra.Command {
 	root := &cobra.Command{
-		Use:               "colt",
-		Short:             "Initialize provider-independent Git projects",
-		Version:           version.Version,
-		SilenceUsage:      true,
-		SilenceErrors:     true,
-		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
+		Use:           "colt",
+		Short:         "Initialize provider-independent Git projects",
+		Version:       version.Version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
 	root.PersistentFlags().Bool("noninteractive", false, "disable interactive prompts and authorization flows")
 	root.PersistentFlags().BoolP("verbose", "v", false, "print additional non-secret diagnostics")
