@@ -284,3 +284,44 @@ Notes:
 ---
 
 Colt supports GitHub.com, self-hosted GitLab, Gitea, and Forgejo. It is not a wrapper around `gh`/`glab`, and it never changes your global Git identity.
+
+---
+
+## Roadmaps
+
+### Shipped (v0.3.0)
+
+- **Provider auth** — GitHub, GitLab, Gitea, Forgejo: env + stored credentials, GitHub Device Flow, provider-side revocation
+- **Project lifecycle** — `init`, `list`, `clone`, `release`
+- **Templates** — named, versioned, digest-pinned scaffolds (`colt template`)
+- **Workspace** — declared `workspace:` reconciliation: `status`, `sync`, one-shot `mirror`
+- **Health** — read-only policy checks (`colt check`)
+- **Self-hosted server** — `colt run` Gitea/Forgejo (systemd + podman, rootless)
+
+### Planned — big milestones
+
+- **Analyzer (M6)** — read-only repository inventory (`inventory.yaml`) with derived reports; never executes repository content
+- **Provider expansion** — each new provider is its own independent adapter (never an alias); candidates on request
+- **JSON output & shell completion** — machine-readable output and native shell completion
+- **Signed releases** — signed tags plus changelog/auto-generated release notes
+- **Workspace pruning & bulk sync** — destructive prune and bulk fetch/update
+- **Template hooks & more ecosystems** — executable template hooks, more language stacks
+- **Advanced credential management** — credential inventory, rotation, SSO/enterprise flows
+- **Long horizon** — GUI, plugin marketplace, arbitrary CI generation, repository hosting
+
+### Small asks
+
+- Menu with LICENCE choice during the creation of a new project
+- Renovate to auto-update 
+
+## References
+
+```txt
+Colt stand for **ColtExpress**, a boardgame that my children appreciate.
+
+   o x o x o x o . . .
+   o      _____            _______________ ___=====__T___
+ .][__n_n_|DD[  ====_____  |    |.\/.|   | |   |_|     |_
+ (________|__|_[_________]_|____|_/\_|___|_|___________|_|
+_/oo OOOOO oo`  ooo   ooo   o^o       o^o   o^o     o^o
+```
