@@ -14,6 +14,7 @@ import (
 	"github.com/MozeBaltyk/Colt/internal/credential"
 	gitnative "github.com/MozeBaltyk/Colt/internal/git"
 	"github.com/MozeBaltyk/Colt/internal/provider"
+	"github.com/MozeBaltyk/Colt/internal/update"
 	"github.com/MozeBaltyk/Colt/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -33,6 +34,7 @@ type App struct {
 	AuthorizeGitHubDevice func(context.Context, io.Writer) (string, error)
 	SaveConfig            func(string, config.Config) error
 	Host                  HostOperations
+	Updater               *update.Client
 	pathErr               error
 }
 
@@ -86,7 +88,7 @@ func (a *App) Root() *cobra.Command {
 		}
 		return nil
 	}
-	root.AddCommand(a.authCommand(), a.initCommand(), a.templateCommand(), a.listCommand(), a.cloneCommand(), a.releaseCommand(), a.workspaceStatusCommand(), a.syncCommand(), a.mirrorCommand(), a.checkCommand(), a.analyzeCommand(), a.runCommand(), a.gitCredentialCommand())
+	root.AddCommand(a.authCommand(), a.initCommand(), a.templateCommand(), a.listCommand(), a.cloneCommand(), a.releaseCommand(), a.workspaceStatusCommand(), a.syncCommand(), a.mirrorCommand(), a.checkCommand(), a.analyzeCommand(), a.updateCommand(), a.runCommand(), a.gitCredentialCommand())
 	return root
 }
 

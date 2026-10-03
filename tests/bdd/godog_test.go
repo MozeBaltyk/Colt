@@ -33,6 +33,9 @@ func TestBDD(t *testing.T) {
 				return scenarioCtx, err
 			})
 			ctx.After(func(scenarioCtx context.Context, _ *godog.Scenario, _ error) (context.Context, error) {
+				if w.ReleaseServer != nil {
+					w.ReleaseServer.Close()
+				}
 				if w.RedirectClose != nil {
 					w.RedirectClose()
 				}
@@ -47,6 +50,7 @@ func TestBDD(t *testing.T) {
 			steps.RegisterWorkspaceSteps(ctx, w)
 			steps.RegisterHealthSteps(ctx, w)
 			steps.RegisterAnalyzerSteps(ctx, w)
+			steps.RegisterUpdateSteps(ctx, w)
 		},
 		Options: &godog.Options{
 			Format:      "pretty",

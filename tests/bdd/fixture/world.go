@@ -20,6 +20,7 @@ import (
 	"github.com/MozeBaltyk/Colt/internal/config"
 	"github.com/MozeBaltyk/Colt/internal/credential"
 	"github.com/MozeBaltyk/Colt/internal/provider"
+	"github.com/MozeBaltyk/Colt/internal/update"
 )
 
 const (
@@ -75,6 +76,9 @@ type World struct {
 	SSHState            map[string][]byte
 	SSHAgent            string
 	Host                *FakeHost
+	Updater             *update.Client
+	UpdateTarget        string
+	ReleaseServer       *httptest.Server
 	ExplicitTransport   string
 	SelectedTransport   string
 }
@@ -192,6 +196,9 @@ func (w *World) Reset(t *testing.T) {
 	w.SSHState = nil
 	w.SSHAgent = ""
 	w.Host = NewFakeHost()
+	w.Updater = nil
+	w.UpdateTarget = ""
+	w.ReleaseServer = nil
 	w.NewClient = func(p config.Provider, token string) (provider.Client, error) {
 		w.NewClientCalls = append(w.NewClientCalls, NewClientCall{Provider: p, Token: token})
 		return w.Client, nil
@@ -233,6 +240,7 @@ func (w *World) BuildApp() {
 		IsTerminal:            func() bool { return w.Interactive },
 		AuthorizeGitHubDevice: w.AuthorizeGitHubDevice,
 		Host:                  w.Host,
+		Updater:               w.Updater,
 	}
 }
 

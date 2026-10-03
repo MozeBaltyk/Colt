@@ -19,8 +19,8 @@ const (
 )
 
 type fileContents struct {
-	Version     int                      `yaml:"version"`
-	Credentials map[string]Credential    `yaml:"credentials"`
+	Version     int                   `yaml:"version"`
+	Credentials map[string]Credential `yaml:"credentials"`
 }
 
 // FileStore is the explicitly selected plaintext fallback. Path must name the

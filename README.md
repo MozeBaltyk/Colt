@@ -210,6 +210,15 @@ colt analyze [path] [--format summary|json|yaml] [--output inventory.yaml]
 
 Read-only inventory of a repository: identity, sanitized remote, and detected package ecosystems (from known manifest files). `--format yaml` prints the canonical `inventory.yaml`; `summary` and `json` are derived views over the same data. It never executes repository content or exposes secrets.
 
+### Update — `colt update`
+
+```bash
+colt update          # download + install the latest verified release
+colt update --check  # report current vs latest without changing anything
+```
+
+Downloads from the official GitHub Releases channel, verifies the artifact against the published SHA-256, and atomically replaces the running binary. A development build reports an update is available but cannot self-replace; use `install.sh` instead.
+
 ### Self-hosted server — `colt run`
 
 Deploy and manage your own Gitea or Forgejo server as a systemd unit (rootless):

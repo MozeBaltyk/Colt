@@ -23,7 +23,7 @@ Colt owns configuration, workflow, and provider integration. Provider HTTP APIs 
 
 When documents differ, use this order:
 
-1.  Active normative requirements in [shared core](00-core.md), [project initialization](01-project-init.md), [project lifecycle](02-project-lifecycle.md), [templates](03-template-init.md), [workspace reconciliation](04-workspace.md), [project health](05-project-health.md), and [analyzer](06-analyzer.md).
+1.  Active normative requirements in [shared core](00-core.md), [project initialization](01-project-init.md), [project lifecycle](02-project-lifecycle.md), [templates](03-template-init.md), [workspace reconciliation](04-workspace.md), [project health](05-project-health.md), [analyzer](06-analyzer.md), and [self-update](08-self-update.md).
 2.  Active-MVP [Gherkin acceptance specifications](../../features/), excluding scenarios explicitly tagged `@planned` or `@unimplemented`.
 3.  [Roadmap](90-roadmap.md).
 
