@@ -25,6 +25,50 @@ func openWorkRoot(path string) (*os.Root, error) {
 	return root, nil
 }
 
+func openWorkspaceRoot(path string) (*os.Root, error) {
+	// Resolve ancestors so platform paths such as macOS /tmp and /var work, but
+	// never follow a link at the configured root itself: a root swapped for a
+	// link must fail closed instead of redirecting access outside the workspace.
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace path: %w", err)
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace path: %w", err)
+	}
+	resolved := filepath.Join(parent, filepath.Base(abs))
+	if err := rejectLinkedPath(resolved); err != nil {
+		return nil, err
+	}
+	return openWorkRoot(resolved)
+}
+
+func ensureWorkspaceRoot(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return fmt.Errorf("create workspace path: %w", err)
+	}
+	root, err := openWorkspaceRoot(path)
+	if err != nil {
+		return err
+	}
+	return root.Close()
+}
+
+func rejectLinkedPath(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect workspace path: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("workspace path contains a symbolic link: %s", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("workspace path is not a directory: %s", path)
+	}
+	return nil
+}
+
 func validateCloneDestination(root *os.Root, name string) (bool, os.FileMode, error) {
 	if name == "." || !filepath.IsLocal(name) || filepath.Clean(name) != name {
 		return false, 0, errors.New("clone destination must be a clean relative path")

@@ -152,25 +152,32 @@ Creates a local tag, pushes it, then creates the provider release.
 
 ### Workspace — `colt status` / `colt sync`
 
-Declare the repos you want checked out under `workspace:` in `config.yaml`:
+Declare independently located named workspaces in `config.yaml`:
 
 ```yaml
-workspace:
-  repositories:
-    - provider: personal
-      namespace: octocat
-      # include: [api, web]   # optional; omit = every repo in the namespace
-    - provider: work
-      namespace: platform/tools
+workspaces:
+  personal:
+    path: /home/octocat/work/personal
+    repositories:
+      - provider: personal
+        namespace: octocat
+        # include: [api, web]   # optional; omit = every repo in the namespace
+  platform:
+    path: /home/octocat/work/platform
+    repositories:
+      - provider: work
+        namespace: platform/tools
 ```
 
 ```bash
-colt status          # what's present, missing, absent, or mismatched
-colt sync [--dry-run] # clone exactly what's missing (never prunes or rewrites)
-colt sync <namespace> --path <existing-dir> [--provider <alias>] [--save]
+colt status [--workspace <name>]
+colt sync [--workspace <name>] [--dry-run] [--fetch | --pull]
+colt sync <namespace> --path <existing-dir> [--provider <alias>] [--workspace <name> --save]
 ```
 
-The namespace form checks repositories out directly as `<existing-dir>/<repo>`. `--save` stores the absolute workspace path and selection, so later `colt sync` and `colt status` work from any directory; it cannot be combined with `--dry-run`. Manifests without `workspace.path` retain the `<namespace>/<repo>` layout rooted at the current directory.
+Without `--workspace`, status and no-namespace sync process every workspace in name order; each output line identifies its workspace. The namespace form checks repositories out directly as `<existing-dir>/<repo>`. `--save --workspace <name>` stores or updates that named workspace; it cannot be combined with `--dry-run`. The removed singular `workspace:` format is rejected with migration guidance. Workspace root ancestors are resolved once (so system paths such as macOS `/tmp` work); a link at the root itself or beneath it is rejected. `sync` creates a missing configured workspace path with owner-only permissions; `status` and `check` never create it.
+
+`--fetch` prunes and refreshes remote references without changing local files. `--pull` is stricter: it updates only clean, attached branches that can fast-forward from the same branch on the validated `origin`; it never resets, rebases, or discards local work. The two flags are mutually exclusive, and refresh failures in one repository do not stop the others.
 
 ### Mirror — `colt mirror`
 
@@ -190,10 +197,10 @@ colt mirror <source-alias> <target-alias> \
 ### Health — `colt check`
 
 ```bash
-colt check [--all]
+colt check [--workspace <name> | --all]
 ```
 
-Diagnostic-only checks for every selected repository. Configure expectations under `policy.repository`:
+Without a flag, Colt checks the current repository. `--workspace` checks one named workspace; `--all` checks every workspace. Diagnostic-only checks for every selected repository. Configure expectations under `policy.repository`:
 
 ```yaml
 policy:
@@ -314,7 +321,7 @@ Colt supports GitHub.com, self-hosted GitLab, Gitea, and Forgejo. It is not a wr
 - **Provider auth** — GitHub, GitLab, Gitea, Forgejo: env + stored credentials, GitHub Device Flow, provider-side revocation
 - **Project lifecycle** — `init`, `list`, `clone`, `release`
 - **Templates** — named, versioned, digest-pinned scaffolds (`colt template`)
-- **Workspace** — declared `workspace:` reconciliation: `status`, `sync`, one-shot `mirror`
+- **Workspace** — named `workspaces:` reconciliation: `status`, `sync`, one-shot `mirror`
 - **Health** — read-only policy checks (`colt check`)
 - **Self-hosted server** — `colt run` Gitea/Forgejo (systemd + podman, rootless)
 - **Analyzer (M6)** — read-only repository inventory (`colt analyze`) with derived `summary`/`json`/`yaml` reports; never executes repository content
@@ -324,7 +331,7 @@ Colt supports GitHub.com, self-hosted GitLab, Gitea, and Forgejo. It is not a wr
 - **Provider expansion** — each new provider is its own independent adapter (never an alias); candidates on request
 - **General JSON output** — machine-readable flags/commands beyond `colt analyze`
 - **Signed releases** — signed tags plus changelog/auto-generated release notes
-- **Workspace pruning & bulk sync** — destructive prune and bulk fetch/update
+- **Workspace pruning** — optional destructive removal of local repositories no longer selected
 - **Template hooks & more ecosystems** — executable template hooks, more language stacks
 - **Analyzer depth** — dependency-graph extraction and per-file content analysis
 - **Advanced credential management** — credential inventory, rotation, SSO/enterprise flows

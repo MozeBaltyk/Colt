@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -31,16 +32,17 @@ func TestCORE_PROVIDER_001ConfigPathOverride(t *testing.T) {
 }
 
 func TestWORKSPACE_MANIFEST_001StrictAndBounded(t *testing.T) {
-	base := "providers:\n  work:\n    type: gitlab\n    host: gitlab.com\n    base_url: https://gitlab.com\n    namespace: team/tools\n    visibility: private\n    git_name: Colt User\n    git_email: colt@example.com\nworkspace:\n  repositories:\n    - provider: work\n      namespace: team/tools\n"
+	root := filepath.ToSlash(t.TempDir())
+	base := "providers:\n  work:\n    type: gitlab\n    host: gitlab.com\n    base_url: https://gitlab.com\n    namespace: team/tools\n    visibility: private\n    git_name: Colt User\n    git_email: colt@example.com\nworkspaces:\n  managed:\n    path: " + root + "\n    repositories:\n      - provider: work\n        namespace: team/tools\n"
 	for name, suffix := range map[string]string{
-		"unknown field":  "      surprise: true\n",
-		"duplicate key":  "      provider: work\n",
-		"anchor":         "      include: &names [api]\n",
-		"alias":          "      include: &names [api]\n    - provider: work\n      namespace: team/tools\n      include: *names\n",
-		"merge":          "      <<: {include: [api]}\n",
-		"custom tag":     "      include: !command [api]\n",
+		"unknown field":  "        surprise: true\n",
+		"duplicate key":  "        provider: work\n",
+		"anchor":         "        include: &names [api]\n",
+		"alias":          "        include: &names [api]\n      - provider: work\n        namespace: team/tools\n        include: *names\n",
+		"merge":          "        <<: {include: [api]}\n",
+		"custom tag":     "        include: !command [api]\n",
 		"multiple docs":  "---\nproviders: {}\n",
-		"traversal name": "      include: [../outside]\n",
+		"traversal name": "        include: [../outside]\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yaml")
@@ -53,12 +55,13 @@ func TestWORKSPACE_MANIFEST_001StrictAndBounded(t *testing.T) {
 		})
 	}
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte(base+"      include: []\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(base+"        include: []\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)
-	if err != nil || cfg.Workspace == nil || cfg.Workspace.Repositories[0].Include == nil || len(*cfg.Workspace.Repositories[0].Include) != 0 {
-		t.Fatalf("explicit empty include was not preserved: %#v, %v", cfg.Workspace, err)
+	workspace := cfg.Workspaces["managed"]
+	if err != nil || workspace.Repositories[0].Include == nil || len(*workspace.Repositories[0].Include) != 0 {
+		t.Fatalf("explicit empty include was not preserved: %#v, %v", workspace, err)
 	}
 }
 
@@ -66,16 +69,87 @@ func TestWORKSPACE_MANIFEST_001RejectsUnknownProviderAndDuplicatePath(t *testing
 	p := validProvider("gitlab")
 	p.Namespace = "team"
 	includes := []string{"api"}
-	cfg := Config{Providers: map[string]Provider{"one": p, "two": p}, Workspace: &Workspace{Repositories: []RepositorySelection{
+	cfg := Config{Providers: map[string]Provider{"one": p, "two": p}, Workspaces: map[string]Workspace{"managed": {Path: t.TempDir(), Repositories: []RepositorySelection{
 		{Provider: "one", Namespace: "team", Include: &includes},
 		{Provider: "two", Namespace: "team", Include: &includes},
-	}}}
+	}}}}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate derived path") {
 		t.Fatalf("duplicate path error = %v", err)
 	}
-	cfg.Workspace.Repositories = []RepositorySelection{{Provider: "missing", Namespace: "team"}}
+	workspace := cfg.Workspaces["managed"]
+	workspace.Repositories = []RepositorySelection{{Provider: "missing", Namespace: "team"}}
+	cfg.Workspaces["managed"] = workspace
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Fatalf("unknown provider error = %v", err)
+	}
+}
+
+func TestWORKSPACE_MANIFEST_001RejectsSingularWorkspaceWithMigrationMessage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := "providers: {}\nworkspace:\n  path: /tmp/old\n  repositories: []\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "workspaces.<name>") {
+		t.Fatalf("singular workspace migration error = %v", err)
+	}
+}
+
+func TestWORKSPACE_MANIFEST_001RejectsUnsafeNamesPathsAndDuplicatePaths(t *testing.T) {
+	p := validProvider("gitlab")
+	selection := []RepositorySelection{{Provider: "work", Namespace: "team"}}
+	root := t.TempDir()
+	for _, tc := range []struct {
+		name       string
+		workspaces map[string]Workspace
+		want       string
+	}{
+		{"unsafe name", map[string]Workspace{"../outside": {Path: root, Repositories: selection}}, "workspace name"},
+		{"overlong name", map[string]Workspace{strings.Repeat("a", 101): {Path: root, Repositories: selection}}, "workspace name"},
+		{"relative path", map[string]Workspace{"managed": {Path: "relative", Repositories: selection}}, "absolute"},
+		{"unclean path", map[string]Workspace{"managed": {Path: root + string(filepath.Separator) + "child" + string(filepath.Separator) + "..", Repositories: selection}}, "clean"},
+		{"duplicate path", map[string]Workspace{"alpha": {Path: root, Repositories: selection}, "beta": {Path: root, Repositories: selection}}, "duplicate workspace path"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{Providers: map[string]Provider{"work": p}, Workspaces: tc.workspaces}
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate() error = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestWORKSPACE_MANIFEST_001CaseDistinctPathsOnCaseSensitiveHosts(t *testing.T) {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		t.Skip("host filesystem is normally case-insensitive")
+	}
+	p := validProvider("gitlab")
+	selection := []RepositorySelection{{Provider: "work", Namespace: "team"}}
+	root := t.TempDir()
+	cfg := Config{Providers: map[string]Provider{"work": p}, Workspaces: map[string]Workspace{
+		"upper": {Path: filepath.Join(root, "Upper"), Repositories: selection},
+		"lower": {Path: filepath.Join(root, "lower"), Repositories: selection},
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("case-distinct paths rejected on a case-sensitive host: %v", err)
+	}
+}
+
+func TestWORKSPACE_MANIFEST_001BoundsSelectionsAcrossAllWorkspaces(t *testing.T) {
+	p := validProvider("gitlab")
+	empty := []string{}
+	selections := make([]RepositorySelection, MaxWorkspaceSelections+1)
+	for i := range selections {
+		selections[i] = RepositorySelection{Provider: "work", Namespace: "team", Include: &empty}
+	}
+	split := len(selections) / 2
+	cfg := Config{Providers: map[string]Provider{"work": p}, Workspaces: map[string]Workspace{
+		"alpha": {Path: filepath.Join(t.TempDir(), "alpha"), Repositories: selections[:split]},
+		"beta":  {Path: filepath.Join(t.TempDir(), "beta"), Repositories: selections[split:]},
+	}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "workspace selections") {
+		t.Fatalf("aggregate selection limit error = %v", err)
 	}
 }
 

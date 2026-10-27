@@ -21,6 +21,7 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	var mirrorFailure, targetExists bool
 	var mirrorTargetNamespace string
 	var savedWorkspace string
+	var namedWorkspaceRoots map[string]string
 
 	repository := func(p config.Provider, name string) provider.Repository {
 		return provider.Repository{Name: name, Namespace: p.Namespace, CloneURL: "https://" + p.Host + "/" + p.Namespace + "/" + name + ".git", SSHURL: "git@" + p.Host + ":" + p.Namespace + "/" + name + ".git"}
@@ -33,7 +34,11 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	}
 	saveWorkspace := func(providers map[string]config.Provider, selections ...config.RepositorySelection) error {
 		w.Providers = providers
-		return config.Save(w.ConfigPath, config.Config{Providers: providers, Workspace: &config.Workspace{Repositories: selections}})
+		cfg := config.Config{Providers: providers}
+		if len(selections) != 0 {
+			cfg.Workspaces = map[string]config.Workspace{"managed": {Path: w.Dir, Repositories: selections}}
+		}
+		return config.Save(w.ConfigPath, cfg)
 	}
 	writeRepo := func(relative, origin string) error {
 		dir := filepath.Join(w.Dir, relative, ".git")
@@ -51,10 +56,36 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		w.Client.ListRepos = []provider.Repository{repository(p, "existing"), repository(p, "good"), repository(p, "bad"), repository(p, "mismatch")}
 		w.Git.Real = false
 		w.Git.CloneErrors = map[string]error{"bad": errors.New("injected clone failure")}
-		if err := writeRepo("team/existing", repository(p, "existing").CloneURL); err != nil {
+		if err := writeRepo("existing", repository(p, "existing").CloneURL); err != nil {
 			return err
 		}
-		return os.MkdirAll(filepath.Join(w.Dir, "team", "mismatch"), 0o755)
+		return os.MkdirAll(filepath.Join(w.Dir, "mismatch"), 0o755)
+	}
+	configureRefresh := func(present []string, missing string) error {
+		p := github("team")
+		names := append([]string(nil), present...)
+		if missing != "" {
+			names = append(names, missing)
+		}
+		if err := saveWorkspace(map[string]config.Provider{"work": p}, config.RepositorySelection{Provider: "work", Namespace: "team", Include: &names}); err != nil {
+			return err
+		}
+		w.Client.ListRepos = nil
+		for _, name := range names {
+			w.Client.ListRepos = append(w.Client.ListRepos, repository(p, name))
+		}
+		for _, name := range present {
+			if err := writeRepo(name, repository(p, name).CloneURL); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(w.Dir, name, "marker"), []byte(name), 0o600); err != nil {
+				return err
+			}
+		}
+		w.Git.Real = false
+		w.Git.FetchErrors = map[string]error{}
+		w.Git.PullErrors = map[string]error{}
+		return nil
 	}
 	configureMirror := func(sourceType, sourceAlias, targetAlias string) error {
 		source := github("source")
@@ -102,7 +133,7 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return nil
 	}
 
-	ctx.Step(`^a strict data-only YAML document has a top-level workspace mapping with repository selections$`, func() error {
+	ctx.Step(`^a strict data-only YAML document has a top-level workspaces mapping with named paths and repository selections$`, func() error {
 		work, personal := github("team"), gitlab("group")
 		include := []string{"web", "api"}
 		if err := saveWorkspace(map[string]config.Provider{"work": work, "personal": personal},
@@ -119,28 +150,79 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	})
 	ctx.Step(`^each repository selection names a provider alias and namespace$`, func() error {
 		cfg, err := config.Load(w.ConfigPath)
-		if err != nil || cfg.Workspace == nil || len(cfg.Workspace.Repositories) != 2 {
+		if err != nil || len(cfg.Workspaces["managed"].Repositories) != 2 {
 			return fmt.Errorf("workspace selections unavailable: %v", err)
 		}
 		return nil
 	})
 	ctx.Step(`^one selection includes named repositories while another omits include$`, func() error {
 		cfg, err := config.Load(w.ConfigPath)
-		if err != nil || cfg.Workspace.Repositories[0].Include == nil || cfg.Workspace.Repositories[1].Include != nil {
+		workspace := cfg.Workspaces["managed"]
+		if err != nil || workspace.Repositories[0].Include == nil || workspace.Repositories[1].Include != nil {
 			return errors.New("include omission was not represented distinctly")
 		}
 		return nil
 	})
-	ctx.Step(`^Colt resolves the desired workspace$`, func() error { w.Run("colt status"); return nil })
+	ctx.Step(`^Colt resolves the desired workspaces$`, func() error { w.Run("colt status"); return nil })
 	ctx.Step(`^the first selection contains only its include list$`, func() error {
-		if strings.Contains(w.Out, "ignored") || !strings.Contains(w.Out, "team/api") || !strings.Contains(w.Out, "team/web") {
+		if strings.Contains(w.Out, "ignored") || !strings.Contains(w.Out, "managed: to-clone api") || !strings.Contains(w.Out, "managed: to-clone web") {
 			return fmt.Errorf("included selection output: %q", w.Out)
 		}
 		return nil
 	})
 	ctx.Step(`^the second contains all visible repositories in its selection$`, func() error {
-		if !strings.Contains(w.Out, "group/alpha") || !strings.Contains(w.Out, "group/zeta") {
+		if !strings.Contains(w.Out, "managed: to-clone alpha") || !strings.Contains(w.Out, "managed: to-clone zeta") {
 			return fmt.Errorf("omitted include output: %q", w.Out)
+		}
+		return nil
+	})
+	ctx.Step(`^configuration uses the former singular workspace mapping$`, func() error {
+		raw := "providers: {}\nworkspace:\n  path: /tmp/old\n  repositories: []\n"
+		return os.WriteFile(w.ConfigPath, []byte(raw), 0o600)
+	})
+	ctx.Step(`^migration to a named workspace is required before provider or local access$`, func() error {
+		if w.RunErr == nil || !strings.Contains(w.RunErr.Error(), "workspaces.<name>") || len(w.NewClientCalls) != 0 || len(w.Client.Calls) != 0 || len(w.Git.Operations) != 0 {
+			return fmt.Errorf("singular workspace did not fail with migration guidance before access: %v", w.RunErr)
+		}
+		return nil
+	})
+	ctx.Step(`^two named workspaces have independent paths and missing repositories$`, func() error {
+		alpha, factory := github("alpha"), github("factory")
+		namedWorkspaceRoots = map[string]string{"alpha": filepath.Join(w.Dir, "alpha-root"), "factory": filepath.Join(w.Dir, "factory-root")}
+		for _, root := range namedWorkspaceRoots {
+			if err := os.Mkdir(root, 0o700); err != nil {
+				return err
+			}
+		}
+		w.Providers = map[string]config.Provider{"alpha": alpha, "factory": factory}
+		if err := config.Save(w.ConfigPath, config.Config{Providers: w.Providers, Workspaces: map[string]config.Workspace{
+			"factory": {Path: namedWorkspaceRoots["factory"], Repositories: []config.RepositorySelection{{Provider: "factory", Namespace: "factory"}}},
+			"alpha":   {Path: namedWorkspaceRoots["alpha"], Repositories: []config.RepositorySelection{{Provider: "alpha", Namespace: "alpha"}}},
+		}}); err != nil {
+			return err
+		}
+		w.Client.ListRepos = []provider.Repository{repository(alpha, "one"), repository(factory, "two")}
+		w.Git.Real = false
+		return nil
+	})
+	ctx.Step(`^both workspaces are reconciled in deterministic name order$`, func() error {
+		alpha, factory := strings.Index(w.Out, "alpha: cloned one"), strings.Index(w.Out, "factory: cloned two")
+		if w.RunErr != nil || alpha < 0 || factory < 0 || alpha >= factory {
+			return fmt.Errorf("all-workspace output=%q error=%v", w.Out, w.RunErr)
+		}
+		return nil
+	})
+	ctx.Step(`^every result identifies its workspace$`, func() error {
+		for _, line := range strings.Split(strings.TrimSpace(w.Out), "\n") {
+			if !strings.HasPrefix(line, "alpha: ") && !strings.HasPrefix(line, "factory: ") {
+				return fmt.Errorf("unqualified workspace result %q", line)
+			}
+		}
+		return nil
+	})
+	ctx.Step(`^only the factory workspace is reconciled$`, func() error {
+		if w.RunErr != nil || strings.Contains(w.Out, "alpha:") || !strings.Contains(w.Out, "factory: present two") {
+			return fmt.Errorf("selected workspace output=%q error=%v", w.Out, w.RunErr)
 		}
 		return nil
 	})
@@ -160,7 +242,7 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	})
 
 	ctx.Step(`^workspace YAML has a duplicate mapping key$`, func() error {
-		raw := "providers: {}\nworkspace:\n  repositories:\n    - provider: missing\n      provider: duplicate\n      namespace: team\n"
+		raw := "providers: {}\nworkspaces:\n  managed:\n    path: /tmp/managed\n    repositories:\n      - provider: missing\n        provider: duplicate\n        namespace: team\n"
 		return os.WriteFile(w.ConfigPath, []byte(raw), 0o600)
 	})
 	ctx.Step(`^valid workspace YAML includes a traversal repository name$`, func() error {
@@ -173,7 +255,7 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		if err != nil {
 			return err
 		}
-		_, writeErr := f.WriteString("workspace:\n  repositories:\n    - provider: work\n      namespace: team\n      include: [../outside]\n")
+		_, writeErr := f.WriteString("workspaces:\n  managed:\n    path: " + filepath.ToSlash(w.Dir) + "\n    repositories:\n      - provider: work\n        namespace: team\n        include: [../outside]\n")
 		return errors.Join(writeErr, f.Close())
 	})
 	ctx.Step(`^Colt parses the manifest$`, func() error { w.Run("colt status"); return nil })
@@ -186,7 +268,7 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 
 	ctx.Step(`^desired repositories are present, missing locally, absent remotely, and mismatched$`, configureReconciliation)
 	ctx.Step(`^deterministic results categorize them as present, to-clone, absent remotely, and remote/config mismatch$`, func() error {
-		for _, want := range []string{"present team/existing", "to-clone team/good", "absent-remotely team/absent", "mismatch team/mismatch"} {
+		for _, want := range []string{"managed: present existing", "managed: to-clone good", "managed: absent-remotely absent", "managed: mismatch mismatch"} {
 			if !strings.Contains(w.Out, want) {
 				return fmt.Errorf("status %q lacks %q", w.Out, want)
 			}
@@ -208,13 +290,13 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return nil
 	})
 	ctx.Step(`^the other missing repository is cloned$`, func() error {
-		if _, err := os.Stat(filepath.Join(w.Dir, "team", "good", ".git")); err != nil {
+		if _, err := os.Stat(filepath.Join(w.Dir, "good", ".git")); err != nil {
 			return err
 		}
 		return nil
 	})
 	ctx.Step(`^existing, inconsistent, remotely absent, and failed repositories are summarized$`, func() error {
-		for _, want := range []string{"present team/existing", "mismatch team/mismatch", "absent-remotely team/absent", "failed team/bad"} {
+		for _, want := range []string{"managed: present existing", "managed: mismatch mismatch", "managed: absent-remotely absent", "managed: failed bad"} {
 			if !strings.Contains(w.Out, want) {
 				return fmt.Errorf("sync output %q lacks %q", w.Out, want)
 			}
@@ -222,7 +304,7 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return nil
 	})
 	ctx.Step(`^completed clones are retained$`, func() error {
-		_, err := os.Stat(filepath.Join(w.Dir, "team", "good"))
+		_, err := os.Stat(filepath.Join(w.Dir, "good"))
 		return err
 	})
 	ctx.Step(`^another provider namespace exposes two repositories$`, func() error {
@@ -235,8 +317,8 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		savedWorkspace = filepath.Join(w.Dir, "saved-workspace")
 		return os.Mkdir(savedWorkspace, 0o700)
 	})
-	ctx.Step(`^I sync that namespace to an explicit path with --save$`, func() error {
-		w.RunArgs([]string{"sync", "other", "--provider", "work", "--path", savedWorkspace, "--save"})
+	ctx.Step(`^I sync that namespace to an explicit path and save it as workspace factory$`, func() error {
+		w.RunArgs([]string{"sync", "other", "--provider", "work", "--path", savedWorkspace, "--workspace", "factory", "--save"})
 		return nil
 	})
 	ctx.Step(`^both repositories are cloned directly beneath the explicit path$`, func() error {
@@ -253,15 +335,16 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		}
 		return nil
 	})
-	ctx.Step(`^the absolute path and namespace selection are saved$`, func() error {
+	ctx.Step(`^the absolute path and namespace selection are saved under workspace factory$`, func() error {
 		cfg, err := config.Load(w.ConfigPath)
 		if err != nil {
 			return err
 		}
-		if cfg.Workspace == nil || cfg.Workspace.Path != savedWorkspace || len(cfg.Workspace.Repositories) != 1 {
-			return fmt.Errorf("saved workspace = %#v", cfg.Workspace)
+		workspace := cfg.Workspaces["factory"]
+		if workspace.Path != savedWorkspace || len(workspace.Repositories) != 1 {
+			return fmt.Errorf("saved workspace = %#v", workspace)
 		}
-		selection := cfg.Workspace.Repositories[0]
+		selection := workspace.Repositories[0]
 		if selection.Provider != "work" || selection.Namespace != "other" || selection.Include != nil {
 			return fmt.Errorf("saved selection = %#v", selection)
 		}
@@ -316,6 +399,80 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return nil
 	})
 
+	ctx.Step(`^a workspace has two present repositories and one missing repository$`, func() error {
+		return configureRefresh([]string{"good", "bad"}, "missing")
+	})
+	ctx.Step(`^one present repository cannot be fetched$`, func() error {
+		w.Git.FetchErrors["bad"] = errors.New("injected fetch failure")
+		return nil
+	})
+	ctx.Step(`^the other present repository is fetched with pruning$`, func() error {
+		if !slices.Contains(w.Git.Operations, "fetch:good") || !strings.Contains(w.Out, "managed: fetched good") {
+			return fmt.Errorf("successful fetch missing: out=%q operations=%v", w.Out, w.Git.Operations)
+		}
+		return nil
+	})
+	ctx.Step(`^the missing repository is cloned without a redundant fetch$`, func() error {
+		if !slices.Contains(w.Git.Operations, "clone") || slices.Contains(w.Git.Operations, "fetch:missing") {
+			return fmt.Errorf("missing repository operations=%v", w.Git.Operations)
+		}
+		return nil
+	})
+	ctx.Step(`^the failed fetch is summarized without changing either worktree$`, func() error {
+		if w.RunErr == nil || !strings.Contains(w.Out, "managed: failed bad") {
+			return fmt.Errorf("fetch failure not summarized: %q, %v", w.Out, w.RunErr)
+		}
+		for _, name := range []string{"good", "bad"} {
+			data, err := os.ReadFile(filepath.Join(w.Dir, name, "marker"))
+			if err != nil || string(data) != name {
+				return fmt.Errorf("worktree %s changed: %q, %v", name, data, err)
+			}
+		}
+		return nil
+	})
+	ctx.Step(`^a workspace has clean, dirty, diverged, and detached present repositories$`, func() error {
+		if err := configureRefresh([]string{"clean", "dirty", "diverged", "detached"}, ""); err != nil {
+			return err
+		}
+		for _, name := range []string{"dirty", "diverged", "detached"} {
+			w.Git.PullErrors[name] = errors.New(name + " repository refused")
+		}
+		return nil
+	})
+	ctx.Step(`^the clean repository is pulled from its matching origin branch$`, func() error {
+		if !slices.Contains(w.Git.Operations, "pull:clean") || !strings.Contains(w.Out, "managed: pulled clean") {
+			return fmt.Errorf("clean pull missing: out=%q operations=%v", w.Out, w.Git.Operations)
+		}
+		return nil
+	})
+	ctx.Step(`^dirty, diverged, and detached repositories are not changed$`, func() error {
+		for _, name := range []string{"dirty", "diverged", "detached"} {
+			data, err := os.ReadFile(filepath.Join(w.Dir, name, "marker"))
+			if err != nil || string(data) != name {
+				return fmt.Errorf("worktree %s changed: %q, %v", name, data, err)
+			}
+		}
+		return nil
+	})
+	ctx.Step(`^independent pull failures are summarized$`, func() error {
+		if w.RunErr == nil {
+			return errors.New("pull failures were not returned")
+		}
+		for _, name := range []string{"dirty", "diverged", "detached"} {
+			if !strings.Contains(w.Out, "managed: failed "+name) {
+				return fmt.Errorf("pull output %q lacks %s", w.Out, name)
+			}
+		}
+		return nil
+	})
+	ctx.Step(`^a workspace has a present repository$`, func() error { return configureRefresh([]string{"present"}, "") })
+	ctx.Step(`^Colt reports `+"`"+`(would-fetch|would-pull)`+"`"+` for the present repository$`, func(action string) error {
+		if !strings.Contains(w.Out, "managed: "+action+" present") {
+			return fmt.Errorf("dry-run output %q lacks %s", w.Out, action)
+		}
+		return nil
+	})
+
 	ctx.Step(`^a derived path initially validates beneath the workspace root$`, func() error {
 		p := github("team")
 		include := []string{"demo"}
@@ -351,7 +508,7 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		if err := os.WriteFile(filepath.Join(w.Dir, "unrelated", "keep"), []byte("keep"), 0o600); err != nil {
 			return err
 		}
-		preservedOrigin = filepath.Join(w.Dir, "team", "dirty", ".git", "config")
+		preservedOrigin = filepath.Join(w.Dir, "dirty", ".git", "config")
 		if err := os.MkdirAll(filepath.Dir(preservedOrigin), 0o755); err != nil {
 			return err
 		}
@@ -504,7 +661,7 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		return nil
 	})
 
-	ctx.Step(`^I execute `+"`"+`(colt (?:status|sync|sync --dry-run))`+"`"+`$`, func(command string) error { w.Run(command); return nil })
+	ctx.Step(`^I execute `+"`"+`(colt (?:status|sync|sync --workspace [A-Za-z0-9._-]+|sync --dry-run|sync --fetch|sync --pull|sync --fetch --dry-run|sync --pull --dry-run))`+"`"+`$`, func(command string) error { w.Run(command); return nil })
 	ctx.Step(`^I execute `+"`"+`colt mirror ([^ ]+) ([^ ]+) --namespace ([^ ]+)`+"`"+`$`, func(sourceAlias, targetAlias, namespace string) error {
 		if err := configureMirror(sourceAlias, sourceAlias, targetAlias); err != nil {
 			return err

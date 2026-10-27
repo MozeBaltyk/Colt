@@ -209,6 +209,7 @@ type fakeGit struct {
 	health                gitnative.HealthState
 	healthErr             error
 	healthFunc            func(string) (gitnative.HealthState, error)
+	fetchErr, pullErr     error
 }
 
 func (g *fakeGit) Available() error { g.calls = append(g.calls, "available"); return g.availableErr }
@@ -282,6 +283,14 @@ func (g *fakeGit) ValidateTag(_ context.Context, _ /* dir */, tag string) error 
 func (g *fakeGit) ValidateRepoConfig(context.Context, string) error {
 	g.calls = append(g.calls, "validate-config")
 	return nil
+}
+func (g *fakeGit) Fetch(_ context.Context, dir string, _ []string, _, _, _ string) error {
+	g.calls = append(g.calls, "fetch:"+dir)
+	return g.fetchErr
+}
+func (g *fakeGit) Pull(_ context.Context, dir string, _ []string, _, _, _ string) error {
+	g.calls = append(g.calls, "pull:"+dir)
+	return g.pullErr
 }
 func (g *fakeGit) Health(_ context.Context, dir string) (gitnative.HealthState, error) {
 	g.calls = append(g.calls, "health")

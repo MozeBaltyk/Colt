@@ -29,7 +29,9 @@ func RegisterHealthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		p := fixture.WithTokenEnv(fixture.StdProvider("github", "team"), fixture.TokenEnv)
 		policy := &config.Policy{Repository: config.RepositoryPolicy{Require: []string{"LICENSE", "README.md"}, DefaultBranch: "main", AllowedVisibility: []string{"private"}}}
 		include := []string{"demo"}
-		cfg := config.Config{Providers: map[string]config.Provider{"work": p}, Policy: policy, Workspace: &config.Workspace{Repositories: []config.RepositorySelection{{Provider: "work", Namespace: "team", Include: &include}}}}
+		cfg := config.Config{Providers: map[string]config.Provider{"work": p}, Policy: policy, Workspaces: map[string]config.Workspace{
+			"managed": {Path: w.Dir, Repositories: []config.RepositorySelection{{Provider: "work", Namespace: "team", Include: &include}}},
+		}}
 		if err := config.Save(w.ConfigPath, cfg); err != nil {
 			return err
 		}
@@ -38,7 +40,7 @@ func RegisterHealthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 		w.Client.ListRepos = []provider.Repository{remote}
 		w.Git.Real = false
 		w.Git.HealthState = gitnative.HealthState{Name: p.GitName, Email: p.GitEmail, Origin: remote.CloneURL, Clean: true}
-		for _, dir := range []string{w.Dir, filepath.Join(w.Dir, "team", "demo")} {
+		for _, dir := range []string{w.Dir, filepath.Join(w.Dir, "demo")} {
 			if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o700); err != nil {
 				return err
 			}
@@ -56,7 +58,7 @@ func RegisterHealthSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	}
 
 	ctx.Step(`^a healthy repository and managed workspace with project health policy$`, setup)
-	ctx.Step(`^I run the health command `+"`"+`(colt check(?: --all)?)`+"`"+`$`, func(command string) error { w.Run(command); return nil })
+	ctx.Step(`^I run the health command `+"`"+`(colt check(?: --workspace managed| --all)?)`+"`"+`$`, func(command string) error { w.Run(command); return nil })
 	ctx.Step(`^every selected repository is checked through Git and the provider API$`, func() error {
 		if !slices.Contains(w.Git.Operations, "health") || !w.Client.Called("Get") {
 			return fmt.Errorf("operations=%v provider=%v", w.Git.Operations, w.Client.Calls)

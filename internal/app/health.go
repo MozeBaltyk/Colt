@@ -61,14 +61,17 @@ type healthWorkspaceItem struct {
 
 func (a *App) checkCommand() *cobra.Command {
 	all := false
+	var selected string
 	cmd := &cobra.Command{Use: "check", Short: "Check repository health without mutation", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		return a.check(cmd, all)
+		return a.check(cmd, all, selected)
 	}}
-	cmd.Flags().BoolVar(&all, "all", false, "check every repository selected by the workspace")
+	cmd.Flags().BoolVar(&all, "all", false, "check every repository in every configured workspace")
+	cmd.Flags().StringVar(&selected, "workspace", "", "configured workspace name")
+	cmd.MarkFlagsMutuallyExclusive("all", "workspace")
 	return cmd
 }
 
-func (a *App) check(cmd *cobra.Command, all bool) error {
+func (a *App) check(cmd *cobra.Command, all bool, selected string) error {
 	if a.pathErr != nil {
 		return codedError{2, errors.New("health check configuration failed")}
 	}
@@ -79,31 +82,47 @@ func (a *App) check(cmd *cobra.Command, all bool) error {
 	if a.Git == nil || a.NewClient == nil {
 		return codedError{2, errors.New("health check operation is unavailable")}
 	}
-	rootPath, err := a.workDir()
-	if err != nil {
-		return codedError{2, errors.New("health check operation failed")}
-	}
 	results := newHealthResults()
-	if all {
-		if cfg.Workspace == nil {
+	if all || selected != "" {
+		if len(cfg.Workspaces) == 0 {
 			return codedError{2, errors.New("health workspace is not configured")}
 		}
-		items, planningLines := a.healthWorkspacePlan(cmd.Context(), cfg)
-		for _, line := range planningLines {
-			results.operation(line)
-		}
-		workspaceRoot, openErr := os.OpenRoot(rootPath)
-		if openErr != nil || !stableRoot(workspaceRoot) {
-			if workspaceRoot != nil {
-				workspaceRoot.Close()
+		names := make([]string, 0, len(cfg.Workspaces))
+		if selected != "" {
+			if _, ok := cfg.Workspaces[selected]; !ok {
+				return codedError{2, fmt.Errorf("unknown workspace %q", selected)}
 			}
-			return codedError{2, errors.New("health workspace root cannot be opened safely")}
+			names = append(names, selected)
+		} else {
+			for name := range cfg.Workspaces {
+				names = append(names, name)
+			}
+			sort.Strings(names)
 		}
-		defer workspaceRoot.Close()
-		for _, item := range items {
-			a.checkWorkspaceRepository(cmd.Context(), cfg, rootPath, workspaceRoot, item, results)
+		for _, name := range names {
+			workspace := cfg.Workspaces[name]
+			items, planningLines := a.healthWorkspacePlan(cmd.Context(), cfg, name, workspace)
+			for _, line := range planningLines {
+				results.operation(line)
+			}
+			workspaceRoot, openErr := openWorkspaceRoot(workspace.Path)
+			if openErr != nil || !stableRoot(workspaceRoot) {
+				if workspaceRoot != nil {
+					workspaceRoot.Close()
+				}
+				results.operation(name + "/*")
+				continue
+			}
+			for _, item := range items {
+				a.checkWorkspaceRepository(cmd.Context(), cfg, name, workspaceRoot.Name(), workspaceRoot, item, results)
+			}
+			workspaceRoot.Close()
 		}
 	} else {
+		rootPath, err := a.workDir()
+		if err != nil {
+			return codedError{2, errors.New("health check operation failed")}
+		}
 		a.checkCurrentRepository(cmd.Context(), cfg, rootPath, results)
 	}
 
@@ -124,31 +143,32 @@ func (a *App) check(cmd *cobra.Command, all bool) error {
 	return nil
 }
 
-func (a *App) healthWorkspacePlan(ctx context.Context, cfg config.Config) ([]healthWorkspaceItem, []string) {
+func (a *App) healthWorkspacePlan(ctx context.Context, cfg config.Config, workspaceName string, workspace config.Workspace) ([]healthWorkspaceItem, []string) {
 	var items []healthWorkspaceItem
 	var operationLabels []string
 	identities, paths := map[string]bool{}, map[string]bool{}
 	appendItem := func(selection config.RepositorySelection, p config.Provider, name string, listed *provider.Repository, client provider.Client, planningError bool) {
-		path, err := workspacePath(selection.Namespace, name)
+		path, err := workspacePath("", name)
 		if err != nil {
-			operationLabels = append(operationLabels, filepath.ToSlash(selection.Namespace)+"/*")
+			operationLabels = append(operationLabels, workspaceName+"/*")
 			return
 		}
 		identity := selection.Provider + "\x00" + selection.Namespace + "\x00" + repositoryKey(name, p.Type)
 		pathKey := strings.ToLower(filepath.ToSlash(path))
 		if identities[identity] || paths[pathKey] {
-			operationLabels = append(operationLabels, filepath.ToSlash(path))
+			operationLabels = append(operationLabels, workspaceName+"/"+filepath.ToSlash(path))
 			return
 		}
 		identities[identity], paths[pathKey] = true, true
 		items = append(items, healthWorkspaceItem{alias: selection.Provider, project: name, path: path, provider: p, listed: listed, client: client, planningError: planningError})
 	}
-	for _, selection := range cfg.Workspace.Repositories {
+	for _, selection := range workspace.Repositories {
 		if selection.Include != nil && len(*selection.Include) == 0 {
 			continue
 		}
 		p := cfg.Providers[selection.Provider]
-		selectionLabel := filepath.ToSlash(selection.Namespace) + "/*"
+		p.Namespace = selection.Namespace
+		selectionLabel := workspaceName + "/*"
 		namedFailure := func(client provider.Client) {
 			if selection.Include == nil {
 				operationLabels = append(operationLabels, selectionLabel)
@@ -258,8 +278,8 @@ func (a *App) checkCurrentRepository(ctx context.Context, cfg config.Config, roo
 	a.checkRemote(ctx, cfg, ".", project, p, client, nil, &state, false, results)
 }
 
-func (a *App) checkWorkspaceRepository(ctx context.Context, cfg config.Config, rootPath string, workspaceRoot *os.Root, item healthWorkspaceItem, results *healthResults) {
-	label := filepath.ToSlash(item.path)
+func (a *App) checkWorkspaceRepository(ctx context.Context, cfg config.Config, workspaceName, rootPath string, workspaceRoot *os.Root, item healthWorkspaceItem, results *healthResults) {
+	label := workspaceName + "/" + filepath.ToSlash(item.path)
 	if item.planningError {
 		results.operation(label)
 	}

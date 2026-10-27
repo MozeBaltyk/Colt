@@ -4,30 +4,36 @@
 
 ## Manifest
 
-The workspace is declared by a small data-only YAML document:
+Workspaces are declared by a small data-only YAML document. Names are unique map keys; every workspace has its own absolute local path and repository selections:
 
 ``` yaml
-workspace:
-  repositories:
-    - provider: work
-      namespace: example-org
-      include: [api, web]
-    - provider: personal
-      namespace: example-user
+workspaces:
+  services:
+    path: /home/example/work/services
+    repositories:
+      - provider: work
+        namespace: example-org
+        include: [api, web]
+  personal:
+    path: /home/example/work/personal
+    repositories:
+      - provider: personal
+        namespace: example-user
 ```
 
-Omitting `include` selects all repositories visible in that exact provider namespace. An explicit empty `include: []` selects none. Without `workspace.path`, the workspace root is `App.WorkDir`, or the current directory for the CLI, and each repository is placed at `<namespace>/<project>` beneath that root. A saved absolute `workspace.path` uses the flat `<path>/<project>` layout.
+Omitting `include` selects all repositories visible in that exact provider namespace. An explicit empty `include: []` selects none. Repositories are placed directly at `<workspace.path>/<project>`. Workspace paths must be unique. The former singular `workspace:` form is invalid and MUST produce a migration error directing users to `workspaces.<name>`.
 
 | ID                       | Requirement                                                                                                                                                                                                                                                                                                                                                                                  | Acceptance specification                                                              |
 |:-------------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:--------------------------------------------------------------------------------------|
-| `WORKSPACE-MANIFEST-001` | Colt **MUST** accept a single `workspace.repositories` list containing provider alias, namespace, and optional repository selections. Omitted `include` **MUST** mean all visible repositories in that selection. Unknown or executable YAML features **MUST** be rejected, and every derived repository identity and local path **MUST** be unique, deterministic, and confined beneath the workspace root. | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
+| `WORKSPACE-MANIFEST-001` | Colt **MUST** accept a bounded `workspaces` map whose safe unique names identify declarations containing a required clean absolute `path` and a `repositories` list. Omitted `include` **MUST** mean all visible repositories in that exact selection; an empty list means none. Workspace paths **MUST** be unique, and every derived repository identity and flat project path **MUST** be unique, deterministic, and confined beneath its workspace root. Unknown, singular `workspace:`, or executable YAML features **MUST** be rejected before provider or local access. | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
+| `WORKSPACE-SELECTION-001` | `colt status` and no-namespace `colt sync` **MUST** process every configured workspace in deterministic name order when `--workspace` is omitted. `--workspace <name>` **MUST** select exactly one configured workspace and reject unknown names. Output **MUST** identify the workspace on every result line. A failure in one workspace **MUST NOT** prevent independent workspaces from being inspected or reconciled. | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
 
 ## Status And Sync
 
 ``` text
-colt status
-colt sync [--dry-run]
-colt sync <namespace> --path <existing-directory> [--provider <alias>] [--save] [--dry-run]
+colt status [--workspace <name>]
+colt sync [--workspace <name>] [--dry-run] [--fetch | --pull]
+colt sync <namespace> --path <existing-directory> [--provider <alias>] [--workspace <name> --save] [--dry-run] [--fetch | --pull]
 ```
 
 Top-level `colt status` is workspace status; `colt auth status` is provider configuration/connectivity status.
@@ -36,24 +42,26 @@ Top-level `colt status` is workspace status; `colt auth status` is provider conf
 
 | ID                     | Requirement                                                                                                                                                                                                                                                | Acceptance specification                                                              |
 |:-----------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:--------------------------------------------------------------------------------------|
-| `WORKSPACE-STATUS-001` | `colt status` **MUST** read the manifest, local workspace, and remote metadata without mutation and report deterministic categories for desired repositories that are present, need cloning, are absent remotely, or have remote/configuration mismatches. | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
+| `WORKSPACE-STATUS-001` | `colt status` **MUST** read each selected manifest entry, local workspace root, and remote metadata without mutation and report workspace-qualified deterministic categories for desired repositories that are present, need cloning, absent remotely, or mismatched. | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
 
 ### colt sync Nuances
 
 | ID                       | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Acceptance specification                                                              |
 |:-------------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:--------------------------------------------------------------------------------------|
-| `WORKSPACE-SYNC-001`   | `colt sync` **MUST** be manifest-driven: clone only missing desired repositories, never clone extra ones. It **MUST** report existing, inconsistent, and remotely absent repositories. Independent failures **MUST** be summarized without discarding completed clones. `colt sync` **MUST** be idempotent — running again against an already-synced workspace is safe and reports no changes.                                                                                                                                               | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
+| `WORKSPACE-SYNC-001`   | `colt sync` **MUST** be manifest-driven: clone only missing desired repositories, never clone extra ones. It **MUST** report existing, inconsistent, and remotely absent repositories. Independent failures **MUST** be summarized without discarding completed clones. A missing configured workspace path **MUST** be created with owner-only permissions; dry-run, status, and check **MUST NOT** create it. `colt sync` **MUST** be idempotent — running again against an already-synced workspace is safe and reports no changes.                                                                                                                                               | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
 | `WORKSPACE-DRYRUN-001` | `colt sync --dry-run` **MUST** compute and report the same reconciliation plan while performing no local, remote, or configuration mutation. Remote metadata reads **MAY** occur.                                                                                                                                          | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
 | `WORKSPACE-SAFETY-001` | Reconciliation **MUST** keep local operations within the workspace root and **MUST NOT** rewrite origins, delete or prune repositories, overwrite unrelated or non-empty paths, or reset dirty or diverged repositories.                                                                                                   | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
+| `WORKSPACE-REFRESH-001` | `colt sync --fetch` **MUST** run a bounded `git fetch --prune` from the validated `origin` for each present repository without changing its current branch, index, or worktree. It **MUST NOT** refresh a repository cloned by the same invocation. Independent fetch failures **MUST** be summarized without preventing other repositories from refreshing. In dry-run mode Colt **MUST** report each intended fetch without invoking Git mutation. | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
+| `WORKSPACE-PULL-001` | `colt sync --pull` **MUST** update each present repository's checked-out branch from the same branch on its validated `origin`, using fast-forward-only semantics with hooks disabled. It **MUST** reject dirty worktrees, detached heads, divergence, missing remote branches, and unsafe repository-local Git configuration without resetting, merging, rebasing, or discarding local work. Independent pull failures **MUST** be summarized. In dry-run mode Colt **MUST** report each intended pull without invoking Git mutation. `--pull` and `--fetch` **MUST** be mutually exclusive. | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
 
-The namespace form selects every repository in that exact namespace and places it directly beneath the explicit existing directory. `--save` persists the resolved provider, namespace, and absolute path after validation and before cloning; it is incompatible with `--dry-run`. Saved paths are honored by no-argument sync and status from any current directory. Existing manifests without a path retain the legacy namespace-prefixed layout.
+The namespace form selects every repository in that exact namespace and places it directly beneath the explicit existing directory. `--save` requires `--workspace <name>` and persists that named workspace after validation and before cloning; it is incompatible with `--dry-run`. Without `--save`, `--workspace` is not required for an ad-hoc namespace sync.
 
 ### colt sync vs colt clone vs colt mirror
 
 | Command | Direction | Scope | What it does |
 |:--------|:----------|:------|:-------------|
 | `colt clone` | provider → local | single repo | Clone one repo from a provider, configure credential helper |
-| `colt sync` | provider → local | manifest-driven | Clone missing repos from a declared workspace manifest; idempotent; never prunes or rewrites |
+| `colt sync` | provider → local | manifest-driven | Clone missing repos; optionally fetch-prune remote branches or fast-forward clean worktrees when explicitly requested |
 | `colt mirror` | provider → provider | namespace / one repo | Copy repos from a source provider namespace (or a single repository with `--repository`) to a target provider; one-way copy, not continuous sync |
 
 ### Mirror (M7 prerequisite)
@@ -74,4 +82,4 @@ colt mirror <source-provider> <target-provider> [--namespace <namespace>] [--tar
 | `MIRROR-006`        | `--target-namespace` **MUST** redirect repository creation and push to a validated namespace on the target provider, defaulting to the target provider's configured namespace when omitted. It **MUST NOT** weaken target-side host/namespace/repository validation.                                                  | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
 | `MIRROR-007`        | `--repository <project>` **MUST** mirror exactly one repository from the source namespace and **MUST** fail actionably if no listed source repository matches. The source and target names **MUST** be matched case-insensitively so a target provider that normalizes names (for example GitLab lowercasing) still verifies. | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
 
-Status and sync inspect and install through an opened `os.Root`, without following workspace path links. Clone data is prepared in a private temporary directory and descriptor-relatively installed only after Git and credential-helper setup succeeds. Destructive pruning and bulk fetch/update remain deferred.
+Status and sync resolve each workspace root's ancestors once (so platform paths such as macOS `/tmp` work), reject a link at the root itself or beneath it, and inspect or install through an opened `os.Root`. `colt sync` creates a missing configured workspace path with owner-only permissions; `colt status` and `colt check` never create it. Clone data is prepared in a private temporary directory and descriptor-relatively installed only after Git and credential-helper setup succeeds. Destructive local repository pruning remains deferred.

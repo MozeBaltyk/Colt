@@ -28,19 +28,34 @@ type workspaceItem struct {
 }
 
 func (a *App) workspaceStatusCommand() *cobra.Command {
-	return &cobra.Command{Use: "status", Short: "Report workspace reconciliation status", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		items, err := a.workspacePlan(cmd.Context())
+	var selected string
+	cmd := &cobra.Command{Use: "status", Short: "Report selected workspace reconciliation status", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		cfg, names, err := a.selectedWorkspaces(selected)
 		if err != nil {
 			return err
 		}
-		return writeWorkspacePlan(cmd.OutOrStdout(), items)
+		var failures []error
+		for _, name := range names {
+			items, _, planErr := a.workspacePlanConfig(cmd.Context(), cfg, cfg.Workspaces[name])
+			if planErr != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s: failed: %v\n", name, planErr)
+				failures = append(failures, fmt.Errorf("%s: %w", name, planErr))
+				continue
+			}
+			if err := writeWorkspacePlan(cmd.OutOrStdout(), name, items); err != nil {
+				failures = append(failures, fmt.Errorf("%s: %w", name, err))
+			}
+		}
+		return workspaceFailures("workspace status incomplete", failures)
 	}}
+	cmd.Flags().StringVar(&selected, "workspace", "", "configured workspace name")
+	return cmd
 }
 
 func (a *App) syncCommand() *cobra.Command {
-	var providerAlias, path string
-	dryRun, save := false, false
-	cmd := &cobra.Command{Use: "sync [namespace]", Short: "Clone missing repositories declared by the workspace", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	var providerAlias, path, selected string
+	dryRun, save, fetch, pull := false, false, false, false
+	cmd := &cobra.Command{Use: "sync [namespace]", Short: "Reconcile repositories in selected workspaces", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if a.pathErr != nil {
 			return a.pathErr
 		}
@@ -57,6 +72,9 @@ func (a *App) syncCommand() *cobra.Command {
 		if save && dryRun {
 			return errors.New("--save cannot be combined with --dry-run")
 		}
+		if save && selected == "" {
+			return errors.New("--save requires --workspace")
+		}
 		cfg, err := config.Load(a.ConfigPath)
 		if err != nil {
 			return err
@@ -66,7 +84,7 @@ func (a *App) syncCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("resolve workspace path: %w", err)
 			}
-			root, err := openWorkRoot(abs)
+			root, err := openWorkspaceRoot(abs)
 			if err != nil {
 				return err
 			}
@@ -87,89 +105,55 @@ func (a *App) syncCommand() *cobra.Command {
 				planConfig.Providers[name] = configured
 			}
 			planConfig.Providers[alias] = p
-			planConfig.Workspace = &config.Workspace{Path: abs, Repositories: []config.RepositorySelection{{Provider: alias, Namespace: args[0]}}}
 			cfg = planConfig
+			label := selected
+			if label == "" {
+				label = "ad-hoc"
+			}
+			workspace := config.Workspace{Path: abs, Repositories: []config.RepositorySelection{{Provider: alias, Namespace: args[0]}}}
+			if save {
+				if err := a.saveWorkspaceSelection(cmd.Context(), &cfg, selected, workspace); err != nil {
+					return err
+				}
+			}
+			return a.syncWorkspace(cmd, cfg, label, workspace, dryRun, fetch, pull, false)
 		}
-		items, rootPath, err := a.workspacePlanConfig(cmd.Context(), cfg)
+		_, names, err := a.selectedWorkspacesConfig(cfg, selected)
 		if err != nil {
 			return err
 		}
-		planErr := writeWorkspacePlan(cmd.OutOrStdout(), items)
-		if dryRun {
-			return planErr
-		}
-		if save {
-			stored, err := config.Load(a.ConfigPath)
-			if err != nil {
-				return err
-			}
-			if err := a.saveWorkspaceSelection(cmd.Context(), &stored, cfg.Workspace.Path, cfg.Workspace.Repositories[0]); err != nil {
-				return err
+		var failures []error
+		for _, name := range names {
+			if err := a.syncWorkspace(cmd, cfg, name, cfg.Workspaces[name], dryRun, fetch, pull, !dryRun); err != nil {
+				failures = append(failures, fmt.Errorf("%s: %w", name, err))
 			}
 		}
-		needsClone := false
-		for _, item := range items {
-			needsClone = needsClone || item.category == "to-clone"
-		}
-		if !needsClone {
-			return planErr
-		}
-		if a.Git == nil {
-			return errors.New("native Git is unavailable")
-		}
-		if err := a.Git.Available(); err != nil {
-			return err
-		}
-		root, err := openWorkRoot(rootPath)
-		if err != nil {
-			return err
-		}
-		defer root.Close()
-		var failures []string
-		for i := range items {
-			item := &items[i]
-			if item.category != "to-clone" {
-				continue
-			}
-			if err := a.syncClone(cmd.Context(), root, item); err != nil {
-				failures = append(failures, item.path+": "+err.Error())
-				fmt.Fprintf(cmd.OutOrStdout(), "failed %s: %v\n", item.path, err)
-				continue
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "cloned %s\n", item.path)
-		}
-		if len(failures) != 0 {
-			if planErr != nil {
-				return fmt.Errorf("workspace sync incomplete: %d clone failures; %w", len(failures), planErr)
-			}
-			return fmt.Errorf("workspace sync incomplete: %d clone failures", len(failures))
-		}
-		if planErr != nil {
-			return planErr
-		}
-		return nil
+		return workspaceFailures("workspace sync incomplete", failures)
 	}}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report the reconciliation plan without mutation")
 	cmd.Flags().StringVar(&providerAlias, "provider", "", "provider alias")
 	cmd.Flags().StringVar(&path, "path", "", "existing workspace directory")
 	cmd.Flags().BoolVar(&save, "save", false, "save this namespace and workspace path")
+	cmd.Flags().BoolVar(&fetch, "fetch", false, "fetch and prune present repositories")
+	cmd.Flags().BoolVar(&pull, "pull", false, "fast-forward present repositories")
+	cmd.Flags().StringVar(&selected, "workspace", "", "configured workspace name")
+	cmd.MarkFlagsMutuallyExclusive("fetch", "pull")
 	return cmd
 }
 
-func (a *App) saveWorkspaceSelection(ctx context.Context, cfg *config.Config, path string, selection config.RepositorySelection) error {
-	if cfg.Workspace == nil {
-		cfg.Workspace = &config.Workspace{}
+func (a *App) saveWorkspaceSelection(ctx context.Context, cfg *config.Config, name string, incoming config.Workspace) error {
+	if cfg.Workspaces == nil {
+		cfg.Workspaces = map[string]config.Workspace{}
 	}
-	if cfg.Workspace.Path == "" && len(cfg.Workspace.Repositories) != 0 {
-		return errors.New("existing workspace uses namespace/repository layout; refusing to change its layout")
+	workspace := cfg.Workspaces[name]
+	if workspace.Path != "" && workspace.Path != incoming.Path {
+		return fmt.Errorf("workspace %q is already saved at %q", name, workspace.Path)
 	}
-	if cfg.Workspace.Path != "" && cfg.Workspace.Path != path {
-		return fmt.Errorf("workspace is already saved at %q", cfg.Workspace.Path)
-	}
-	cfg.Workspace.Path = path
-	repositories := cfg.Workspace.Repositories[:0]
+	workspace.Path = incoming.Path
+	repositories := workspace.Repositories[:0]
 	found := false
-	for _, current := range cfg.Workspace.Repositories {
+	selection := incoming.Repositories[0]
+	for _, current := range workspace.Repositories {
 		if current.Provider == selection.Provider && config.NamespaceEqual(current.Namespace, selection.Namespace, cfg.Providers[selection.Provider].Type) {
 			if found {
 				continue
@@ -182,8 +166,12 @@ func (a *App) saveWorkspaceSelection(ctx context.Context, cfg *config.Config, pa
 	if !found {
 		repositories = append(repositories, selection)
 	}
-	cfg.Workspace.Repositories = repositories
-	if _, _, err := a.workspacePlanConfig(ctx, *cfg); err != nil {
+	workspace.Repositories = repositories
+	cfg.Workspaces[name] = workspace
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("refusing to save conflicting workspace: %w", err)
+	}
+	if _, _, err := a.workspacePlanConfig(ctx, *cfg, workspace); err != nil {
 		return fmt.Errorf("refusing to save conflicting workspace: %w", err)
 	}
 	save := a.SaveConfig
@@ -191,6 +179,17 @@ func (a *App) saveWorkspaceSelection(ctx context.Context, cfg *config.Config, pa
 		save = config.Save
 	}
 	return save(a.ConfigPath, *cfg)
+}
+
+func (a *App) selectedWorkspaces(selected string) (config.Config, []string, error) {
+	if a.pathErr != nil {
+		return config.Config{}, nil, a.pathErr
+	}
+	cfg, err := config.Load(a.ConfigPath)
+	if err != nil {
+		return config.Config{}, nil, err
+	}
+	return a.selectedWorkspacesConfig(cfg, selected)
 }
 
 func (a *App) workDir() (string, error) {
@@ -204,31 +203,28 @@ func (a *App) workDir() (string, error) {
 	return dir, nil
 }
 
-func (a *App) workspacePlan(ctx context.Context) ([]workspaceItem, error) {
-	if a.pathErr != nil {
-		return nil, a.pathErr
+func (a *App) selectedWorkspacesConfig(cfg config.Config, selected string) (config.Config, []string, error) {
+	if selected != "" {
+		if _, ok := cfg.Workspaces[selected]; !ok {
+			return cfg, nil, fmt.Errorf("unknown workspace %q", selected)
+		}
+		return cfg, []string{selected}, nil
 	}
-	cfg, err := config.Load(a.ConfigPath)
-	if err != nil {
-		return nil, err
+	if len(cfg.Workspaces) == 0 {
+		return cfg, nil, errors.New("workspace is not configured")
 	}
-	if cfg.Workspace == nil {
-		return nil, errors.New("workspace is not configured")
+	names := make([]string, 0, len(cfg.Workspaces))
+	for name := range cfg.Workspaces {
+		names = append(names, name)
 	}
-	items, _, err := a.workspacePlanConfig(ctx, cfg)
-	return items, err
+	sort.Strings(names)
+	return cfg, names, nil
 }
 
-func (a *App) workspacePlanConfig(ctx context.Context, cfg config.Config) ([]workspaceItem, string, error) {
-	if cfg.Workspace == nil {
-		return nil, "", errors.New("workspace is not configured")
-	}
-	if err := cfg.Validate(); err != nil {
-		return nil, "", err
-	}
+func (a *App) workspacePlanConfig(ctx context.Context, cfg config.Config, workspace config.Workspace) ([]workspaceItem, string, error) {
 	var items []workspaceItem
 	identities, paths := map[string]bool{}, map[string]bool{}
-	for _, selection := range cfg.Workspace.Repositories {
+	for _, selection := range workspace.Repositories {
 		if selection.Include != nil && len(*selection.Include) == 0 {
 			continue
 		}
@@ -278,10 +274,7 @@ func (a *App) workspacePlanConfig(ctx context.Context, cfg config.Config) ([]wor
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			path, err := workspacePath(selection.Namespace, name)
-			if cfg.Workspace.Path != "" {
-				path, err = workspacePath("", name)
-			}
+			path, err := workspacePath("", name)
 			if err != nil {
 				return nil, "", err
 			}
@@ -300,25 +293,130 @@ func (a *App) workspacePlanConfig(ctx context.Context, cfg config.Config) ([]wor
 		}
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].path < items[j].path })
-	rootPath := cfg.Workspace.Path
-	if rootPath == "" {
-		var err error
-		rootPath, err = a.workDir()
-		if err != nil {
-			return nil, "", err
-		}
-	}
-	root, err := openWorkRoot(rootPath)
+	rootPath := workspace.Path
+	root, err := openWorkspaceRoot(rootPath)
 	if err != nil {
 		return nil, "", err
 	}
 	defer root.Close()
+	rootPath = root.Name()
 	for i := range items {
 		if items[i].category == "remote" {
 			items[i].category, items[i].detail = classifyWorkspacePath(root, items[i].path, items[i].repository)
 		}
 	}
 	return items, rootPath, nil
+}
+
+func (a *App) syncWorkspace(cmd *cobra.Command, cfg config.Config, name string, workspace config.Workspace, dryRun, fetch, pull, createRoot bool) error {
+	if createRoot {
+		if err := ensureWorkspaceRoot(workspace.Path); err != nil {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: failed: %v\n", name, err)
+			return err
+		}
+	}
+	items, rootPath, err := a.workspacePlanConfig(cmd.Context(), cfg, workspace)
+	if err != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "%s: failed: %v\n", name, err)
+		return err
+	}
+	planErr := writeWorkspacePlan(cmd.OutOrStdout(), name, items)
+	if dryRun {
+		for _, item := range items {
+			if item.category == "present" && (fetch || pull) {
+				action := "would-fetch"
+				if pull {
+					action = "would-pull"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s: %s %s\n", name, action, filepath.ToSlash(item.path))
+			}
+		}
+		return planErr
+	}
+	needsGit := false
+	for _, item := range items {
+		needsGit = needsGit || item.category == "to-clone" || item.category == "present" && (fetch || pull)
+	}
+	if !needsGit {
+		return planErr
+	}
+	if a.Git == nil {
+		err := errors.New("native Git is unavailable")
+		fmt.Fprintf(cmd.OutOrStdout(), "%s: failed: %v\n", name, err)
+		return err
+	}
+	if err := a.Git.Available(); err != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "%s: failed: %v\n", name, err)
+		return err
+	}
+	root, err := openWorkspaceRoot(rootPath)
+	if err != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "%s: failed: %v\n", name, err)
+		return err
+	}
+	defer root.Close()
+	var failures []error
+	for i := range items {
+		item := &items[i]
+		if item.category == "present" && (fetch || pull) {
+			repositoryRoot, opErr := root.OpenRoot(item.path)
+			if opErr == nil && !stableWorkspaceRepository(root, repositoryRoot, item.path) {
+				opErr = errors.New("repository path changed before refresh")
+			}
+			if opErr == nil {
+				operationCtx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
+				expected := []string{item.repository.CloneURL, item.repository.SSHURL}
+				if fetch {
+					opErr = a.Git.Fetch(operationCtx, repositoryRoot.Name(), expected, item.alias, item.project, item.namespace)
+				} else {
+					opErr = a.Git.Pull(operationCtx, repositoryRoot.Name(), expected, item.alias, item.project, item.namespace)
+				}
+				cancel()
+			}
+			if repositoryRoot != nil {
+				opErr = errors.Join(opErr, repositoryRoot.Close())
+			}
+			if opErr != nil {
+				failures = append(failures, opErr)
+				fmt.Fprintf(cmd.OutOrStdout(), "%s: failed %s: %v\n", name, item.path, opErr)
+				continue
+			}
+			action := "fetched"
+			if pull {
+				action = "pulled"
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: %s %s\n", name, action, item.path)
+			continue
+		}
+		if item.category != "to-clone" {
+			continue
+		}
+		if err := a.syncClone(cmd.Context(), root, item); err != nil {
+			failures = append(failures, err)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: failed %s: %v\n", name, item.path, err)
+			continue
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s: cloned %s\n", name, item.path)
+	}
+	if len(failures) != 0 {
+		return fmt.Errorf("%d operation failures", len(failures))
+	}
+	return planErr
+}
+
+func workspaceFailures(message string, failures []error) error {
+	if len(failures) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s: %d workspace failures: %w", message, len(failures), errors.Join(failures...))
+}
+
+func stableWorkspaceRepository(root, repositoryRoot *os.Root, path string) bool {
+	opened, openErr := repositoryRoot.Stat(".")
+	current, pathErr := root.Lstat(path)
+	// shortcut: external Git still needs a pathname after this same-file check;
+	// use a directory handle when os/exec supports that portably.
+	return openErr == nil && pathErr == nil && current.Mode()&os.ModeSymlink == 0 && current.IsDir() && os.SameFile(opened, current)
 }
 
 func repositoryKey(name, providerType string) string {
@@ -404,7 +502,7 @@ func classifyWorkspacePath(root *os.Root, path string, repository provider.Repos
 	}
 	origin, err := readOrigin(repositoryRoot)
 	if err != nil || origin == "" {
-		return "mismatch", "origin is missing or unreadable"
+		return "mismatch", "origin is missing, ambiguous, or unreadable"
 	}
 	valid := origin == repository.CloneURL
 	if repository.SSHURL != "" {
@@ -431,7 +529,8 @@ func readOrigin(root *os.Root) (string, error) {
 		return "", errors.New("Git config changed while opening")
 	}
 	scanner := bufio.NewScanner(io.LimitReader(f, 1<<20))
-	section := ""
+	section, origin := "", ""
+	count := 0
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
@@ -443,16 +542,23 @@ func readOrigin(root *os.Root) (string, error) {
 		}
 		key, value, ok := strings.Cut(line, "=")
 		if ok && strings.EqualFold(strings.TrimSpace(key), "url") {
-			return strings.TrimSpace(value), nil
+			count++
+			origin = strings.TrimSpace(value)
 		}
 	}
-	return "", scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	if count != 1 || origin == "" {
+		return "", errors.New("origin must have exactly one URL")
+	}
+	return origin, nil
 }
 
-func writeWorkspacePlan(out io.Writer, items []workspaceItem) error {
+func writeWorkspacePlan(out io.Writer, workspace string, items []workspaceItem) error {
 	problems := 0
 	for _, item := range items {
-		fmt.Fprintf(out, "%s %s", item.category, filepath.ToSlash(item.path))
+		fmt.Fprintf(out, "%s: %s %s", workspace, item.category, filepath.ToSlash(item.path))
 		if item.detail != "" {
 			fmt.Fprintf(out, ": %s", item.detail)
 		}

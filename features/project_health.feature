@@ -8,9 +8,10 @@ Feature: Project health diagnostics
     And the health check has no findings and exit code 0
 
     Examples:
-      | command          |
-      | colt check       |
-      | colt check --all |
+      | command                        |
+      | colt check                     |
+      | colt check --workspace managed |
+      | colt check --all               |
 
   @HEALTH-POLICY-001
   Scenario: Reject unknown health policy before repository access

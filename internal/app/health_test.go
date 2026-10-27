@@ -128,7 +128,7 @@ func TestCheckAllContinuesAfterIndependentRepositoryFailure(t *testing.T) {
 	include := []string{"bad", "good"}
 	policy := &config.Policy{Repository: config.RepositoryPolicy{DefaultBranch: "main", AllowedVisibility: []string{"private"}}}
 	path := filepath.Join(dir, "config.yaml")
-	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"work": p}, Workspace: &config.Workspace{Repositories: []config.RepositorySelection{{Provider: "work", Namespace: "team", Include: &include}}}, Policy: policy}); err != nil {
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"work": p}, Workspaces: map[string]config.Workspace{"managed": {Path: dir, Repositories: []config.RepositorySelection{{Provider: "work", Namespace: "team", Include: &include}}}}, Policy: policy}); err != nil {
 		t.Fatal(err)
 	}
 	repos := map[string]*provider.Repository{}
@@ -137,7 +137,7 @@ func TestCheckAllContinuesAfterIndependentRepositoryFailure(t *testing.T) {
 		r := provider.Repository{Name: name, Namespace: "team", CloneURL: "https://gitlab.com/team/" + name + ".git", SSHURL: "git@gitlab.com:team/" + name + ".git", DefaultBranch: "main", Visibility: "private"}
 		repos[name] = &r
 		listed = append(listed, r)
-		repoDir := filepath.Join(dir, "team", name)
+		repoDir := filepath.Join(dir, name)
 		if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -154,7 +154,7 @@ func TestCheckAllContinuesAfterIndependentRepositoryFailure(t *testing.T) {
 	}}
 	c := &fakeClient{listRepos: listed, getRepos: repos}
 	out, err := execute(t, testApp(path, dir, g, c), "check", "--all")
-	if ExitCode(err) != 2 || c.gets != 2 || !strings.Contains(out, "team/bad: operational-error") {
+	if ExitCode(err) != 2 || c.gets != 2 || !strings.Contains(out, "managed/bad: operational-error") {
 		t.Fatalf("output=%q error=%v gets=%d", out, err, c.gets)
 	}
 }
@@ -170,16 +170,18 @@ func TestCheckAllContinuesAfterSelectionCredentialFailure(t *testing.T) {
 	path := filepath.Join(dir, "config.yaml")
 	if err := config.Save(path, config.Config{
 		Providers: map[string]config.Provider{"bad": bad, "good": good},
-		Workspace: &config.Workspace{Repositories: []config.RepositorySelection{
-			{Provider: "bad", Namespace: bad.Namespace, Include: &badInclude},
-			{Provider: "good", Namespace: good.Namespace, Include: &goodInclude},
-		}},
+		Workspaces: map[string]config.Workspace{
+			"managed": {Path: dir, Repositories: []config.RepositorySelection{
+				{Provider: "bad", Namespace: bad.Namespace, Include: &badInclude},
+				{Provider: "good", Namespace: good.Namespace, Include: &goodInclude},
+			}},
+		},
 		Policy: policy,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	remote := &provider.Repository{Name: "good", Namespace: good.Namespace, CloneURL: "https://gitlab.com/good-team/good.git", SSHURL: "git@gitlab.com:good-team/good.git", DefaultBranch: "main", Visibility: "private"}
-	repositoryDir := filepath.Join(dir, "good-team", "good")
+	repositoryDir := filepath.Join(dir, "good")
 	if err := os.MkdirAll(filepath.Join(repositoryDir, ".git"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -187,8 +189,62 @@ func TestCheckAllContinuesAfterSelectionCredentialFailure(t *testing.T) {
 	runner := &fakeGit{health: gitnative.HealthState{Name: good.GitName, Email: good.GitEmail, Origin: remote.CloneURL, Clean: true}}
 	a := &App{ConfigPath: path, WorkDir: dir, Git: runner, NewClient: func(p config.Provider, _ string) (provider.Client, error) { return client, nil }}
 	out, err := execute(t, a, "check", "--all")
-	if ExitCode(err) != 2 || !strings.Contains(out, "bad-team/bad: operational-error") || strings.Contains(out, "good-team/good:") || client.gets != 1 {
+	if ExitCode(err) != 2 || !strings.Contains(out, "managed/bad: operational-error") || strings.Contains(out, "managed/good:") || client.gets != 1 {
 		t.Fatalf("output=%q error=%v gets=%d", out, err, client.gets)
+	}
+}
+
+func TestCheckWorkspaceSelectionAllAndMutualExclusion(t *testing.T) {
+	t.Setenv("COLT_TEST_TOKEN", "test-secret-token")
+	alphaRoot, factoryRoot := t.TempDir(), t.TempDir()
+	p := appProvider()
+	p.Namespace, p.Host, p.BaseURL = "configured", "gitlab.com", "https://gitlab.com"
+	policy := &config.Policy{Repository: config.RepositoryPolicy{DefaultBranch: "main", AllowedVisibility: []string{"private"}}}
+	include := []string{"demo"}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := config.Save(path, config.Config{
+		Providers: map[string]config.Provider{"work": p},
+		Workspaces: map[string]config.Workspace{
+			"alpha":   {Path: alphaRoot, Repositories: []config.RepositorySelection{{Provider: "work", Namespace: "team", Include: &include}}},
+			"factory": {Path: factoryRoot, Repositories: []config.RepositorySelection{{Provider: "work", Namespace: "team", Include: &include}}},
+		},
+		Policy: policy,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	remote := provider.Repository{Name: "demo", Namespace: "team", CloneURL: "https://gitlab.com/team/demo.git", SSHURL: "git@gitlab.com:team/demo.git", DefaultBranch: "main", Visibility: "private"}
+	for _, root := range []string{alphaRoot, factoryRoot} {
+		writeRepository(t, root, "demo", remote.CloneURL)
+	}
+	var checked []string
+	runner := &fakeGit{healthFunc: func(dir string) (gitnative.HealthState, error) {
+		checked = append(checked, dir)
+		return gitnative.HealthState{Name: p.GitName, Email: p.GitEmail, Origin: remote.CloneURL, Clean: true}, nil
+	}}
+	client := &fakeClient{listRepos: []provider.Repository{remote}, found: &remote}
+	var clientNamespaces []string
+	a := &App{ConfigPath: path, WorkDir: t.TempDir(), Git: runner, NewClient: func(p config.Provider, _ string) (provider.Client, error) {
+		clientNamespaces = append(clientNamespaces, p.Namespace)
+		return client, nil
+	}}
+
+	if out, err := execute(t, a, "check", "--workspace", "factory"); err != nil || out != "" || len(checked) != 1 || checked[0] != filepath.Join(factoryRoot, "demo") {
+		t.Fatalf("selected check output=%q error=%v paths=%v", out, err, checked)
+	}
+	checked = nil
+	if out, err := execute(t, a, "check", "--all"); err != nil || out != "" || len(checked) != 2 || checked[0] != filepath.Join(alphaRoot, "demo") || checked[1] != filepath.Join(factoryRoot, "demo") {
+		t.Fatalf("all check output=%q error=%v paths=%v", out, err, checked)
+	}
+	for _, namespace := range clientNamespaces {
+		if namespace != "team" {
+			t.Fatalf("health client used configured namespace %q instead of workspace override", namespace)
+		}
+	}
+	if _, err := execute(t, a, "check", "--workspace", "factory", "--all"); err == nil {
+		t.Fatal("--workspace and --all were accepted together")
+	}
+	if _, err := execute(t, a, "check", "--workspace", "missing"); err == nil || !strings.Contains(err.Error(), "unknown workspace") {
+		t.Fatalf("unknown workspace error = %v", err)
 	}
 }
 

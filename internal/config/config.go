@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -17,11 +19,11 @@ import (
 )
 
 type Config struct {
-	Transport string              `yaml:"transport,omitempty"`
-	Providers map[string]Provider `yaml:"providers"`
-	Templates map[string]Template `yaml:"templates,omitempty"`
-	Workspace *Workspace          `yaml:"workspace,omitempty"`
-	Policy    *Policy             `yaml:"policy,omitempty"`
+	Transport  string               `yaml:"transport,omitempty"`
+	Providers  map[string]Provider  `yaml:"providers"`
+	Templates  map[string]Template  `yaml:"templates,omitempty"`
+	Workspaces map[string]Workspace `yaml:"workspaces,omitempty"`
+	Policy     *Policy              `yaml:"policy,omitempty"`
 }
 
 type Policy struct {
@@ -316,40 +318,49 @@ func validateWorkspaceYAML(document *yaml.Node) error {
 	if root.Kind != yaml.MappingNode {
 		return nil
 	}
-	workspace := mappingValue(root, "workspace")
-	if workspace == nil {
+	if mappingValue(root, "workspace") != nil {
+		return errors.New("workspace has been replaced by workspaces; move it under workspaces.<name>")
+	}
+	workspaces := mappingValue(root, "workspaces")
+	if workspaces == nil {
 		return nil
 	}
-	if workspace.Kind != yaml.MappingNode {
-		return errors.New("workspace must be a mapping")
+	if workspaces.Kind != yaml.MappingNode {
+		return errors.New("workspaces must be a mapping")
 	}
-	if path := mappingValue(workspace, "path"); path != nil && path.Tag != "!!str" {
-		return errors.New("workspace path must be a string")
-	}
-	repositories := mappingValue(workspace, "repositories")
-	if repositories == nil || repositories.Kind != yaml.SequenceNode {
-		return errors.New("workspace repositories must be a sequence")
-	}
-	for i, selection := range repositories.Content {
-		if selection.Kind != yaml.MappingNode {
-			return fmt.Errorf("workspace repository %d must be a mapping", i+1)
+	for wi := 0; wi < len(workspaces.Content); wi += 2 {
+		name, workspace := workspaces.Content[wi], workspaces.Content[wi+1]
+		if name.Tag != "!!str" || workspace.Kind != yaml.MappingNode {
+			return errors.New("workspace names must be strings and definitions must be mappings")
 		}
-		for _, field := range []string{"provider", "namespace"} {
-			value := mappingValue(selection, field)
-			if value == nil || value.Tag != "!!str" {
-				return fmt.Errorf("workspace repository %d %s must be a string", i+1, field)
+		if path := mappingValue(workspace, "path"); path == nil || path.Tag != "!!str" {
+			return fmt.Errorf("workspace %q path must be a string", name.Value)
+		}
+		repositories := mappingValue(workspace, "repositories")
+		if repositories == nil || repositories.Kind != yaml.SequenceNode {
+			return fmt.Errorf("workspace %q repositories must be a sequence", name.Value)
+		}
+		for i, selection := range repositories.Content {
+			if selection.Kind != yaml.MappingNode {
+				return fmt.Errorf("workspace %q repository %d must be a mapping", name.Value, i+1)
 			}
-		}
-		include := mappingValue(selection, "include")
-		if include == nil {
-			continue
-		}
-		if include.Kind != yaml.SequenceNode {
-			return fmt.Errorf("workspace repository %d include must be a sequence", i+1)
-		}
-		for _, project := range include.Content {
-			if project.Tag != "!!str" {
-				return fmt.Errorf("workspace repository %d include values must be strings", i+1)
+			for _, field := range []string{"provider", "namespace"} {
+				value := mappingValue(selection, field)
+				if value == nil || value.Tag != "!!str" {
+					return fmt.Errorf("workspace %q repository %d %s must be a string", name.Value, i+1, field)
+				}
+			}
+			include := mappingValue(selection, "include")
+			if include == nil {
+				continue
+			}
+			if include.Kind != yaml.SequenceNode {
+				return fmt.Errorf("workspace %q repository %d include must be a sequence", name.Value, i+1)
+			}
+			for _, project := range include.Content {
+				if project.Tag != "!!str" {
+					return fmt.Errorf("workspace %q repository %d include values must be strings", name.Value, i+1)
+				}
 			}
 		}
 	}
@@ -514,61 +525,91 @@ func ValidBranch(branch string) bool {
 	return true
 }
 
+func workspacePathKey(path string) string {
+	path = filepath.Clean(path)
+	// These platforms commonly use case-insensitive filesystems.
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return strings.ToLower(path)
+	}
+	return path
+}
+
 func (c Config) validateWorkspace() error {
-	if c.Workspace == nil {
+	if len(c.Workspaces) == 0 {
 		return nil
 	}
-	if len(c.Workspace.Repositories) > MaxWorkspaceSelections {
-		return fmt.Errorf("invalid workspace: at most %d repository selections are allowed", MaxWorkspaceSelections)
+	totalSelections, totalIncludes := 0, 0
+	workspacePaths := map[string]bool{}
+	names := make([]string, 0, len(c.Workspaces))
+	for name := range c.Workspaces {
+		names = append(names, name)
 	}
-	if c.Workspace.Path != "" && (!filepath.IsAbs(c.Workspace.Path) || filepath.Clean(c.Workspace.Path) != c.Workspace.Path || strings.ContainsAny(c.Workspace.Path, "\x00\r\n")) {
-		return errors.New("invalid workspace: path must be a clean absolute path")
-	}
-	totalIncludes := 0
-	paths := map[string]bool{}
-	for i, selection := range c.Workspace.Repositories {
-		p, ok := c.Providers[selection.Provider]
-		if !ok {
-			return fmt.Errorf("invalid workspace repository %d: unknown provider alias %q", i+1, selection.Provider)
+	sort.Strings(names)
+	for _, name := range names {
+		workspace := c.Workspaces[name]
+		if !nameRE.MatchString(name) || name == "." || name == ".." {
+			return fmt.Errorf("invalid workspace name %q: use 1-100 letters, digits, '.', '_' or '-'", name)
 		}
-		parts := strings.Split(selection.Namespace, "/")
-		if selection.Namespace == "" || p.Type != "gitlab" && len(parts) != 1 {
-			return fmt.Errorf("invalid workspace repository %d: namespace is required and nested namespaces are supported only by GitLab", i+1)
+		if workspace.Path == "" || !filepath.IsAbs(workspace.Path) || filepath.Clean(workspace.Path) != workspace.Path || strings.ContainsAny(workspace.Path, "\x00\r\n") {
+			return fmt.Errorf("invalid workspace %q: path must be a clean absolute path", name)
 		}
-		for _, part := range parts {
-			if !namespacePartRE.MatchString(part) || part == "." || part == ".." {
-				return fmt.Errorf("invalid workspace repository %d: namespace must contain safe non-empty path segments", i+1)
-			}
+		pathKey := workspacePathKey(workspace.Path)
+		if workspacePaths[pathKey] {
+			return fmt.Errorf("invalid workspace %q: duplicate workspace path %q", name, workspace.Path)
 		}
-		if selection.Include == nil {
-			continue
+		workspacePaths[pathKey] = true
+		if len(workspace.Repositories) == 0 {
+			return fmt.Errorf("invalid workspace %q: at least one repository selection is required", name)
 		}
-		totalIncludes += len(*selection.Include)
-		if totalIncludes > MaxWorkspaceIncludes {
-			return fmt.Errorf("invalid workspace: at most %d included repositories are allowed", MaxWorkspaceIncludes)
+		totalSelections += len(workspace.Repositories)
+		if totalSelections > MaxWorkspaceSelections {
+			return fmt.Errorf("invalid workspaces: at most %d workspace selections are allowed", MaxWorkspaceSelections)
 		}
-		included := map[string]bool{}
-		for _, project := range *selection.Include {
-			if !ValidProjectName(project) {
-				return fmt.Errorf("invalid workspace repository %d include %q: invalid repository name", i+1, project)
+		paths := map[string]bool{}
+		for i, selection := range workspace.Repositories {
+			p, ok := c.Providers[selection.Provider]
+			if !ok {
+				return fmt.Errorf("invalid workspace %q repository %d: unknown provider alias %q", name, i+1, selection.Provider)
 			}
-			canonical := project
-			if p.Type != "gitlab" {
-				canonical = strings.ToLower(project)
+			parts := strings.Split(selection.Namespace, "/")
+			if selection.Namespace == "" || p.Type != "gitlab" && len(parts) != 1 {
+				return fmt.Errorf("invalid workspace repository %d: namespace is required and nested namespaces are supported only by GitLab", i+1)
 			}
-			if included[canonical] {
-				return fmt.Errorf("invalid workspace repository %d: duplicate include %q", i+1, project)
+			for _, part := range parts {
+				if !namespacePartRE.MatchString(part) || part == "." || part == ".." {
+					return fmt.Errorf("invalid workspace repository %d: namespace must contain safe non-empty path segments", i+1)
+				}
 			}
-			included[canonical] = true
-			path := filepath.Join(filepath.FromSlash(selection.Namespace), project)
-			if path == "." || filepath.IsAbs(path) || !filepath.IsLocal(path) || filepath.Clean(path) != path {
-				return fmt.Errorf("invalid workspace repository %d: derived path %q escapes the workspace root", i+1, path)
+			if selection.Include == nil {
+				continue
 			}
-			path = strings.ToLower(filepath.ToSlash(path))
-			if paths[path] {
-				return fmt.Errorf("invalid workspace repository %d: duplicate derived path %q", i+1, path)
+			totalIncludes += len(*selection.Include)
+			if totalIncludes > MaxWorkspaceIncludes {
+				return fmt.Errorf("invalid workspace: at most %d included repositories are allowed", MaxWorkspaceIncludes)
 			}
-			paths[path] = true
+			included := map[string]bool{}
+			for _, project := range *selection.Include {
+				if !ValidProjectName(project) {
+					return fmt.Errorf("invalid workspace repository %d include %q: invalid repository name", i+1, project)
+				}
+				canonical := project
+				if p.Type != "gitlab" {
+					canonical = strings.ToLower(project)
+				}
+				if included[canonical] {
+					return fmt.Errorf("invalid workspace repository %d: duplicate include %q", i+1, project)
+				}
+				included[canonical] = true
+				path := project
+				if path == "." || filepath.IsAbs(path) || !filepath.IsLocal(path) || filepath.Clean(path) != path {
+					return fmt.Errorf("invalid workspace repository %d: derived path %q escapes the workspace root", i+1, path)
+				}
+				path = strings.ToLower(filepath.ToSlash(path))
+				if paths[path] {
+					return fmt.Errorf("invalid workspace repository %d: duplicate derived path %q", i+1, path)
+				}
+				paths[path] = true
+			}
 		}
 	}
 	return nil

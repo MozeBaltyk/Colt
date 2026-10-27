@@ -233,6 +233,8 @@ type FakeGit struct {
 	MirrorForce    []bool
 	HealthState    gitnative.HealthState
 	HealthErr      error
+	FetchErrors    map[string]error
+	PullErrors     map[string]error
 }
 
 func (f *FakeGit) Available() error {
@@ -299,6 +301,9 @@ func (f *FakeGit) Clone(ctx context.Context, url, dir, username, alias, project 
 	}
 	if out, err := exec.Command("git", "init", dir).CombinedOutput(); err != nil {
 		return fmt.Errorf("fake git init: %s: %v", out, err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "remote", "add", "origin", url).CombinedOutput(); err != nil {
+		return fmt.Errorf("fake git origin: %s: %v", out, err)
 	}
 	f.Origins = append(f.Origins, url)
 	if f.CloneHook != nil {
@@ -413,6 +418,28 @@ func (f *FakeGit) ValidateRepoConfig(ctx context.Context, dir string) error {
 	// Always enforce against real repository-local config: a fake worktree has no
 	// repository, so Native returns nil there and only rejects a real hostile repo.
 	return gitnative.Native{}.ValidateRepoConfig(ctx, dir)
+}
+
+func (f *FakeGit) Fetch(ctx context.Context, dir string, origins []string, alias, project, namespace string) error {
+	f.Operations = append(f.Operations, "fetch:"+filepath.Base(dir))
+	if err := f.FetchErrors[filepath.Base(dir)]; err != nil {
+		return err
+	}
+	if f.Real {
+		return gitnative.Native{}.Fetch(ctx, dir, origins, alias, project, namespace)
+	}
+	return nil
+}
+
+func (f *FakeGit) Pull(ctx context.Context, dir string, origins []string, alias, project, namespace string) error {
+	f.Operations = append(f.Operations, "pull:"+filepath.Base(dir))
+	if err := f.PullErrors[filepath.Base(dir)]; err != nil {
+		return err
+	}
+	if f.Real {
+		return gitnative.Native{}.Pull(ctx, dir, origins, alias, project, namespace)
+	}
+	return nil
 }
 
 func (f *FakeGit) Health(ctx context.Context, dir string) (gitnative.HealthState, error) {

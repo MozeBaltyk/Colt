@@ -29,6 +29,8 @@ type Runner interface {
 	CreateTag(context.Context, string, string, string, string) error
 	ValidateTag(context.Context, string, string) error
 	ValidateRepoConfig(context.Context, string) error
+	Fetch(context.Context, string, []string, string, string, string) error
+	Pull(context.Context, string, []string, string, string, string) error
 	Health(context.Context, string) (HealthState, error)
 }
 
@@ -536,6 +538,157 @@ func (Native) ValidateRepoConfig(ctx context.Context, dir string) error {
 	return nil
 }
 
+const refreshConfigDeny = `^(include(if\..*)?\.path|core\.(sshcommand|fsmonitor|askpass|gitproxy|hookspath|worktree|attributesfile|excludesfile|alternaterefscommand)|gpg\.program|url\..*\.(insteadof|pushinsteadof)|remote\..*\.(proxy|vcs|uploadpack)|http\..*|protocol\..*\.allow|diff\..*\.(command|textconv)|filter\..*\.(process|clean|smudge)|submodule\..*\.(update|command)|submodule\.recurse|fetch\.recursesubmodules)$`
+
+func validateRefreshRepo(ctx context.Context, dir string) error {
+	out, present, err := localConfigLookup(ctx, dir, "--name-only", "--get-regexp", refreshConfigDeny)
+	if err != nil {
+		return err
+	}
+	if present {
+		if keys := strings.Fields(out); len(keys) != 0 {
+			return fmt.Errorf("unsafe repository-local Git configuration rejected: %.256s", keys[0])
+		}
+	}
+	// Reuse the credential-helper allowlist used by release operations.
+	out, present, err = localConfigLookup(ctx, dir, "--name-only", "--get-regexp", `^credential(\..*)?\.helper$`)
+	if err != nil {
+		return err
+	}
+	if present {
+		for _, key := range strings.Fields(out) {
+			values, ok, err := localConfigLookup(ctx, dir, "--get-all", key)
+			if err != nil {
+				return err
+			}
+			if ok {
+				for _, value := range strings.Split(strings.TrimSpace(values), "\n") {
+					if value = strings.TrimSpace(value); value != "" && !isColtCredentialHelper(value) {
+						return fmt.Errorf("unsafe repository-local Git credential helper rejected: %s=%s", key, value)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func refreshOrigin(ctx context.Context, dir string, expected []string) (string, error) {
+	out, present, err := localConfigLookup(ctx, dir, "--local", "--no-includes", "--get-all", "remote.origin.url")
+	if err != nil || !present {
+		return "", errors.New("origin is missing or unreadable")
+	}
+	urls := strings.Split(strings.TrimSpace(out), "\n")
+	if len(urls) != 1 || strings.TrimSpace(urls[0]) == "" {
+		return "", errors.New("origin must have exactly one URL")
+	}
+	origin := strings.TrimSpace(urls[0])
+	for _, candidate := range expected {
+		if origin == candidate && candidate != "" {
+			return origin, nil
+		}
+	}
+	return "", errors.New("origin does not match provider metadata")
+}
+
+func refreshEnv(origin string) []string {
+	env := []string{"GIT_TERMINAL_PROMPT=0"}
+	if strings.HasPrefix(origin, "git@") || strings.HasPrefix(origin, "ssh://") {
+		env = append(env, "GIT_SSH_COMMAND=ssh -oBatchMode=yes -oStrictHostKeyChecking=yes")
+	}
+	return env
+}
+
+func refreshOptions() []string {
+	return []string{
+		"-c", "core.hooksPath=" + os.DevNull,
+		"-c", "submodule.recurse=false",
+		"-c", "http.followRedirects=false",
+		"-c", "credential.useHttpPath=true",
+		"-c", "fetch.pruneTags=false",
+		"-c", "remote.origin.pruneTags=false",
+		"-c", "core.protectNTFS=true",
+		"-c", "core.protectHFS=true",
+	}
+}
+
+func refreshNetworkOptions(origin, alias, project, namespace string) ([]string, error) {
+	options := refreshOptions()
+	if strings.HasPrefix(origin, "https://") {
+		helper, err := transientCredentialHelper(alias, project, namespace)
+		if err != nil {
+			return nil, err
+		}
+		options = append(options, "-c", "credential.helper=", "-c", "credential.helper="+helper)
+	}
+	if ca := os.Getenv("SSL_CERT_FILE"); ca != "" {
+		options = append(options, "-c", "http.sslCAInfo="+ca)
+	}
+	return options, nil
+}
+
+func refreshFetchArgs(options []string, refspec string) []string {
+	return append(options, "fetch", "--no-auto-maintenance", "--prune", "--no-tags", "--", "origin", refspec)
+}
+
+// Fetch refreshes only origin's remote-tracking refs; it never checks out or merges.
+func (n Native) Fetch(ctx context.Context, dir string, expectedOrigins []string, alias, project, namespace string) error {
+	if err := validateRefreshRepo(ctx, dir); err != nil {
+		return err
+	}
+	origin, err := refreshOrigin(ctx, dir, expectedOrigins)
+	if err != nil {
+		return err
+	}
+	options, err := refreshNetworkOptions(origin, alias, project, namespace)
+	if err != nil {
+		return err
+	}
+	args := refreshFetchArgs(options, "+refs/heads/*:refs/remotes/origin/*")
+	return n.run(ctx, dir, refreshEnv(origin), args...)
+}
+
+// Pull permits only a clean attached branch, fetches its matching origin
+// branch, then fast-forwards without overwriting ignored files.
+func (n Native) Pull(ctx context.Context, dir string, expectedOrigins []string, alias, project, namespace string) error {
+	if err := validateRefreshRepo(ctx, dir); err != nil {
+		return err
+	}
+	origin, err := refreshOrigin(ctx, dir, expectedOrigins)
+	if err != nil {
+		return err
+	}
+	branchCmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--quiet", "--short", "HEAD")
+	branchCmd.Dir, branchCmd.Env = dir, gitEnv([]string{"GIT_OPTIONAL_LOCKS=0"})
+	branchOut, err := branchCmd.Output()
+	if err != nil {
+		return errors.New("cannot pull a detached HEAD")
+	}
+	branch := strings.TrimSpace(string(branchOut))
+	if branch == "" {
+		return errors.New("cannot pull an unnamed branch")
+	}
+	status := &healthDirtyWriter{}
+	if err := healthGitStream(ctx, dir, status, "-c", "core.hooksPath="+os.DevNull, "-c", "core.fsmonitor=false", "-c", "credential.helper=", "-c", "diff.external=", "-c", "submodule.recurse=false", "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"); err != nil {
+		return err
+	}
+	if status.dirty {
+		return errors.New("worktree is dirty")
+	}
+	ref := "refs/remotes/origin/" + branch
+	refspec := "+refs/heads/" + branch + ":" + ref
+	options, err := refreshNetworkOptions(origin, alias, project, namespace)
+	if err != nil {
+		return err
+	}
+	fetchArgs := refreshFetchArgs(options, refspec)
+	if err := n.run(ctx, dir, refreshEnv(origin), fetchArgs...); err != nil {
+		return err
+	}
+	mergeArgs := append(refreshOptions(), "merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", "--", ref)
+	return n.run(ctx, dir, nil, mergeArgs...)
+}
+
 // Health performs only isolated, read-only repository inspection. Local config
 // is rejected before any command that could consult its behavioral settings.
 func (Native) Health(ctx context.Context, dir string) (HealthState, error) {
@@ -696,10 +849,22 @@ func isColtCredentialHelper(value string) bool {
 	if !ok {
 		return false
 	}
-	// Reject any trailing content, shell metacharacters, or unsafe identifiers:
-	// the value is executed by Git as a shell snippet, so only the exact
-	// `--provider <id> --repository <id>` shape Colt itself writes is allowed.
-	return SafeIdentifier(provider) && SafeIdentifier(tail)
+	project, namespace, scoped := strings.Cut(tail, " --namespace ")
+	if !scoped {
+		project = tail
+	}
+	if !SafeIdentifier(provider) || !SafeIdentifier(project) {
+		return false
+	}
+	if !scoped || namespace == "" {
+		return !scoped
+	}
+	for _, part := range strings.Split(namespace, "/") {
+		if !SafeIdentifier(part) || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // localConfigLookup runs a read-only git config subcommand against the isolated

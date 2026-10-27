@@ -22,6 +22,244 @@ func TestGitEnvStripsGitVariablesCaseInsensitively(t *testing.T) {
 	}
 }
 
+func runTestGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir, cmd.Env = dir, gitEnv(nil)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %s: %v", args, out, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func refreshRepositories(t *testing.T) (remote, seed, clone string) {
+	t.Helper()
+	remote, seed, clone = filepath.Join(t.TempDir(), "remote.git"), t.TempDir(), t.TempDir()
+	runTestGit(t, "", "init", "--bare", remote)
+	runTestGit(t, seed, "init", "--initial-branch=main")
+	runTestGit(t, seed, "config", "user.name", "Test")
+	runTestGit(t, seed, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(seed, "file"), []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, seed, "add", "file")
+	runTestGit(t, seed, "commit", "-m", "one")
+	runTestGit(t, seed, "remote", "add", "origin", remote)
+	runTestGit(t, seed, "push", "-u", "origin", "main")
+	runTestGit(t, "", "--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main")
+	if err := os.RemoveAll(clone); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, "", "clone", remote, clone)
+	return remote, seed, clone
+}
+
+func advanceRefreshRemote(t *testing.T, seed string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(seed, "file"), []byte("two"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, seed, "add", "file")
+	runTestGit(t, seed, "commit", "-m", "two")
+	runTestGit(t, seed, "push", "origin", "main")
+	return runTestGit(t, seed, "rev-parse", "HEAD")
+}
+
+func TestFetchPrunesWithoutChangingWorktree(t *testing.T) {
+	remote, seed, clone := refreshRepositories(t)
+	before := runTestGit(t, clone, "rev-parse", "HEAD")
+	runTestGit(t, seed, "branch", "stale")
+	runTestGit(t, seed, "push", "origin", "stale")
+	runTestGit(t, seed, "tag", "keep-local-tag")
+	runTestGit(t, seed, "push", "origin", "keep-local-tag")
+	runTestGit(t, clone, "fetch", "origin", "stale:refs/remotes/origin/stale")
+	runTestGit(t, clone, "fetch", "origin", "refs/tags/keep-local-tag:refs/tags/keep-local-tag")
+	runTestGit(t, seed, "push", "origin", "--delete", "stale")
+	runTestGit(t, seed, "push", "origin", "--delete", "keep-local-tag")
+	runTestGit(t, clone, "config", "fetch.pruneTags", "true")
+	runTestGit(t, clone, "config", "remote.origin.pruneTags", "true")
+	want := advanceRefreshRemote(t, seed)
+	if err := (Native{}).Fetch(context.Background(), clone, []string{remote}, "work", "demo", "team"); err != nil {
+		t.Fatal(err)
+	}
+	if got := runTestGit(t, clone, "rev-parse", "HEAD"); got != before {
+		t.Fatalf("fetch changed HEAD: %s -> %s", before, got)
+	}
+	if got := runTestGit(t, clone, "rev-parse", "origin/main"); got != want {
+		t.Fatalf("origin/main=%s, want %s", got, want)
+	}
+	cmd := exec.Command("git", "show-ref", "--verify", "refs/remotes/origin/stale")
+	cmd.Dir, cmd.Env = clone, gitEnv(nil)
+	if err := cmd.Run(); err == nil {
+		t.Fatal("fetch did not prune deleted remote branch")
+	}
+	if got := runTestGit(t, clone, "rev-parse", "refs/tags/keep-local-tag"); got == "" {
+		t.Fatal("fetch pruned a local tag")
+	}
+}
+
+func TestPullFastForwardsCleanMatchingBranch(t *testing.T) {
+	remote, seed, clone := refreshRepositories(t)
+	want := advanceRefreshRemote(t, seed)
+	hook := filepath.Join(clone, ".git", "hooks", "post-merge")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\n: > .git/hook-ran\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Native{}).Pull(context.Background(), clone, []string{remote}, "work", "demo", "team"); err != nil {
+		t.Fatal(err)
+	}
+	if got := runTestGit(t, clone, "rev-parse", "HEAD"); got != want {
+		t.Fatalf("HEAD=%s, want %s", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(clone, ".git", "hook-ran")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("post-merge hook ran: %v", err)
+	}
+}
+
+func TestPullPreservesIgnoredFileThatRemoteStartsTracking(t *testing.T) {
+	remote, seed, clone := refreshRepositories(t)
+	if err := os.WriteFile(filepath.Join(clone, ".git", "info", "exclude"), []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(clone, "secret")
+	if err := os.WriteFile(secret, []byte("local-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(seed, "secret"), []byte("remote-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, seed, "add", "secret")
+	runTestGit(t, seed, "commit", "-m", "track secret")
+	runTestGit(t, seed, "push", "origin", "main")
+	before := runTestGit(t, clone, "rev-parse", "HEAD")
+	if err := (Native{}).Pull(context.Background(), clone, []string{remote}, "work", "demo", "team"); err == nil {
+		t.Fatal("pull overwrote an ignored local file")
+	}
+	if got := runTestGit(t, clone, "rev-parse", "HEAD"); got != before {
+		t.Fatalf("refused pull changed HEAD: %s -> %s", before, got)
+	}
+	if data, err := os.ReadFile(secret); err != nil || string(data) != "local-data" {
+		t.Fatalf("ignored file changed: %q, %v", data, err)
+	}
+}
+
+func TestPullRefusesDirtyDetachedAndDivergedRepositories(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		alter func(*testing.T, string, string)
+	}{
+		{"dirty", func(t *testing.T, _, clone string) {
+			if err := os.WriteFile(filepath.Join(clone, "untracked"), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"detached", func(t *testing.T, _, clone string) { runTestGit(t, clone, "checkout", "--detach") }},
+		{"missing-remote-branch", func(t *testing.T, _, clone string) { runTestGit(t, clone, "checkout", "-b", "local-only") }},
+		{"diverged", func(t *testing.T, _, clone string) {
+			runTestGit(t, clone, "config", "user.name", "Test")
+			runTestGit(t, clone, "config", "user.email", "test@example.com")
+			if err := os.WriteFile(filepath.Join(clone, "local"), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runTestGit(t, clone, "add", "local")
+			runTestGit(t, clone, "commit", "-m", "local")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			remote, seed, clone := refreshRepositories(t)
+			tc.alter(t, seed, clone)
+			advanceRefreshRemote(t, seed)
+			before := runTestGit(t, clone, "rev-parse", "HEAD")
+			if err := (Native{}).Pull(context.Background(), clone, []string{remote}, "work", "demo", "team"); err == nil {
+				t.Fatal("unsafe pull succeeded")
+			}
+			if got := runTestGit(t, clone, "rev-parse", "HEAD"); got != before {
+				t.Fatalf("refused pull changed HEAD: %s -> %s", before, got)
+			}
+		})
+	}
+}
+
+func TestRefreshRejectsUnsafeConfigBeforeFetching(t *testing.T) {
+	for _, key := range []string{"filter.hostile.smudge", "core.alternateRefsCommand", "http.https://example.test.followRedirects", "http.https://example.test.sslVerify"} {
+		t.Run(key, func(t *testing.T) {
+			remote, seed, clone := refreshRepositories(t)
+			runTestGit(t, clone, "config", key, "false")
+			before := runTestGit(t, clone, "rev-parse", "origin/main")
+			advanceRefreshRemote(t, seed)
+			if err := (Native{}).Fetch(context.Background(), clone, []string{remote}, "work", "demo", "team"); err == nil || !strings.Contains(err.Error(), "unsafe") {
+				t.Fatalf("unsafe config error=%v", err)
+			}
+			if got := runTestGit(t, clone, "rev-parse", "origin/main"); got != before {
+				t.Fatalf("rejected fetch changed remote ref: %s -> %s", before, got)
+			}
+		})
+	}
+}
+
+func TestRefreshEnvDisablesSSHPromptsForBothURLForms(t *testing.T) {
+	for _, origin := range []string{"git@example.test:team/demo.git", "ssh://git@example.test/team/demo.git"} {
+		env := strings.Join(refreshEnv(origin), "\n")
+		if !strings.Contains(env, "GIT_SSH_COMMAND=ssh -oBatchMode=yes -oStrictHostKeyChecking=yes") {
+			t.Fatalf("SSH refresh for %q can prompt: %q", origin, env)
+		}
+	}
+	if env := strings.Join(refreshEnv("https://example.test/team/demo.git"), "\n"); strings.Contains(env, "GIT_SSH_COMMAND=") {
+		t.Fatalf("HTTPS refresh received SSH settings: %q", env)
+	}
+}
+
+func TestRefreshOptionsForwardCustomCA(t *testing.T) {
+	t.Setenv("SSL_CERT_FILE", "/safe/custom-ca.pem")
+	options, err := refreshNetworkOptions("git@example.test:team/demo.git", "work", "demo", "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(options, "\n")
+	if !strings.Contains(got, "http.sslCAInfo=/safe/custom-ca.pem") || !strings.Contains(got, "core.protectNTFS=true") || !strings.Contains(got, "core.protectHFS=true") {
+		t.Fatalf("refresh options do not forward custom CA: %q", got)
+	}
+	if args := strings.Join(refreshFetchArgs(options, "refspec"), " "); !strings.Contains(args, "fetch --no-auto-maintenance --prune") {
+		t.Fatalf("refresh fetch permits automatic maintenance: %q", args)
+	}
+}
+
+func TestRefreshNetworkOptionsUseTransientHelperOnlyForHTTPS(t *testing.T) {
+	helper, err := transientCredentialHelper("work", "demo", "team/path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpsOptions, err := refreshNetworkOptions("https://example.test/team/demo.git", "work", "demo", "team/path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	https := strings.Join(httpsOptions, "\n")
+	if !strings.Contains(https, "credential.helper=\n") || !strings.Contains(https, "credential.helper="+helper) {
+		t.Fatalf("HTTPS refresh options lack scoped transient helper: %q", https)
+	}
+	if !strings.Contains(https, "git-credential --provider work --repository demo --namespace team/path") {
+		t.Fatalf("HTTPS refresh helper lacks provider scope: %q", https)
+	}
+	sshOptions, err := refreshNetworkOptions("git@example.test:team/demo.git", "work", "demo", "team/path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ssh := strings.Join(sshOptions, "\n"); strings.Contains(ssh, "credential.helper=") {
+		t.Fatalf("non-HTTPS refresh received credential helper: %q", ssh)
+	}
+}
+
+func TestRefreshRejectsMultipleOriginURLs(t *testing.T) {
+	remote, _, clone := refreshRepositories(t)
+	runTestGit(t, clone, "config", "--unset-all", "remote.origin.url")
+	runTestGit(t, clone, "config", "--add", "remote.origin.url", "https://untrusted.example/repository.git")
+	runTestGit(t, clone, "config", "--add", "remote.origin.url", remote)
+	if err := (Native{}).Fetch(context.Background(), clone, []string{remote}, "work", "demo", "team"); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("multiple origin URLs accepted: %v", err)
+	}
+}
+
 func TestCommitForceStagesIgnoredTemplateData(t *testing.T) {
 	dir := t.TempDir()
 	native := Native{}
@@ -88,6 +326,27 @@ func TestTransientHelperUsesCurrentExecutableWhilePersistentHelperUsesPATH(t *te
 	}
 	if persistent != "!colt git-credential --provider work --repository demo" {
 		t.Fatalf("persistent helper = %q", persistent)
+	}
+}
+
+func TestColtCredentialHelperAllowlist(t *testing.T) {
+	for _, helper := range []string{
+		"!colt git-credential --provider work --repository demo",
+		"!colt git-credential --provider work --repository demo --namespace team/path-segment",
+	} {
+		if !isColtCredentialHelper(helper) {
+			t.Errorf("safe persistent helper rejected: %q", helper)
+		}
+	}
+	for _, helper := range []string{
+		"!colt git-credential --provider work --repository demo; /bin/evil",
+		"!colt git-credential --provider work --repository demo --namespace team/path && /bin/evil",
+		"!colt git-credential --provider work --repository demo --namespace team//path",
+		"!colt git-credential --provider work --repository demo --namespace team/path trailing",
+	} {
+		if isColtCredentialHelper(helper) {
+			t.Errorf("malformed persistent helper accepted: %q", helper)
+		}
 	}
 }
 
@@ -599,7 +858,7 @@ func TestValidateRepoConfigCredentialHelperAndCleanRepo(t *testing.T) {
 		t.Fatalf("shell-injected credential helper accepted = %v", err)
 	}
 	set("credential.helper", "!colt git-credential --provider work --repository demo")
-	set("credential.https://github.com.helper", "!colt git-credential --provider work --repository demo")
+	set("credential.https://github.com.helper", "!colt git-credential --provider work --repository demo --namespace team/path")
 	if err := native.ValidateRepoConfig(ctx, dir); err != nil {
 		t.Fatalf("Colt credential helper rejected: %v", err)
 	}

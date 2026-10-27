@@ -3,14 +3,29 @@ Feature: Declarative workspace reconciliation
    Live provider mirroring remains gated integration coverage.
 
    @WORKSPACE-MANIFEST-001
-   Scenario: Expand bounded repository selections deterministically
-     Given a strict data-only YAML document has a top-level workspace mapping with repository selections
+   Scenario: Expand bounded named workspaces deterministically
+     Given a strict data-only YAML document has a top-level workspaces mapping with named paths and repository selections
      And each repository selection names a provider alias and namespace
      And one selection includes named repositories while another omits include
-     When Colt resolves the desired workspace
+     When Colt resolves the desired workspaces
      Then the first selection contains only its include list
      And the second contains all visible repositories in its selection
      And every desired repository identity and local path is unique and deterministic
+
+   @WORKSPACE-MANIFEST-001
+   Scenario: Reject the removed singular workspace format
+     Given configuration uses the former singular workspace mapping
+     When Colt parses the manifest
+     Then migration to a named workspace is required before provider or local access
+
+   @WORKSPACE-SELECTION-001
+   Scenario: Reconcile all named workspaces or one explicit workspace
+     Given two named workspaces have independent paths and missing repositories
+     When I execute `colt sync`
+     Then both workspaces are reconciled in deterministic name order
+     And every result identifies its workspace
+     When I execute `colt sync --workspace factory`
+     Then only the factory workspace is reconciled
 
    @WORKSPACE-MANIFEST-001
    Scenario: Reject parser-invalid workspace YAML
@@ -43,9 +58,9 @@ Feature: Declarative workspace reconciliation
    @WORKSPACE-SYNC-001
    Scenario: Sync an ad-hoc namespace and save its flat workspace
      Given another provider namespace exposes two repositories
-     When I sync that namespace to an explicit path with --save
+     When I sync that namespace to an explicit path and save it as workspace factory
      Then both repositories are cloned directly beneath the explicit path
-     And the absolute path and namespace selection are saved
+     And the absolute path and namespace selection are saved under workspace factory
      When I remove one repository and execute saved `colt sync` from another directory
      Then the missing repository is restored in the saved workspace
 
@@ -56,6 +71,35 @@ Feature: Declarative workspace reconciliation
      Then Colt reports the same plan as `colt sync`
      And remote metadata may be read
      And no local, remote, or configuration state is changed
+
+   @WORKSPACE-REFRESH-001
+   Scenario: Fetch present repositories without changing their worktrees
+     Given a workspace has two present repositories and one missing repository
+     And one present repository cannot be fetched
+     When I execute `colt sync --fetch`
+     Then the other present repository is fetched with pruning
+     And the missing repository is cloned without a redundant fetch
+     And the failed fetch is summarized without changing either worktree
+
+   @WORKSPACE-PULL-001
+   Scenario: Pull present repositories with safe fast-forward-only semantics
+     Given a workspace has clean, dirty, diverged, and detached present repositories
+     When I execute `colt sync --pull`
+     Then the clean repository is pulled from its matching origin branch
+     And dirty, diverged, and detached repositories are not changed
+     And independent pull failures are summarized
+
+   @WORKSPACE-REFRESH-001 @WORKSPACE-PULL-001
+   Scenario Outline: Refresh dry-run reports intent without Git mutation
+     Given a workspace has a present repository
+     When I execute `colt sync <mode> --dry-run`
+     Then Colt reports `<action>` for the present repository
+     And no local, remote, or configuration state is changed
+
+     Examples:
+       | mode    | action      |
+       | --fetch | would-fetch |
+       | --pull  | would-pull  |
 
    @WORKSPACE-SAFETY-001
    Scenario Outline: Workspace commands preserve existing repositories and paths
