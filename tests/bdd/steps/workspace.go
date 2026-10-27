@@ -20,6 +20,7 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	var mirrorCount int
 	var mirrorFailure, targetExists bool
 	var mirrorTargetNamespace string
+	var savedWorkspace string
 
 	repository := func(p config.Provider, name string) provider.Repository {
 		return provider.Repository{Name: name, Namespace: p.Namespace, CloneURL: "https://" + p.Host + "/" + p.Namespace + "/" + name + ".git", SSHURL: "git@" + p.Host + ":" + p.Namespace + "/" + name + ".git"}
@@ -223,6 +224,72 @@ func RegisterWorkspaceSteps(ctx *godog.ScenarioContext, w *fixture.World) {
 	ctx.Step(`^completed clones are retained$`, func() error {
 		_, err := os.Stat(filepath.Join(w.Dir, "team", "good"))
 		return err
+	})
+	ctx.Step(`^another provider namespace exposes two repositories$`, func() error {
+		configured := gitlab("configured")
+		if err := saveWorkspace(map[string]config.Provider{"work": configured}); err != nil {
+			return err
+		}
+		selected := gitlab("other")
+		w.Client.ListRepos = []provider.Repository{repository(selected, "alpha"), repository(selected, "beta")}
+		savedWorkspace = filepath.Join(w.Dir, "saved-workspace")
+		return os.Mkdir(savedWorkspace, 0o700)
+	})
+	ctx.Step(`^I sync that namespace to an explicit path with --save$`, func() error {
+		w.RunArgs([]string{"sync", "other", "--provider", "work", "--path", savedWorkspace, "--save"})
+		return nil
+	})
+	ctx.Step(`^both repositories are cloned directly beneath the explicit path$`, func() error {
+		if w.RunErr != nil {
+			return w.RunErr
+		}
+		for _, name := range []string{"alpha", "beta"} {
+			if _, err := os.Stat(filepath.Join(savedWorkspace, name, ".git")); err != nil {
+				return fmt.Errorf("flat clone %q: %w", name, err)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(savedWorkspace, "other")); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("namespace directory was created in a flat workspace")
+		}
+		return nil
+	})
+	ctx.Step(`^the absolute path and namespace selection are saved$`, func() error {
+		cfg, err := config.Load(w.ConfigPath)
+		if err != nil {
+			return err
+		}
+		if cfg.Workspace == nil || cfg.Workspace.Path != savedWorkspace || len(cfg.Workspace.Repositories) != 1 {
+			return fmt.Errorf("saved workspace = %#v", cfg.Workspace)
+		}
+		selection := cfg.Workspace.Repositories[0]
+		if selection.Provider != "work" || selection.Namespace != "other" || selection.Include != nil {
+			return fmt.Errorf("saved selection = %#v", selection)
+		}
+		return nil
+	})
+	ctx.Step(`^I remove one repository and execute saved `+"`"+`colt sync`+"`"+` from another directory$`, func() error {
+		if err := os.RemoveAll(filepath.Join(savedWorkspace, "beta")); err != nil {
+			return err
+		}
+		otherDirectory := filepath.Join(w.Dir, "elsewhere")
+		if err := os.Mkdir(otherDirectory, 0o700); err != nil {
+			return err
+		}
+		w.Dir = otherDirectory
+		w.Run("colt sync")
+		return nil
+	})
+	ctx.Step(`^the missing repository is restored in the saved workspace$`, func() error {
+		if w.RunErr != nil {
+			return w.RunErr
+		}
+		if _, err := os.Stat(filepath.Join(savedWorkspace, "beta", ".git")); err != nil {
+			return err
+		}
+		if _, err := os.Stat(filepath.Join(w.Dir, "beta")); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("repository was cloned under the current directory instead of the saved workspace")
+		}
+		return nil
 	})
 	ctx.Step(`^reconciliation requires remote metadata reads and a missing repository clone$`, func() error {
 		p := github("team")

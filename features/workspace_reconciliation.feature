@@ -40,6 +40,15 @@ Feature: Declarative workspace reconciliation
      And existing, inconsistent, remotely absent, and failed repositories are summarized
      And completed clones are retained
 
+   @WORKSPACE-SYNC-001
+   Scenario: Sync an ad-hoc namespace and save its flat workspace
+     Given another provider namespace exposes two repositories
+     When I sync that namespace to an explicit path with --save
+     Then both repositories are cloned directly beneath the explicit path
+     And the absolute path and namespace selection are saved
+     When I remove one repository and execute saved `colt sync` from another directory
+     Then the missing repository is restored in the saved workspace
+
    @WORKSPACE-DRYRUN-001
    Scenario: Dry-run computes the same plan without mutation
      Given reconciliation requires remote metadata reads and a missing repository clone

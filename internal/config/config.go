@@ -36,6 +36,7 @@ type RepositoryPolicy struct {
 
 type Workspace struct {
 	Repositories []RepositorySelection `yaml:"repositories"`
+	Path         string                `yaml:"path,omitempty"`
 }
 
 type RepositorySelection struct {
@@ -322,6 +323,9 @@ func validateWorkspaceYAML(document *yaml.Node) error {
 	if workspace.Kind != yaml.MappingNode {
 		return errors.New("workspace must be a mapping")
 	}
+	if path := mappingValue(workspace, "path"); path != nil && path.Tag != "!!str" {
+		return errors.New("workspace path must be a string")
+	}
 	repositories := mappingValue(workspace, "repositories")
 	if repositories == nil || repositories.Kind != yaml.SequenceNode {
 		return errors.New("workspace repositories must be a sequence")
@@ -517,6 +521,9 @@ func (c Config) validateWorkspace() error {
 	if len(c.Workspace.Repositories) > MaxWorkspaceSelections {
 		return fmt.Errorf("invalid workspace: at most %d repository selections are allowed", MaxWorkspaceSelections)
 	}
+	if c.Workspace.Path != "" && (!filepath.IsAbs(c.Workspace.Path) || filepath.Clean(c.Workspace.Path) != c.Workspace.Path || strings.ContainsAny(c.Workspace.Path, "\x00\r\n")) {
+		return errors.New("invalid workspace: path must be a clean absolute path")
+	}
 	totalIncludes := 0
 	paths := map[string]bool{}
 	for i, selection := range c.Workspace.Repositories {
@@ -532,9 +539,6 @@ func (c Config) validateWorkspace() error {
 			if !namespacePartRE.MatchString(part) || part == "." || part == ".." {
 				return fmt.Errorf("invalid workspace repository %d: namespace must contain safe non-empty path segments", i+1)
 			}
-		}
-		if !NamespaceEqual(selection.Namespace, p.Namespace, p.Type) {
-			return fmt.Errorf("invalid workspace repository %d: namespace %q is incompatible with provider %q namespace %q", i+1, selection.Namespace, selection.Provider, p.Namespace)
 		}
 		if selection.Include == nil {
 			continue

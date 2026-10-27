@@ -16,7 +16,7 @@ workspace:
       namespace: example-user
 ```
 
-Omitting `include` selects all repositories visible in that exact provider namespace. An explicit empty `include: []` selects none. The workspace root is `App.WorkDir`, or the current directory for the CLI, and each repository is placed at `<namespace>/<project>` beneath that root.
+Omitting `include` selects all repositories visible in that exact provider namespace. An explicit empty `include: []` selects none. Without `workspace.path`, the workspace root is `App.WorkDir`, or the current directory for the CLI, and each repository is placed at `<namespace>/<project>` beneath that root. A saved absolute `workspace.path` uses the flat `<path>/<project>` layout.
 
 | ID                       | Requirement                                                                                                                                                                                                                                                                                                                                                                                  | Acceptance specification                                                              |
 |:-------------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:--------------------------------------------------------------------------------------|
@@ -27,6 +27,7 @@ Omitting `include` selects all repositories visible in that exact provider names
 ``` text
 colt status
 colt sync [--dry-run]
+colt sync <namespace> --path <existing-directory> [--provider <alias>] [--save] [--dry-run]
 ```
 
 Top-level `colt status` is workspace status; `colt auth status` is provider configuration/connectivity status.
@@ -44,6 +45,8 @@ Top-level `colt status` is workspace status; `colt auth status` is provider conf
 | `WORKSPACE-SYNC-001`   | `colt sync` **MUST** be manifest-driven: clone only missing desired repositories, never clone extra ones. It **MUST** report existing, inconsistent, and remotely absent repositories. Independent failures **MUST** be summarized without discarding completed clones. `colt sync` **MUST** be idempotent — running again against an already-synced workspace is safe and reports no changes.                                                                                                                                               | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
 | `WORKSPACE-DRYRUN-001` | `colt sync --dry-run` **MUST** compute and report the same reconciliation plan while performing no local, remote, or configuration mutation. Remote metadata reads **MAY** occur.                                                                                                                                          | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
 | `WORKSPACE-SAFETY-001` | Reconciliation **MUST** keep local operations within the workspace root and **MUST NOT** rewrite origins, delete or prune repositories, overwrite unrelated or non-empty paths, or reset dirty or diverged repositories.                                                                                                   | [`workspace_reconciliation.feature`](../../features/workspace_reconciliation.feature) |
+
+The namespace form selects every repository in that exact namespace and places it directly beneath the explicit existing directory. `--save` persists the resolved provider, namespace, and absolute path after validation and before cloning; it is incompatible with `--dry-run`. Saved paths are honored by no-argument sync and status from any current directory. Existing manifests without a path retain the legacy namespace-prefixed layout.
 
 ### colt sync vs colt clone vs colt mirror
 

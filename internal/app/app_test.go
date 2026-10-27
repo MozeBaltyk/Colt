@@ -205,6 +205,7 @@ type fakeGit struct {
 	lsRemoteErr           error
 	lsRemoteTokenEnvNames []string
 	cloneHook             func(string) error
+	helperNamespaces      []string
 	health                gitnative.HealthState
 	healthErr             error
 	healthFunc            func(string) (gitnative.HealthState, error)
@@ -257,8 +258,9 @@ func (g *fakeGit) AddOrigin(_ context.Context, _, url string) error {
 	g.calls = append(g.calls, "origin:"+url)
 	return nil
 }
-func (g *fakeGit) ConfigureCredentialHelper(context.Context, string, string, string, string, string) error {
+func (g *fakeGit) ConfigureCredentialHelper(_ context.Context, _, _, _, _, _ string, namespace ...string) error {
 	g.calls = append(g.calls, "helper")
+	g.helperNamespaces = append(g.helperNamespaces, namespace...)
 	return nil
 }
 func (g *fakeGit) Push(_ context.Context, _, url, _, _ string) error {

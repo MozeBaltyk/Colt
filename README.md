@@ -167,7 +167,10 @@ workspace:
 ```bash
 colt status          # what's present, missing, absent, or mismatched
 colt sync [--dry-run] # clone exactly what's missing (never prunes or rewrites)
+colt sync <namespace> --path <existing-dir> [--provider <alias>] [--save]
 ```
+
+The namespace form checks repositories out directly as `<existing-dir>/<repo>`. `--save` stores the absolute workspace path and selection, so later `colt sync` and `colt status` work from any directory; it cannot be combined with `--dry-run`. Manifests without `workspace.path` retain the `<namespace>/<repo>` layout rooted at the current directory.
 
 ### Mirror — `colt mirror`
 

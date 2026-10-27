@@ -38,15 +38,74 @@ func (a *App) workspaceStatusCommand() *cobra.Command {
 }
 
 func (a *App) syncCommand() *cobra.Command {
-	dryRun := false
-	cmd := &cobra.Command{Use: "sync", Short: "Clone missing repositories declared by the workspace", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		items, err := a.workspacePlan(cmd.Context())
+	var providerAlias, path string
+	dryRun, save := false, false
+	cmd := &cobra.Command{Use: "sync [namespace]", Short: "Clone missing repositories declared by the workspace", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if a.pathErr != nil {
+			return a.pathErr
+		}
+		if len(args) == 0 {
+			if providerAlias != "" || cmd.Flags().Changed("path") || save {
+				return errors.New("namespace is required with --provider, --path, or --save")
+			}
+		} else if !cmd.Flags().Changed("path") {
+			return errors.New("--path is required with a namespace")
+		}
+		if len(args) != 0 && path == "" {
+			return errors.New("--path must not be empty")
+		}
+		if save && dryRun {
+			return errors.New("--save cannot be combined with --dry-run")
+		}
+		cfg, err := config.Load(a.ConfigPath)
+		if err != nil {
+			return err
+		}
+		if len(args) != 0 {
+			abs, err := filepath.Abs(path)
+			if err != nil {
+				return fmt.Errorf("resolve workspace path: %w", err)
+			}
+			root, err := openWorkRoot(abs)
+			if err != nil {
+				return err
+			}
+			if err := root.Close(); err != nil {
+				return fmt.Errorf("close working directory: %w", err)
+			}
+			alias, p, err := cfg.Resolve(providerAlias)
+			if err != nil {
+				return err
+			}
+			p.Namespace = args[0]
+			if err := config.ValidateProvider(alias, p); err != nil {
+				return fmt.Errorf("invalid namespace: %w", err)
+			}
+			planConfig := cfg
+			planConfig.Providers = make(map[string]config.Provider, len(cfg.Providers))
+			for name, configured := range cfg.Providers {
+				planConfig.Providers[name] = configured
+			}
+			planConfig.Providers[alias] = p
+			planConfig.Workspace = &config.Workspace{Path: abs, Repositories: []config.RepositorySelection{{Provider: alias, Namespace: args[0]}}}
+			cfg = planConfig
+		}
+		items, rootPath, err := a.workspacePlanConfig(cmd.Context(), cfg)
 		if err != nil {
 			return err
 		}
 		planErr := writeWorkspacePlan(cmd.OutOrStdout(), items)
 		if dryRun {
 			return planErr
+		}
+		if save {
+			stored, err := config.Load(a.ConfigPath)
+			if err != nil {
+				return err
+			}
+			if err := a.saveWorkspaceSelection(cmd.Context(), &stored, cfg.Workspace.Path, cfg.Workspace.Repositories[0]); err != nil {
+				return err
+			}
 		}
 		needsClone := false
 		for _, item := range items {
@@ -59,10 +118,6 @@ func (a *App) syncCommand() *cobra.Command {
 			return errors.New("native Git is unavailable")
 		}
 		if err := a.Git.Available(); err != nil {
-			return err
-		}
-		rootPath, err := a.workDir()
-		if err != nil {
 			return err
 		}
 		root, err := openWorkRoot(rootPath)
@@ -95,7 +150,47 @@ func (a *App) syncCommand() *cobra.Command {
 		return nil
 	}}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report the reconciliation plan without mutation")
+	cmd.Flags().StringVar(&providerAlias, "provider", "", "provider alias")
+	cmd.Flags().StringVar(&path, "path", "", "existing workspace directory")
+	cmd.Flags().BoolVar(&save, "save", false, "save this namespace and workspace path")
 	return cmd
+}
+
+func (a *App) saveWorkspaceSelection(ctx context.Context, cfg *config.Config, path string, selection config.RepositorySelection) error {
+	if cfg.Workspace == nil {
+		cfg.Workspace = &config.Workspace{}
+	}
+	if cfg.Workspace.Path == "" && len(cfg.Workspace.Repositories) != 0 {
+		return errors.New("existing workspace uses namespace/repository layout; refusing to change its layout")
+	}
+	if cfg.Workspace.Path != "" && cfg.Workspace.Path != path {
+		return fmt.Errorf("workspace is already saved at %q", cfg.Workspace.Path)
+	}
+	cfg.Workspace.Path = path
+	repositories := cfg.Workspace.Repositories[:0]
+	found := false
+	for _, current := range cfg.Workspace.Repositories {
+		if current.Provider == selection.Provider && config.NamespaceEqual(current.Namespace, selection.Namespace, cfg.Providers[selection.Provider].Type) {
+			if found {
+				continue
+			}
+			current = selection
+			found = true
+		}
+		repositories = append(repositories, current)
+	}
+	if !found {
+		repositories = append(repositories, selection)
+	}
+	cfg.Workspace.Repositories = repositories
+	if _, _, err := a.workspacePlanConfig(ctx, *cfg); err != nil {
+		return fmt.Errorf("refusing to save conflicting workspace: %w", err)
+	}
+	save := a.SaveConfig
+	if save == nil {
+		save = config.Save
+	}
+	return save(a.ConfigPath, *cfg)
 }
 
 func (a *App) workDir() (string, error) {
@@ -120,6 +215,17 @@ func (a *App) workspacePlan(ctx context.Context) ([]workspaceItem, error) {
 	if cfg.Workspace == nil {
 		return nil, errors.New("workspace is not configured")
 	}
+	items, _, err := a.workspacePlanConfig(ctx, cfg)
+	return items, err
+}
+
+func (a *App) workspacePlanConfig(ctx context.Context, cfg config.Config) ([]workspaceItem, string, error) {
+	if cfg.Workspace == nil {
+		return nil, "", errors.New("workspace is not configured")
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, "", err
+	}
 	var items []workspaceItem
 	identities, paths := map[string]bool{}, map[string]bool{}
 	for _, selection := range cfg.Workspace.Repositories {
@@ -127,33 +233,37 @@ func (a *App) workspacePlan(ctx context.Context) ([]workspaceItem, error) {
 			continue
 		}
 		p := cfg.Providers[selection.Provider]
+		p.Namespace = selection.Namespace
+		if err := config.ValidateProvider(selection.Provider, p); err != nil {
+			return nil, "", fmt.Errorf("invalid workspace namespace: %w", err)
+		}
 		token, _, err := config.Token(p, a.credentialStore())
 		if err != nil {
-			return nil, fmt.Errorf("resolve provider %q credential: %w", selection.Provider, err)
+			return nil, "", fmt.Errorf("resolve provider %q credential: %w", selection.Provider, err)
 		}
 		client, err := a.NewClient(p, token)
 		if err != nil {
-			return nil, fmt.Errorf("configure provider %q: %w", selection.Provider, err)
+			return nil, "", fmt.Errorf("configure provider %q: %w", selection.Provider, err)
 		}
 		repositories, err := client.List(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("list provider %q repositories: %w", selection.Provider, err)
+			return nil, "", fmt.Errorf("list provider %q repositories: %w", selection.Provider, err)
 		}
 		if len(repositories) > config.MaxProviderRepositories {
-			return nil, fmt.Errorf("provider %q returned more than %d repositories", selection.Provider, config.MaxProviderRepositories)
+			return nil, "", fmt.Errorf("provider %q returned more than %d repositories", selection.Provider, config.MaxProviderRepositories)
 		}
 		remote := map[string]provider.Repository{}
 		for _, repository := range repositories {
-			name, namespace, err := validatedRepository(repository, p)
+			name, namespace, err := repositoryIdentity(repository, p)
 			if err != nil {
-				return nil, fmt.Errorf("provider %q returned unsafe repository metadata: %w", selection.Provider, err)
+				return nil, "", fmt.Errorf("provider %q returned unsafe repository metadata: %w", selection.Provider, err)
 			}
 			if !namespaceMatches(strings.Split(namespace, "/"), strings.Split(selection.Namespace, "/"), p.Type) {
 				continue
 			}
 			key := repositoryKey(name, p.Type)
 			if _, duplicate := remote[key]; duplicate {
-				return nil, fmt.Errorf("provider %q returned duplicate repository %q", selection.Provider, name)
+				return nil, "", fmt.Errorf("provider %q returned duplicate repository %q", selection.Provider, name)
 			}
 			repository.Name, repository.Namespace = name, namespace
 			remote[key] = repository
@@ -169,13 +279,16 @@ func (a *App) workspacePlan(ctx context.Context) ([]workspaceItem, error) {
 		sort.Strings(names)
 		for _, name := range names {
 			path, err := workspacePath(selection.Namespace, name)
+			if cfg.Workspace.Path != "" {
+				path, err = workspacePath("", name)
+			}
 			if err != nil {
-				return nil, err
+				return nil, "", err
 			}
 			identity := selection.Provider + "\x00" + selection.Namespace + "\x00" + repositoryKey(name, p.Type)
 			pathKey := strings.ToLower(filepath.ToSlash(path))
 			if identities[identity] || paths[pathKey] {
-				return nil, fmt.Errorf("workspace derives duplicate repository identity or path %q", path)
+				return nil, "", fmt.Errorf("workspace derives duplicate repository identity or path %q", path)
 			}
 			identities[identity], paths[pathKey] = true, true
 			item := workspaceItem{alias: selection.Provider, namespace: selection.Namespace, project: name, path: path, provider: p, category: "absent-remotely"}
@@ -187,13 +300,17 @@ func (a *App) workspacePlan(ctx context.Context) ([]workspaceItem, error) {
 		}
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].path < items[j].path })
-	rootPath, err := a.workDir()
-	if err != nil {
-		return nil, err
+	rootPath := cfg.Workspace.Path
+	if rootPath == "" {
+		var err error
+		rootPath, err = a.workDir()
+		if err != nil {
+			return nil, "", err
+		}
 	}
 	root, err := openWorkRoot(rootPath)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer root.Close()
 	for i := range items {
@@ -201,7 +318,7 @@ func (a *App) workspacePlan(ctx context.Context) ([]workspaceItem, error) {
 			items[i].category, items[i].detail = classifyWorkspacePath(root, items[i].path, items[i].repository)
 		}
 	}
-	return items, nil
+	return items, rootPath, nil
 }
 
 func repositoryKey(name, providerType string) string {
@@ -380,7 +497,7 @@ func (a *App) syncClone(ctx context.Context, root *os.Root, item *workspaceItem)
 		return err
 	}
 	if transport == "https" {
-		if err := a.Git.ConfigureCredentialHelper(operationCtx, staging, cloneURL, "", item.alias, item.project); err != nil {
+		if err := a.Git.ConfigureCredentialHelper(operationCtx, staging, cloneURL, "", item.alias, item.project, item.namespace); err != nil {
 			return err
 		}
 	}

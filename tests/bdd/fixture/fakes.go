@@ -357,14 +357,14 @@ func (f *FakeGit) AddOrigin(ctx context.Context, dir, url string) error {
 	return nil
 }
 
-func (f *FakeGit) ConfigureCredentialHelper(ctx context.Context, dir, cloneURL, username, alias, project string) error {
+func (f *FakeGit) ConfigureCredentialHelper(ctx context.Context, dir, cloneURL, username, alias, project string, namespace ...string) error {
 	f.Operations = append(f.Operations, "helper")
 	if !gitnative.SafeIdentifier(alias) || !gitnative.SafeIdentifier(project) {
 		return fmt.Errorf("refusing unsafe provider or repository scope for Git credential helper")
 	}
 	helper := "!colt git-credential --provider " + alias + " --repository " + project
 	if f.Real {
-		if err := (gitnative.Native{}).ConfigureCredentialHelper(ctx, dir, cloneURL, username, alias, project); err != nil {
+		if err := (gitnative.Native{}).ConfigureCredentialHelper(ctx, dir, cloneURL, username, alias, project, namespace...); err != nil {
 			return err
 		}
 	} else {

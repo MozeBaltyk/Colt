@@ -172,6 +172,95 @@ func TestWORKSPACE_SYNC_001ContinuesAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestSyncNamespaceUsesFlatPathOverrideAndCanSave(t *testing.T) {
+	root := t.TempDir()
+	configured := workspaceProvider("github", "configured")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := config.Save(path, config.Config{Providers: map[string]config.Provider{"work": configured}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WORKSPACE_TOKEN", "secret")
+	client := &fakeClient{listRepos: []provider.Repository{
+		workspaceRepo("github.com", "other", "demo"),
+		workspaceRepo("github.com", "configured", "ignored"),
+	}}
+	runner := &selectiveGit{}
+	a := &App{ConfigPath: path, WorkDir: t.TempDir(), Git: runner, NewClient: func(config.Provider, string) (provider.Client, error) { return client, nil }}
+	output, err := execute(t, a, "sync", "other", "--provider", "work", "--path", root, "--save")
+	if err != nil || !strings.Contains(output, "to-clone demo") || strings.Contains(output, "ignored") {
+		t.Fatalf("sync=%q err=%v", output, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "demo", ".git", "config")); err != nil {
+		t.Fatalf("flat clone missing: %v", err)
+	}
+	if len(runner.helperNamespaces) != 1 || runner.helperNamespaces[0] != "other" {
+		t.Fatalf("credential helper namespaces = %v", runner.helperNamespaces)
+	}
+	cfg, err := config.Load(path)
+	if err != nil || cfg.Workspace == nil || cfg.Workspace.Path != root || len(cfg.Workspace.Repositories) != 1 || cfg.Workspace.Repositories[0].Namespace != "other" {
+		t.Fatalf("saved workspace = %#v, %v", cfg.Workspace, err)
+	}
+	if _, err := execute(t, a, "sync", "other", "--provider", "work", "--path", root, "--save"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = config.Load(path)
+	if err != nil || len(cfg.Workspace.Repositories) != 1 {
+		t.Fatalf("save duplicated selection: %#v, %v", cfg.Workspace, err)
+	}
+	a.WorkDir = t.TempDir()
+	status, err := execute(t, a, "status")
+	if err != nil || !strings.Contains(status, "present demo") {
+		t.Fatalf("saved status=%q err=%v", status, err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "demo")); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := execute(t, a, "sync"); err != nil || !strings.Contains(output, "cloned demo") {
+		t.Fatalf("saved sync=%q err=%v", output, err)
+	}
+}
+
+func TestSyncSaveRejectsFlatDestinationCollision(t *testing.T) {
+	root := t.TempDir()
+	p := workspaceProvider("github", "configured")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := config.Config{Providers: map[string]config.Provider{"work": p}, Workspace: &config.Workspace{
+		Path: root, Repositories: []config.RepositorySelection{{Provider: "work", Namespace: "one"}},
+	}}
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WORKSPACE_TOKEN", "secret")
+	client := &fakeClient{listRepos: []provider.Repository{
+		workspaceRepo("github.com", "one", "demo"),
+		workspaceRepo("github.com", "two", "demo"),
+	}}
+	a := testApp(configPath, t.TempDir(), &fakeGit{}, client)
+	if _, err := execute(t, a, "sync", "two", "--path", root, "--save"); err == nil || !strings.Contains(err.Error(), "duplicate repository identity or path") {
+		t.Fatalf("flat collision error = %v", err)
+	}
+	stored, err := config.Load(configPath)
+	if err != nil || len(stored.Workspace.Repositories) != 1 {
+		t.Fatalf("conflicting workspace was saved: %#v, %v", stored.Workspace, err)
+	}
+}
+
+func TestSyncSaveRejectsInvalidCombinationsAndLayoutConflicts(t *testing.T) {
+	p := workspaceProvider("github", "team")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	writeWorkspaceConfig(t, configPath, map[string]config.Provider{"work": p}, config.RepositorySelection{Provider: "work", Namespace: "team"})
+	a := testApp(configPath, t.TempDir(), &fakeGit{}, &fakeClient{})
+	if _, err := execute(t, a, "sync", "team", "--path", t.TempDir(), "--save"); err == nil || !strings.Contains(err.Error(), "refusing to change its layout") {
+		t.Fatalf("layout conflict error = %v", err)
+	}
+	if _, err := execute(t, a, "sync", "team", "--path", filepath.Join(t.TempDir(), "missing"), "--save"); err == nil {
+		t.Fatal("missing explicit path was accepted")
+	}
+	if _, err := execute(t, a, "sync", "team", "--path", t.TempDir(), "--save", "--dry-run"); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("save dry-run error = %v", err)
+	}
+}
+
 type mirrorTarget struct {
 	fakeClient
 	provider   config.Provider

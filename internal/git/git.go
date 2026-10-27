@@ -23,7 +23,7 @@ type Runner interface {
 	SetIdentity(context.Context, string, string, string) error
 	Commit(context.Context, string) (string, error)
 	AddOrigin(context.Context, string, string) error
-	ConfigureCredentialHelper(context.Context, string, string, string, string, string) error
+	ConfigureCredentialHelper(context.Context, string, string, string, string, string, ...string) error
 	Push(context.Context, string, string, string, string) error
 	PushTag(context.Context, string, string, string, string, string, []string) error
 	CreateTag(context.Context, string, string, string, string) error
@@ -98,7 +98,11 @@ func (n Native) Init(ctx context.Context, dir string) error {
 func (n Native) Clone(ctx context.Context, cloneURL, destination, username, alias, project string) error {
 	args := []string{"clone", "--", cloneURL, destination}
 	if strings.HasPrefix(cloneURL, "https://") {
-		helper, err := transientCredentialHelper(alias, project)
+		namespace, err := repositoryNamespace(cloneURL, project)
+		if err != nil {
+			return err
+		}
+		helper, err := transientCredentialHelper(alias, project, namespace)
 		if err != nil {
 			return err
 		}
@@ -243,8 +247,8 @@ func (n Native) AddOrigin(ctx context.Context, dir, cloneURL string) error {
 	return n.run(ctx, dir, nil, "remote", "add", "origin", cloneURL)
 }
 
-func (n Native) ConfigureCredentialHelper(ctx context.Context, dir, cloneURL, username, alias, project string) error {
-	helper, err := credentialHelper(alias, project)
+func (n Native) ConfigureCredentialHelper(ctx context.Context, dir, cloneURL, username, alias, project string, namespace ...string) error {
+	helper, err := credentialHelper(alias, project, namespace...)
 	if err != nil {
 		return err
 	}
@@ -314,15 +318,27 @@ func SafeIdentifier(value string) bool {
 	}) < 0
 }
 
-func credentialHelper(alias, project string) (string, error) {
+func credentialHelper(alias, project string, namespace ...string) (string, error) {
 	if !SafeIdentifier(alias) || !SafeIdentifier(project) {
 		return "", errors.New("refusing unsafe provider or repository scope for Git credential helper")
 	}
-	return "!colt git-credential --provider " + alias + " --repository " + project, nil
+	if len(namespace) > 1 {
+		return "", errors.New("refusing ambiguous namespace scope for Git credential helper")
+	}
+	helper := "!colt git-credential --provider " + alias + " --repository " + project
+	if len(namespace) == 1 && namespace[0] != "" {
+		for _, part := range strings.Split(namespace[0], "/") {
+			if !SafeIdentifier(part) || part == "." || part == ".." {
+				return "", errors.New("refusing unsafe namespace scope for Git credential helper")
+			}
+		}
+		helper += " --namespace " + namespace[0]
+	}
+	return helper, nil
 }
 
 func transientCredentialHelper(alias, project string, namespace ...string) (string, error) {
-	if _, err := credentialHelper(alias, project); err != nil {
+	if _, err := credentialHelper(alias, project, namespace...); err != nil {
 		return "", err
 	}
 	suffix := ""

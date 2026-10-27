@@ -97,7 +97,7 @@ func TestCloneUsesCredentialHelperWithoutReceivingASecret(t *testing.T) {
 	}
 	bin := t.TempDir()
 	script := filepath.Join(bin, "git")
-	helper, err := transientCredentialHelper("work", "demo")
+	helper, err := transientCredentialHelper("work", "demo", "team")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,6 +232,16 @@ func TestCORE_GIT_008CredentialHelperIsLocalAndPreservesExistingHelpers(t *testi
 	}
 	if _, err := os.Stat(filepath.Join(home, ".gitconfig")); !os.IsNotExist(err) {
 		t.Fatalf("global config changed: %v", err)
+	}
+}
+
+func TestCredentialHelperIncludesNamespaceOverride(t *testing.T) {
+	helper, err := credentialHelper("work", "demo", "other/group")
+	if err != nil || helper != "!colt git-credential --provider work --repository demo --namespace other/group" {
+		t.Fatalf("helper=%q err=%v", helper, err)
+	}
+	if _, err := credentialHelper("work", "demo", "../outside"); err == nil {
+		t.Fatal("unsafe namespace was accepted")
 	}
 }
 
